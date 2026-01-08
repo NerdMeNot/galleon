@@ -1,10 +1,10 @@
 # Galleon Project Rules for Cursor AI
 
 ## Project Context
-Galleon is a Go DataFrame library with a Zig SIMD backend connected via CGO.
+Galleon is a Go DataFrame library with a Zig SIMD backend connected via CGO. See `docs/00-philosophy.md` for design rationale.
 
 ## Key Files
-- `core/src/simd.zig` - SIMD operations (joins, aggregations, filtering)
+- `core/src/simd/` - SIMD operations (modular: aggregations, joins, filters, etc.)
 - `core/src/main.zig` - CGO exports (must match galleon.h)
 - `core/include/galleon.h` - C header for CGO
 - `go/galleon.go` - CGO wrappers
@@ -17,10 +17,11 @@ Galleon is a Go DataFrame library with a Zig SIMD backend connected via CGO.
 
 ## CGO Pattern
 When adding new Zig functions:
-1. Add to `simd.zig` or appropriate module
-2. Export in `main.zig` with C ABI
-3. Declare in `galleon.h`
-4. Wrap in `galleon.go`
+1. Add to appropriate `simd/*.zig` module (aggregations, filters, joins, etc.)
+2. Export from `simd/mod.zig` if needed
+3. Export in `main.zig` with C ABI
+4. Declare in `galleon.h`
+5. Wrap in `galleon.go`
 
 ## Code Style
 - Go: standard gofmt conventions

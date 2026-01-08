@@ -10,31 +10,50 @@ Galleon is a high-performance DataFrame library for Go with a Zig SIMD backend. 
 
 ```
 galleon/
-├── core/           # Zig SIMD backend (DO NOT modify without understanding CGO implications)
+├── core/                    # Zig SIMD backend (DO NOT modify without understanding CGO implications)
 │   ├── src/
-│   │   ├── simd.zig      # Core SIMD operations, joins, hash functions
-│   │   ├── groupby.zig   # GroupBy hash tables and aggregations
-│   │   ├── column.zig    # Generic column storage types
-│   │   └── main.zig      # CGO exports (C ABI functions)
+│   │   ├── main.zig         # CGO exports (C ABI functions)
+│   │   ├── simd.zig         # SIMD module entry point
+│   │   ├── simd/            # SIMD operations (modular)
+│   │   │   ├── mod.zig          # Module exports
+│   │   │   ├── core.zig         # Core types and constants
+│   │   │   ├── aggregations.zig # Sum, min, max, mean
+│   │   │   ├── arithmetic.zig   # Add, sub, mul, div
+│   │   │   ├── comparisons.zig  # Gt, lt, eq comparisons
+│   │   │   ├── filters.zig      # Filter operations
+│   │   │   ├── hashing.zig      # Hash functions
+│   │   │   ├── joins.zig        # Join algorithms
+│   │   │   ├── sorting.zig      # Sort operations
+│   │   │   ├── gather.zig       # Gather/scatter
+│   │   │   └── groupby_agg.zig  # GroupBy SIMD aggregations
+│   │   ├── groupby.zig      # GroupBy hash tables
+│   │   └── column.zig       # Generic column storage types
 │   ├── include/
-│   │   └── galleon.h     # C header file for CGO (must match main.zig exports)
-│   └── build.zig         # Zig build configuration
-├── go/             # Go package
-│   ├── galleon.go        # CGO bindings and low-level SIMD wrappers
-│   ├── series.go         # Series type (single column)
-│   ├── dataframe.go      # DataFrame type (collection of Series)
-│   ├── dtype.go          # Type system (DType enum)
-│   ├── groupby.go        # GroupBy implementation
-│   ├── join.go           # Join implementations
-│   ├── expr.go           # Expression system for lazy evaluation
-│   ├── lazyframe.go      # LazyFrame API
-│   ├── lazy_executor.go  # Plan execution
-│   ├── lazy_optimizer.go # Query optimization
-│   ├── parallel.go       # Morsel-based parallel execution
-│   ├── pool.go           # Memory pooling
-│   └── io_*.go           # I/O operations (CSV, JSON, Parquet)
-├── WHITEPAPER.md   # Detailed technical documentation
-└── README.md       # User-facing documentation
+│   │   └── galleon.h        # C header file for CGO (must match main.zig exports)
+│   └── build.zig            # Zig build configuration
+├── go/                      # Go package
+│   ├── galleon.go           # CGO bindings and low-level SIMD wrappers
+│   ├── series.go            # Series type (single column)
+│   ├── dataframe.go         # DataFrame type (collection of Series)
+│   ├── dtype.go             # Type system (DType enum)
+│   ├── groupby.go           # GroupBy implementation
+│   ├── join.go              # Join implementations
+│   ├── expr.go              # Expression system for lazy evaluation
+│   ├── lazyframe.go         # LazyFrame API
+│   ├── lazy_executor.go     # Plan execution
+│   ├── lazy_optimizer.go    # Query optimization
+│   ├── parallel.go          # Morsel-based parallel execution
+│   ├── pool.go              # Memory pooling
+│   ├── io_*.go              # I/O operations (CSV, JSON, Parquet)
+│   └── benchmarks/          # Performance tests
+├── docs/                    # Documentation
+│   ├── 00-philosophy.md
+│   ├── 01-getting-started/
+│   ├── 02-guides/
+│   ├── 03-api/
+│   └── 04-reference/
+├── WHITEPAPER.md            # Detailed technical documentation
+└── README.md                # User-facing documentation
 ```
 
 ## Key Concepts
@@ -67,28 +86,34 @@ galleon/
 
 ### Adding a New SIMD Operation
 
-1. Implement in `core/src/simd.zig`:
+1. Implement in the appropriate `core/src/simd/*.zig` module:
    ```zig
+   // e.g., in aggregations.zig for aggregation operations
    pub fn newOperation(data: []const f64) f64 {
        // SIMD implementation
    }
    ```
 
-2. Export in `core/src/main.zig`:
+2. Export from `core/src/simd/mod.zig` if needed:
+   ```zig
+   pub const newOperation = aggregations.newOperation;
+   ```
+
+3. Export with C ABI in `core/src/main.zig`:
    ```zig
    export fn galleon_new_operation(data: [*]const f64, len: usize) f64 {
        return simd.newOperation(data[0..len]);
    }
    ```
 
-3. Declare in `core/include/galleon.h`:
+4. Declare in `core/include/galleon.h`:
    ```c
    double galleon_new_operation(const double* data, size_t len);
    ```
 
-4. Build Zig: `cd core && zig build`
+5. Build Zig: `cd core && zig build`
 
-5. Wrap in `go/galleon.go`:
+6. Wrap in `go/galleon.go`:
    ```go
    func NewOperation(data []float64) float64 {
        return float64(C.galleon_new_operation(
@@ -137,12 +162,14 @@ cd go && go test -bench=. ./benchmarks/
 
 ## Important Files to Understand
 
-1. **core/src/simd.zig** - Core algorithms (joins, aggregations, hashing)
-2. **core/src/main.zig** - All CGO exports
-3. **core/include/galleon.h** - C interface (must match main.zig)
-4. **go/galleon.go** - CGO wrappers and low-level operations
-5. **go/join.go** - Join orchestration logic
-6. **go/groupby.go** - GroupBy orchestration logic
+1. **core/src/main.zig** - All CGO exports (C ABI entry points)
+2. **core/src/simd/mod.zig** - SIMD module exports
+3. **core/src/simd/joins.zig** - Join algorithms (inner, left, right)
+4. **core/src/simd/aggregations.zig** - SIMD aggregations (sum, min, max, mean)
+5. **core/include/galleon.h** - C interface (must match main.zig)
+6. **go/galleon.go** - CGO wrappers and low-level operations
+7. **go/join.go** - Join orchestration logic
+8. **go/groupby.go** - GroupBy orchestration logic
 
 ## Performance Considerations
 
@@ -168,6 +195,8 @@ Always verify after changes:
 
 ## Reference
 
+- [Philosophy](docs/00-philosophy.md) - Why Galleon exists and design decisions
 - [WHITEPAPER.md](WHITEPAPER.md) - Full technical documentation
+- [Full Documentation](docs/README.md) - Installation, guides, and API reference
 - [Zig Documentation](https://ziglang.org/documentation/)
 - [CGO Documentation](https://pkg.go.dev/cmd/cgo)
