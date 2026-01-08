@@ -1379,6 +1379,143 @@ func TestSeriesDescribe_Int64(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Get method error path tests
+// ============================================================================
+
+func TestSeries_GetInt64_WrongType(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{1.0, 2.0, 3.0})
+	_, ok := s.GetInt64(0)
+	if ok {
+		t.Error("GetInt64 on Float64 series should return false")
+	}
+}
+
+func TestSeries_GetInt64_OutOfBounds(t *testing.T) {
+	s := NewSeriesInt64("test", []int64{1, 2, 3})
+	_, ok := s.GetInt64(10)
+	if ok {
+		t.Error("GetInt64 out of bounds should return false")
+	}
+	_, ok = s.GetInt64(-1)
+	if ok {
+		t.Error("GetInt64 negative index should return false")
+	}
+}
+
+func TestSeries_GetString_WrongType(t *testing.T) {
+	s := NewSeriesInt64("test", []int64{1, 2, 3})
+	_, ok := s.GetString(0)
+	if ok {
+		t.Error("GetString on Int64 series should return false")
+	}
+}
+
+func TestSeries_GetString_OutOfBounds(t *testing.T) {
+	s := NewSeriesString("test", []string{"a", "b"})
+	_, ok := s.GetString(10)
+	if ok {
+		t.Error("GetString out of bounds should return false")
+	}
+	_, ok = s.GetString(-1)
+	if ok {
+		t.Error("GetString negative index should return false")
+	}
+}
+
+func TestSeries_GetFloat64_WrongType(t *testing.T) {
+	s := NewSeriesString("test", []string{"a", "b"})
+	_, ok := s.GetFloat64(0)
+	if ok {
+		t.Error("GetFloat64 on String series should return false")
+	}
+}
+
+func TestSeries_Min_Empty(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{})
+	if s.Min() != 0 {
+		t.Error("Min() on empty should return 0")
+	}
+}
+
+func TestSeries_Max_Empty(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{})
+	if s.Max() != 0 {
+		t.Error("Max() on empty should return 0")
+	}
+}
+
+func TestSeries_Mean_Empty(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{})
+	if s.Mean() != 0 {
+		t.Error("Mean() on empty should return 0")
+	}
+}
+
+func TestSeries_Gt_Empty(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{})
+	indices := s.Gt(5.0)
+	if indices != nil {
+		t.Error("Gt() on empty should return nil")
+	}
+}
+
+func TestSeries_Argsort_Empty(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{})
+	indices := s.Argsort(true)
+	if indices != nil {
+		t.Error("Argsort() on empty should return nil")
+	}
+}
+
+func TestSeries_Gt_UnsupportedType(t *testing.T) {
+	s := NewSeriesString("test", []string{"a", "b"})
+	indices := s.Gt(5.0)
+	if indices != nil {
+		t.Error("Gt() on String should return nil")
+	}
+}
+
+func TestSeries_Argsort_UnsupportedType(t *testing.T) {
+	s := NewSeriesString("test", []string{"a", "b"})
+	indices := s.Argsort(true)
+	if indices != nil {
+		t.Error("Argsort() on String should return nil")
+	}
+}
+
+func TestSeries_Min_UnsupportedType(t *testing.T) {
+	s := NewSeriesString("test", []string{"a", "b"})
+	result := s.Min()
+	if result != 0 {
+		t.Errorf("Min() on String should return 0, got %f", result)
+	}
+}
+
+func TestSeries_Max_UnsupportedType(t *testing.T) {
+	s := NewSeriesString("test", []string{"a", "b"})
+	result := s.Max()
+	if result != 0 {
+		t.Errorf("Max() on String should return 0, got %f", result)
+	}
+}
+
+func TestSeries_Mean_UnsupportedType(t *testing.T) {
+	s := NewSeriesString("test", []string{"a", "b"})
+	result := s.Mean()
+	if result != 0 {
+		t.Errorf("Mean() on String should return 0, got %f", result)
+	}
+}
+
+func TestSeries_CountTrue_WrongType(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{1.0, 2.0})
+	count := s.CountTrue()
+	if count != 0 {
+		t.Errorf("CountTrue() on Float64 should return 0, got %d", count)
+	}
+}
+
 // Helper function for substring check
 func containsSubstring(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstring(s, substr))

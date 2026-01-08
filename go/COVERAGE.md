@@ -4,7 +4,7 @@
 
 | Component | Current Coverage | Target | Status |
 |-----------|-----------------|--------|--------|
-| **Go** | 76.9% | >90% | 🟡 In progress |
+| **Go** | 79.5% | >90% | 🟡 In progress |
 | **Zig** | ~80% (142 tests, ~130/155 exports covered) | >90% | 🟡 In progress |
 
 ## Recent Improvements
@@ -17,7 +17,7 @@
 - Added arithmetic tests for all type variants
 - Added SwissJoinTable tests
 
-### Go Coverage (improved from 54.8% to 76.9%)
+### Go Coverage (improved from 54.8% to 79.5%)
 - Extended series_test.go with all type variants (Float32, Int32, Bool, String)
 - Added comprehensive groupby_test.go for edge cases and all data types
 - Added join_test.go for Float32/Int32/Bool keys and error paths
@@ -34,6 +34,11 @@
 - Added lazy_executor_test.go tests for executeJoin (RightJoin, OuterJoin, UnsupportedType)
 - Added io_test.go tests for appendNullValue (all 6 types)
 - Fixed duplicate CGO LDFLAGS causing linker warnings
+- Added empty slice tests for I64, I32, F32, Bool types
+- Added vector operations empty/short array tests
+- Added groupby aggregation empty slice tests
+- Added series.go Get method error path tests (wrong type, out of bounds)
+- Added series.go aggregation unsupported type tests (Min, Max, Mean on String)
 
 ## Go Coverage by File
 
