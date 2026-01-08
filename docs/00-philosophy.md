@@ -10,6 +10,83 @@ Go, with its static typing, excellent concurrency model, and single-binary deplo
 
 Galleon aims to change that.
 
+## Why Not Python
+
+Let's be direct: **Python is not a production-grade language**.
+
+This is a controversial statement in 2024, but it's one born from experience deploying and maintaining systems at scale. Python excels at prototyping, exploration, and scripting. It has an unmatched ecosystem for data science and machine learning. But these strengths don't translate to production reliability.
+
+### The Type Safety Problem
+
+Python's dynamic typing is often sold as a feature—"duck typing," "flexibility," "rapid iteration." In practice, it means:
+
+- **Bugs hide until runtime.** A typo in a variable name, a wrong argument order, a None where you expected a list—these errors don't surface until that code path executes. In production. At 3 AM.
+
+- **Refactoring is terrifying.** Renaming a function? Changing a parameter? Good luck knowing what breaks. Your IDE can guess, your linters can try, but without types, nothing is certain.
+
+- **Documentation lies.** Docstrings say one thing, code does another. Type hints help, but they're optional, unenforced, and frequently out of date.
+
+- **Testing becomes mandatory for things the compiler should catch.** You write tests to verify that functions receive the right types—tests that wouldn't exist in a statically typed language because the compiler already guarantees it.
+
+Go catches an entire category of bugs at compile time. Not "maybe catches with the right linter configuration"—*catches, always, before the code can run*.
+
+### The GIL Problem
+
+Python's Global Interpreter Lock is an embarrassment that the language has carried for over 30 years. In an era of 64-core machines, Python cannot execute two lines of Python code simultaneously within the same process.
+
+Yes, you can use multiprocessing. Yes, you can use async/await. Yes, you can call into C extensions that release the GIL. But these are workarounds for a fundamental limitation, each with their own complexity:
+
+- **Multiprocessing** means serialization overhead, memory duplication, and IPC complexity
+- **Async/await** only helps with I/O-bound work, not CPU-bound computation
+- **C extensions** mean you're not really writing Python anymore
+
+Go was designed for concurrency. Goroutines and channels are first-class citizens. Spinning up thousands of concurrent operations is trivial and efficient. There's no GIL, no workarounds, no asterisks.
+
+### The Performance Problem
+
+Python is slow. Not "a bit slower"—**50-100x slower** than compiled languages for CPU-bound work. The standard response is "just call into NumPy/pandas," but this only helps when your workload maps cleanly onto their operations. The moment you need custom logic, a loop, or anything that can't be vectorized, you're back to Python speed.
+
+More importantly, Python's performance is *unpredictable*. Memory allocation can trigger garbage collection at any time. String concatenation has pathological cases. The same code can be fast or slow depending on object sizes, reference counts, and the phase of the moon.
+
+Galleon, running on Zig's deterministic memory management and Go's efficient runtime, provides consistent, predictable performance. When you benchmark it, that's the performance you get in production.
+
+### The Deployment Problem
+
+Deploying Python is an exercise in dependency hell:
+
+- Virtual environments that mysteriously break
+- Package versions that conflict
+- System Python vs. user Python vs. pyenv Python
+- Native extensions that need specific compilers
+- Docker images that balloon to gigabytes
+
+Go produces a single static binary. Copy it to the server. Run it. There's no runtime to install, no dependencies to manage, no virtualenv to activate. It just works.
+
+### The Hidden Infrastructure Tax
+
+Python's limitations have spawned an entire ecosystem of workarounds:
+
+- **Cython** to make Python fast (by not writing Python)
+- **mypy/pyright** to add type checking (that the language should have)
+- **Celery/RQ** to work around the GIL for background tasks
+- **Dask/Ray** to scale beyond a single process
+- **Poetry/pip-tools/conda** to manage the dependency nightmare
+
+Each tool adds complexity. Each requires expertise to configure correctly. Each is another thing that can break.
+
+Go needs none of this. The language, the toolchain, and the standard library provide what you need out of the box.
+
+### Python's Place
+
+None of this means Python is useless. For:
+
+- **Jupyter notebooks and exploration** — Python is excellent
+- **ML model training** — The ecosystem is unmatched
+- **Quick scripts and automation** — It's productive and readable
+- **Prototyping** — Moving fast matters
+
+But for production services that process data, serve requests, and need to be reliable at scale? Go is the better choice. And now, with Galleon, Go can handle the data science workloads too.
+
 ## Design Philosophy
 
 ### The Right Tool for Each Layer
