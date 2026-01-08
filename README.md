@@ -95,7 +95,9 @@ fmt.Printf("Using %d threads (auto=%v)\n", config.MaxThreads, config.AutoDetecte
 
 ## Documentation
 
+- [Philosophy](docs/00-philosophy.md) - Why Galleon exists and design decisions
 - [Technical Whitepaper](WHITEPAPER.md) - Detailed architecture and implementation
+- [Full Documentation](docs/README.md) - Installation, guides, and API reference
 - [API Reference](https://pkg.go.dev/github.com/NerdMeNot/galleon/go) - Go package documentation
 - [Contributing](CONTRIBUTING.md) - How to contribute
 
@@ -103,26 +105,38 @@ fmt.Printf("Using %d threads (auto=%v)\n", config.MaxThreads, config.AutoDetecte
 
 ```
 galleon/
-├── core/           # Zig SIMD backend
-│   ├── src/        # Zig source files
-│   │   ├── simd.zig      # SIMD operations
-│   │   ├── groupby.zig   # GroupBy hash tables
-│   │   ├── column.zig    # Column storage
-│   │   └── main.zig      # CGO exports
-│   ├── include/    # C headers for CGO
-│   └── build.zig   # Zig build configuration
-├── go/             # Go package
-│   ├── galleon.go  # CGO bindings
-│   ├── series.go   # Series type
-│   ├── dataframe.go # DataFrame type
-│   ├── join.go     # Join operations
-│   ├── groupby.go  # GroupBy operations
-│   ├── lazyframe.go # Lazy evaluation
-│   └── benchmarks/ # Performance tests
-├── README.md
+├── core/                    # Zig SIMD backend
+│   ├── src/
+│   │   ├── main.zig         # CGO exports
+│   │   ├── simd.zig         # SIMD module entry
+│   │   ├── simd/            # SIMD operations (modular)
+│   │   │   ├── aggregations.zig
+│   │   │   ├── arithmetic.zig
+│   │   │   ├── comparisons.zig
+│   │   │   ├── filters.zig
+│   │   │   ├── joins.zig
+│   │   │   └── ...
+│   │   ├── groupby.zig      # GroupBy hash tables
+│   │   └── column.zig       # Column storage
+│   ├── include/             # C headers for CGO
+│   └── build.zig
+├── go/                      # Go package
+│   ├── galleon.go           # CGO bindings
+│   ├── series.go            # Series type
+│   ├── dataframe.go         # DataFrame type
+│   ├── lazyframe.go         # Lazy evaluation
+│   ├── join.go              # Join operations
+│   ├── groupby.go           # GroupBy operations
+│   ├── io_*.go              # I/O (CSV, JSON, Parquet)
+│   └── benchmarks/          # Performance tests
+├── docs/                    # Documentation
+│   ├── 00-philosophy.md
+│   ├── 01-getting-started/
+│   ├── 02-guides/
+│   ├── 03-api/
+│   └── 04-reference/
 ├── WHITEPAPER.md
-├── LICENSE
-└── CONTRIBUTING.md
+└── justfile                 # Build commands
 ```
 
 ## Supported Operations
