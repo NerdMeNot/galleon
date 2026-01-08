@@ -47,7 +47,11 @@ func main() {
 	fmt.Println("-" + string(make([]byte, 40)))
 
 	grouped := df.GroupBy("region")
-	sumResult := grouped.Sum("sales")
+	sumResult, err := grouped.Sum("sales")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 	printDataFrame(sumResult)
 
 	// =========================================================================
@@ -56,7 +60,11 @@ func main() {
 	fmt.Println("\n2. GroupBy Region - Count")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	countResult := grouped.Count()
+	countResult, err := grouped.Count()
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 	printDataFrame(countResult)
 
 	// =========================================================================
@@ -65,7 +73,11 @@ func main() {
 	fmt.Println("\n3. GroupBy Region - Mean Sales")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	meanResult := grouped.Mean("sales")
+	meanResult, err := grouped.Mean("sales")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 	printDataFrame(meanResult)
 
 	// =========================================================================
@@ -74,11 +86,19 @@ func main() {
 	fmt.Println("\n4. GroupBy Region - Min and Max Sales")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	minResult := grouped.Min("sales")
+	minResult, err := grouped.Min("sales")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 	fmt.Println("Minimum:")
 	printDataFrame(minResult)
 
-	maxResult := grouped.Max("sales")
+	maxResult, err := grouped.Max("sales")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 	fmt.Println("\nMaximum:")
 	printDataFrame(maxResult)
 
@@ -88,11 +108,15 @@ func main() {
 	fmt.Println("\n5. Multiple Aggregations")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	multiAgg := df.GroupBy("region").Agg(
-		galleon.Col("sales").Sum().Alias("total_sales"),
-		galleon.Col("sales").Mean().Alias("avg_sales"),
-		galleon.Col("quantity").Sum().Alias("total_qty"),
+	multiAgg, err := df.GroupBy("region").Agg(
+		galleon.AggSum("sales").Alias("total_sales"),
+		galleon.AggMean("sales").Alias("avg_sales"),
+		galleon.AggSum("quantity").Alias("total_qty"),
 	)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 	printDataFrame(multiAgg)
 
 	// =========================================================================
@@ -101,21 +125,37 @@ func main() {
 	fmt.Println("\n6. GroupBy Multiple Keys (region, product)")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	multiKey := df.GroupBy("region", "product").Sum("sales")
+	multiKey, err := df.GroupBy("region", "product").Sum("sales")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 	printDataFrame(multiKey)
 
 	// =========================================================================
 	// Chained Operations
 	// =========================================================================
-	fmt.Println("\n7. Chained: Filter + GroupBy + Sort")
+	fmt.Println("\n7. Filter + GroupBy")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	// Get total sales by region for sales > 150, sorted by total
-	result := df.
-		Filter(galleon.Col("sales").Gt(galleon.Lit(150.0))).
-		GroupBy("region").
-		Agg(galleon.Col("sales").Sum().Alias("total_sales")).
-		Sort("total_sales", false)
+	// Filter sales > 150, then group by region
+	sales := df.ColumnByName("sales").Float64()
+	mask := galleon.FilterMaskGreaterThanF64(sales, 150.0)
+	byteMask := make([]byte, len(mask))
+	for i, m := range mask {
+		if m {
+			byteMask[i] = 1
+		}
+	}
+
+	filtered, _ := df.FilterByMask(byteMask)
+	result, err := filtered.GroupBy("region").Agg(
+		galleon.AggSum("sales").Alias("total_sales"),
+	)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 
 	fmt.Println("Total sales by region (where sales > 150):")
 	printDataFrame(result)
@@ -130,7 +170,7 @@ func printDataFrame(df *galleon.DataFrame) {
 	}
 
 	// Print header
-	cols := df.ColumnNames()
+	cols := df.Columns()
 	fmt.Print("  ")
 	for _, name := range cols {
 		fmt.Printf("%-15s", name)
@@ -148,7 +188,7 @@ func printDataFrame(df *galleon.DataFrame) {
 	for i := 0; i < df.Height(); i++ {
 		fmt.Print("  ")
 		for _, name := range cols {
-			col := df.Column(name)
+			col := df.ColumnByName(name)
 			switch col.DType() {
 			case galleon.Int64:
 				fmt.Printf("%-15d", col.Int64()[i])

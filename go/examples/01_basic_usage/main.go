@@ -49,7 +49,7 @@ func main() {
 	}
 
 	fmt.Printf("DataFrame shape: %d rows × %d columns\n", df.Height(), df.Width())
-	fmt.Printf("Column names: %v\n", df.ColumnNames())
+	fmt.Printf("Column names: %v\n", df.Columns())
 
 	// =========================================================================
 	// Basic Aggregations
@@ -57,7 +57,7 @@ func main() {
 	fmt.Println("\n3. Basic Aggregations")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	valueCol := df.Column("value")
+	valueCol := df.ColumnByName("value")
 	fmt.Printf("Sum:   %.2f\n", valueCol.Sum())
 	fmt.Printf("Min:   %.2f\n", valueCol.Min())
 	fmt.Printf("Max:   %.2f\n", valueCol.Max())
@@ -91,9 +91,9 @@ func main() {
 
 	fmt.Println("Row-by-row access:")
 	for i := 0; i < df.Height(); i++ {
-		id := df.Column("id").Int64()[i]
-		val := df.Column("value").Float64()[i]
-		name := df.Column("name").Strings()[i]
+		id := df.ColumnByName("id").Int64()[i]
+		val := df.ColumnByName("value").Float64()[i]
+		name := df.ColumnByName("name").Strings()[i]
 		fmt.Printf("  Row %d: id=%d, value=%.1f, name=%s\n", i, id, val, name)
 	}
 
@@ -103,8 +103,8 @@ func main() {
 	fmt.Println("\n6. Type Information")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	for _, name := range df.ColumnNames() {
-		col := df.Column(name)
+	for _, name := range df.Columns() {
+		col := df.ColumnByName(name)
 		fmt.Printf("Column '%s': dtype=%v, len=%d\n", name, col.DType(), col.Len())
 	}
 

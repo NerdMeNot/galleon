@@ -96,8 +96,7 @@ func main() {
 	printDataFrame(orderItems)
 
 	joinedItems, err := orderItems.Join(products,
-		galleon.LeftOn("product_id"),
-		galleon.RightOn("prod_id"),
+		galleon.LeftOn("product_id").RightOn("prod_id"),
 	)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -156,13 +155,14 @@ func main() {
 
 	// Join orders with customers, then aggregate by city
 	pipeline, _ := orders.Join(customers, galleon.On("customer_id"))
-	aggregated := pipeline.
-		GroupBy("city").
-		Agg(
-			galleon.Col("amount").Sum().Alias("total_amount"),
-			galleon.Col("order_id").Count().Alias("order_count"),
-		).
-		Sort("total_amount", false)
+	aggregated, err := pipeline.GroupBy("city").Agg(
+		galleon.AggSum("amount").Alias("total_amount"),
+		galleon.AggCount().Alias("order_count"),
+	)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 
 	fmt.Println("Total sales by city:")
 	printDataFrame(aggregated)
@@ -177,7 +177,7 @@ func printDataFrame(df *galleon.DataFrame) {
 	}
 
 	// Print header
-	cols := df.ColumnNames()
+	cols := df.Columns()
 	fmt.Print("  ")
 	for _, name := range cols {
 		fmt.Printf("%-15s", name)
@@ -202,7 +202,7 @@ func printDataFrame(df *galleon.DataFrame) {
 	for i := 0; i < rows; i++ {
 		fmt.Print("  ")
 		for _, name := range cols {
-			col := df.Column(name)
+			col := df.ColumnByName(name)
 			switch col.DType() {
 			case galleon.Int64:
 				fmt.Printf("%-15d", col.Int64()[i])

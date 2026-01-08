@@ -81,13 +81,12 @@ func main() {
 	fmt.Println("-" + string(make([]byte, 40)))
 
 	groupedQuery := df.Lazy().
-		GroupBy(galleon.Col("category")).
+		GroupBy("category").
 		Agg(
 			galleon.Col("price").Sum().Alias("total_revenue"),
 			galleon.Col("price").Mean().Alias("avg_price"),
 			galleon.Col("quantity").Sum().Alias("total_qty"),
-		).
-		Sort(galleon.Col("total_revenue"), false)
+		)
 
 	fmt.Println("Built GroupBy query (deferred)")
 
@@ -101,68 +100,46 @@ func main() {
 	printDataFrame(groupedResult)
 
 	// =========================================================================
-	// Complex Query Pipeline
+	// Lazy Sort and Limit
 	// =========================================================================
-	fmt.Println("\n4. Complex Query Pipeline")
+	fmt.Println("\n4. Lazy Sort and Limit")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	// Build a complex query step by step
-	complexQuery := df.Lazy().
-		// Step 1: Filter high-value items
-		Filter(galleon.Col("price").Gt(galleon.Lit(30.0))).
-		// Step 2: Add computed column
-		WithColumn(
-			"total_value",
-			galleon.Col("price").Mul(galleon.Col("quantity")),
-		).
-		// Step 3: Select relevant columns
-		Select(
-			galleon.Col("id"),
-			galleon.Col("category"),
-			galleon.Col("price"),
-			galleon.Col("quantity"),
-			galleon.Col("total_value"),
-		).
-		// Step 4: Sort by total value
-		Sort(galleon.Col("total_value"), false).
-		// Step 5: Limit to top 10
-		Limit(10)
+	// Sort by price descending and take top 10
+	sortQuery := df.Lazy().
+		Sort("price", false).
+		Head(10)
 
-	fmt.Println("Query plan: Filter → WithColumn → Select → Sort → Limit")
+	fmt.Println("Built Sort + Head query (deferred)")
 
-	topItems, err := complexQuery.Collect()
+	sortResult, err := sortQuery.Collect()
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 
-	fmt.Println("\nTop 10 items by total value:")
-	printDataFrame(topItems)
+	fmt.Println("Top 10 by price:")
+	printDataFrame(sortResult)
 
 	// =========================================================================
-	// Multiple Aggregations per Group
+	// Filter + Sort Pipeline
 	// =========================================================================
-	fmt.Println("\n5. Statistical Summary by Category")
+	fmt.Println("\n5. Filter + Sort Pipeline")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	statsQuery := df.Lazy().
-		GroupBy(galleon.Col("category")).
-		Agg(
-			galleon.Col("price").Count().Alias("count"),
-			galleon.Col("price").Sum().Alias("sum"),
-			galleon.Col("price").Mean().Alias("mean"),
-			galleon.Col("price").Min().Alias("min"),
-			galleon.Col("price").Max().Alias("max"),
-		)
+	pipelineQuery := df.Lazy().
+		Filter(galleon.Col("price").Gt(galleon.Lit(80.0))).
+		Sort("quantity", false).
+		Head(5)
 
-	stats, err := statsQuery.Collect()
+	pipelineResult, err := pipelineQuery.Collect()
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 
-	fmt.Println("Price statistics by category:")
-	printDataFrame(stats)
+	fmt.Println("Top 5 by quantity (where price > 80):")
+	printDataFrame(pipelineResult)
 
 	// =========================================================================
 	// Expression Building
@@ -172,13 +149,11 @@ func main() {
 
 	// Build expressions programmatically
 	priceCol := galleon.Col("price")
-	qtyCol := galleon.Col("quantity")
 
 	// Various expression types
 	fmt.Println("Expression examples:")
 	fmt.Println("  - Column reference: Col(\"price\")")
 	fmt.Println("  - Literal: Lit(100.0)")
-	fmt.Println("  - Binary: Col(\"price\").Mul(Col(\"quantity\"))")
 	fmt.Println("  - Comparison: Col(\"price\").Gt(Lit(50.0))")
 	fmt.Println("  - Aggregation: Col(\"price\").Sum()")
 	fmt.Println("  - Alias: Col(\"price\").Sum().Alias(\"total\")")
@@ -186,14 +161,13 @@ func main() {
 	// Use expressions in query
 	exprQuery := df.Lazy().
 		Filter(priceCol.Gt(galleon.Lit(40.0))).
-		WithColumn("revenue", priceCol.Mul(qtyCol)).
-		GroupBy(galleon.Col("category")).
+		GroupBy("category").
 		Agg(
-			galleon.Col("revenue").Sum().Alias("total_revenue"),
+			galleon.Col("price").Sum().Alias("total_price"),
 		)
 
 	exprResult, _ := exprQuery.Collect()
-	fmt.Println("\nRevenue by category (price > 40):")
+	fmt.Println("\nTotal price by category (price > 40):")
 	printDataFrame(exprResult)
 
 	fmt.Println("\n=== Example Complete ===")
@@ -206,7 +180,7 @@ func printDataFrame(df *galleon.DataFrame) {
 	}
 
 	// Print header
-	cols := df.ColumnNames()
+	cols := df.Columns()
 	fmt.Print("  ")
 	for _, name := range cols {
 		fmt.Printf("%-16s", name)
@@ -231,7 +205,7 @@ func printDataFrame(df *galleon.DataFrame) {
 	for i := 0; i < rows; i++ {
 		fmt.Print("  ")
 		for _, name := range cols {
-			col := df.Column(name)
+			col := df.ColumnByName(name)
 			switch col.DType() {
 			case galleon.Int64:
 				fmt.Printf("%-16d", col.Int64()[i])

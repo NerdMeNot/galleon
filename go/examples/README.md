@@ -4,11 +4,16 @@ This directory contains example programs demonstrating various features of Galle
 
 ## Running Examples
 
-Each example is a standalone Go program. To run an example:
+Each example is a standalone Go program. From the `go` directory, run:
 
 ```bash
-cd examples/01_basic_usage
-go run main.go
+go run ./examples/01_basic_usage/main.go
+```
+
+Or run all examples:
+
+```bash
+for ex in examples/*/main.go; do echo "=== $ex ===" && go run $ex; done
 ```
 
 ## Examples Overview
@@ -25,7 +30,7 @@ Fundamental operations:
 
 Data manipulation:
 - Filtering with boolean masks
-- Expression-based filtering
+- Filtering by indices
 - Sorting DataFrames
 - Selecting and dropping columns
 - Head/Tail operations
@@ -60,9 +65,8 @@ Lazy evaluation:
 I/O operations:
 - CSV read/write
 - JSON read/write
-- JSONL format
+- Parquet read/write
 - Type specification
-- Handling missing values
 - Lazy scanning
 
 ## Quick Reference
@@ -80,19 +84,30 @@ df, _ := galleon.NewDataFrame(
 ### Filtering
 
 ```go
-// Expression-based
-filtered := df.Filter(galleon.Col("value").Gt(galleon.Lit(2.0)))
-
-// Mask-based
+// Mask-based filtering
+values := df.ColumnByName("value").Float64()
 mask := galleon.FilterMaskGreaterThanF64(values, 2.0)
+byteMask := make([]byte, len(mask))
+for i, m := range mask {
+    if m { byteMask[i] = 1 }
+}
+filtered, _ := df.FilterByMask(byteMask)
+
+// Index-based filtering
+indices := galleon.FilterGreaterThanF64(values, 2.0)
+filtered, _ := df.FilterByIndices(indices)
 ```
 
 ### GroupBy
 
 ```go
-result := df.GroupBy("category").Agg(
-    galleon.Col("value").Sum().Alias("total"),
-    galleon.Col("value").Mean().Alias("average"),
+// Single aggregation
+result, _ := df.GroupBy("category").Sum("value")
+
+// Multiple aggregations
+result, _ := df.GroupBy("category").Agg(
+    galleon.AggSum("value").Alias("total"),
+    galleon.AggMean("value").Alias("average"),
 )
 ```
 
@@ -104,8 +119,7 @@ result, _ := left.Join(right, galleon.On("id"))
 
 // Different column names
 result, _ := left.Join(right,
-    galleon.LeftOn("order_id"),
-    galleon.RightOn("id"),
+    galleon.LeftOn("order_id").RightOn("id"),
 )
 ```
 
@@ -113,9 +127,9 @@ result, _ := left.Join(right,
 
 ```go
 result, _ := df.Lazy().
-    Filter(galleon.Col("value").Gt(galleon.Lit(100))).
-    GroupBy(galleon.Col("category")).
-    Agg(galleon.Col("value").Sum()).
+    Filter(galleon.Col("value").Gt(galleon.Lit(100.0))).
+    GroupBy("category").
+    Agg(galleon.Col("value").Sum().Alias("total")).
     Collect()
 ```
 
@@ -123,16 +137,20 @@ result, _ := df.Lazy().
 
 ```go
 // CSV
-df, _ := galleon.ReadCSV("data.csv", galleon.DefaultCSVReadOptions())
+df, _ := galleon.ReadCSV("data.csv")
 df.WriteCSV("output.csv")
 
 // JSON
 df, _ := galleon.ReadJSON("data.json")
 df.WriteJSON("output.json")
 
+// Parquet
+df, _ := galleon.ReadParquet("data.parquet")
+df.WriteParquet("output.parquet")
+
 // Lazy scan
 result, _ := galleon.ScanCSV("large.csv").
-    Filter(galleon.Col("x").Gt(galleon.Lit(0))).
+    Filter(galleon.Col("x").Gt(galleon.Lit(0.0))).
     Collect()
 ```
 

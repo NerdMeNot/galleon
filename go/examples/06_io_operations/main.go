@@ -3,7 +3,7 @@
 // This example demonstrates:
 // - Reading and writing CSV files
 // - Reading and writing JSON files
-// - Reading Parquet files
+// - Reading and writing Parquet files
 // - I/O options and customization
 //
 // Run: go run main.go
@@ -63,8 +63,8 @@ func main() {
 	fmt.Println("\nCSV file contents:")
 	fmt.Println(string(content))
 
-	// Read CSV with default options
-	readDf, err := galleon.ReadCSV(csvPath, galleon.DefaultCSVReadOptions())
+	// Read CSV
+	readDf, err := galleon.ReadCSV(csvPath)
 	if err != nil {
 		fmt.Printf("Error reading CSV: %v\n", err)
 		return
@@ -82,7 +82,7 @@ func main() {
 	csvPath2 := filepath.Join(tmpDir, "data_semicolon.csv")
 	writeOpts := galleon.DefaultCSVWriteOptions()
 	writeOpts.Delimiter = ';'
-	err = df.WriteCSVWithOptions(csvPath2, writeOpts)
+	err = df.WriteCSV(csvPath2, writeOpts)
 	if err != nil {
 		fmt.Printf("Error writing CSV: %v\n", err)
 		return
@@ -134,28 +134,68 @@ func main() {
 	printDataFrame(jsonDf)
 
 	// =========================================================================
-	// JSON Lines (JSONL) Format
+	// Parquet Operations
 	// =========================================================================
-	fmt.Println("\n4. JSON Lines (JSONL) Format")
+	fmt.Println("\n4. Parquet Operations")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	jsonlPath := filepath.Join(tmpDir, "data.jsonl")
+	parquetPath := filepath.Join(tmpDir, "data.parquet")
 
-	// Write JSONL (one JSON object per line)
-	err = df.WriteJSONL(jsonlPath)
+	// Write Parquet
+	err = df.WriteParquet(parquetPath)
 	if err != nil {
-		fmt.Printf("Error writing JSONL: %v\n", err)
+		fmt.Printf("Error writing Parquet: %v\n", err)
+		return
+	}
+	fmt.Printf("Wrote Parquet to: %s\n", parquetPath)
+
+	// Get file size
+	fi, _ := os.Stat(parquetPath)
+	fmt.Printf("Parquet file size: %d bytes\n", fi.Size())
+
+	// Read Parquet
+	parquetDf, err := galleon.ReadParquet(parquetPath)
+	if err != nil {
+		fmt.Printf("Error reading Parquet: %v\n", err)
+		return
+	}
+	fmt.Println("\nRead Parquet back:")
+	printDataFrame(parquetDf)
+
+	// =========================================================================
+	// Lazy I/O (Scan)
+	// =========================================================================
+	fmt.Println("\n5. Lazy I/O (ScanCSV)")
+	fmt.Println("-" + string(make([]byte, 40)))
+
+	// Create a larger CSV for demonstration
+	largeCSV := filepath.Join(tmpDir, "large.csv")
+	largeContent := "id,category,value\n"
+	categories := []string{"A", "B", "C"}
+	for i := 1; i <= 100; i++ {
+		largeContent += fmt.Sprintf("%d,%s,%.2f\n", i, categories[i%3], float64(i)*1.5)
+	}
+	os.WriteFile(largeCSV, []byte(largeContent), 0644)
+
+	// Scan CSV lazily - filter and aggregate without loading all data
+	lazyResult, err := galleon.ScanCSV(largeCSV).
+		Filter(galleon.Col("value").Gt(galleon.Lit(50.0))).
+		GroupBy("category").
+		Agg(galleon.Col("value").Sum().Alias("total")).
+		Collect()
+
+	if err != nil {
+		fmt.Printf("Error in lazy scan: %v\n", err)
 		return
 	}
 
-	jsonlContent, _ := os.ReadFile(jsonlPath)
-	fmt.Println("JSONL file contents:")
-	fmt.Println(string(jsonlContent))
+	fmt.Println("Lazy scan result (filter value > 50, group by category):")
+	printDataFrame(lazyResult)
 
 	// =========================================================================
 	// Type Specification in CSV
 	// =========================================================================
-	fmt.Println("\n5. Type Specification in CSV")
+	fmt.Println("\n6. Type Specification in CSV")
 	fmt.Println("-" + string(make([]byte, 40)))
 
 	// Create CSV with mixed types that might be ambiguous
@@ -185,66 +225,10 @@ func main() {
 
 	// Show column types
 	fmt.Println("\nColumn types:")
-	for _, name := range typedDf.ColumnNames() {
-		col := typedDf.Column(name)
+	for _, name := range typedDf.Columns() {
+		col := typedDf.ColumnByName(name)
 		fmt.Printf("  %s: %v\n", name, col.DType())
 	}
-
-	// =========================================================================
-	// Handling Missing Values
-	// =========================================================================
-	fmt.Println("\n6. Handling Missing Values")
-	fmt.Println("-" + string(make([]byte, 40)))
-
-	missingCSV := filepath.Join(tmpDir, "missing.csv")
-	missingContent := `id,name,value
-1,Alice,100.5
-2,,200.3
-3,Charlie,
-4,David,400.1`
-	os.WriteFile(missingCSV, []byte(missingContent), 0644)
-
-	missingOpts := galleon.DefaultCSVReadOptions()
-	missingOpts.NullValues = []string{"", "NA", "null"}
-
-	missingDf, err := galleon.ReadCSV(missingCSV, missingOpts)
-	if err != nil {
-		fmt.Printf("Error reading CSV with missing values: %v\n", err)
-		return
-	}
-
-	fmt.Println("CSV with missing values:")
-	printDataFrame(missingDf)
-
-	// =========================================================================
-	// Lazy I/O (Scan)
-	// =========================================================================
-	fmt.Println("\n7. Lazy I/O (Scan)")
-	fmt.Println("-" + string(make([]byte, 40)))
-
-	// Create a larger CSV for demonstration
-	largeCSV := filepath.Join(tmpDir, "large.csv")
-	largeContent := "id,category,value\n"
-	categories := []string{"A", "B", "C"}
-	for i := 1; i <= 100; i++ {
-		largeContent += fmt.Sprintf("%d,%s,%.2f\n", i, categories[i%3], float64(i)*1.5)
-	}
-	os.WriteFile(largeCSV, []byte(largeContent), 0644)
-
-	// Scan CSV lazily - filter and aggregate without loading all data
-	lazyResult, err := galleon.ScanCSV(largeCSV).
-		Filter(galleon.Col("value").Gt(galleon.Lit(50.0))).
-		GroupBy(galleon.Col("category")).
-		Agg(galleon.Col("value").Sum().Alias("total")).
-		Collect()
-
-	if err != nil {
-		fmt.Printf("Error in lazy scan: %v\n", err)
-		return
-	}
-
-	fmt.Println("Lazy scan result (filter value > 50, group by category):")
-	printDataFrame(lazyResult)
 
 	fmt.Println("\n=== Example Complete ===")
 }
@@ -256,7 +240,7 @@ func printDataFrame(df *galleon.DataFrame) {
 	}
 
 	// Print header
-	cols := df.ColumnNames()
+	cols := df.Columns()
 	fmt.Print("  ")
 	for _, name := range cols {
 		fmt.Printf("%-15s", name)
@@ -280,7 +264,7 @@ func printDataFrame(df *galleon.DataFrame) {
 	for i := 0; i < rows; i++ {
 		fmt.Print("  ")
 		for _, name := range cols {
-			col := df.Column(name)
+			col := df.ColumnByName(name)
 			switch col.DType() {
 			case galleon.Int64:
 				fmt.Printf("%-15d", col.Int64()[i])

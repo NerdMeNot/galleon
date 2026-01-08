@@ -35,7 +35,7 @@ func main() {
 	fmt.Println("-" + string(make([]byte, 40)))
 
 	// Get values > 10
-	values := df.Column("value").Float64()
+	values := df.ColumnByName("value").Float64()
 	mask := galleon.FilterMaskGreaterThanF64(values, 10.0)
 
 	// Count matching
@@ -65,13 +65,16 @@ func main() {
 	printDataFrame(filtered)
 
 	// =========================================================================
-	// Using Expression-based Filter
+	// Filtering by Indices
 	// =========================================================================
-	fmt.Println("\n2. Expression-based Filter")
+	fmt.Println("\n2. Filtering by Indices")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	// Filter using expression syntax
-	filtered2 := df.Filter(galleon.Col("value").Gt(galleon.Lit(15.0)))
+	// Get indices where value > 15
+	indices := galleon.FilterGreaterThanF64(values, 15.0)
+	fmt.Printf("Indices where value > 15: %v\n", indices)
+
+	filtered2, _ := df.FilterByIndices(indices)
 	fmt.Printf("Filtered (value > 15): %d rows\n", filtered2.Height())
 	printDataFrame(filtered2)
 
@@ -82,12 +85,16 @@ func main() {
 	fmt.Println("-" + string(make([]byte, 40)))
 
 	// Sort by value ascending
-	sorted := df.Sort("value", true)
+	sorted, err := df.SortBy("value", true)
+	if err != nil {
+		fmt.Printf("Error sorting: %v\n", err)
+		return
+	}
 	fmt.Println("Sorted by value (ascending):")
 	printDataFrame(sorted)
 
 	// Sort by value descending
-	sortedDesc := df.Sort("value", false)
+	sortedDesc, _ := df.SortBy("value", false)
 	fmt.Println("\nSorted by value (descending):")
 	printDataFrame(sortedDesc)
 
@@ -98,12 +105,20 @@ func main() {
 	fmt.Println("-" + string(make([]byte, 40)))
 
 	// Select specific columns
-	selected := df.Select("id", "value")
+	selected, err := df.Select("id", "value")
+	if err != nil {
+		fmt.Printf("Error selecting: %v\n", err)
+		return
+	}
 	fmt.Println("Selected columns (id, value):")
 	printDataFrame(selected)
 
 	// Drop a column
-	dropped := df.Drop("category")
+	dropped, err := df.Drop("category")
+	if err != nil {
+		fmt.Printf("Error dropping: %v\n", err)
+		return
+	}
 	fmt.Println("\nAfter dropping 'category':")
 	printDataFrame(dropped)
 
@@ -127,12 +142,11 @@ func main() {
 	fmt.Println("\n6. Combining Operations")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	// Filter, sort, and select in one chain
-	result := df.
-		Filter(galleon.Col("value").Gt(galleon.Lit(10.0))).
-		Sort("value", false).
-		Select("id", "value").
-		Head(5)
+	// Filter, sort, and select in sequence
+	result, _ := df.FilterByMask(byteMask) // value > 10
+	result, _ = result.SortBy("value", false)
+	result, _ = result.Select("id", "value")
+	result = result.Head(5)
 
 	fmt.Println("Top 5 by value (where value > 10):")
 	printDataFrame(result)
@@ -142,7 +156,7 @@ func main() {
 
 func printDataFrame(df *galleon.DataFrame) {
 	// Print header
-	cols := df.ColumnNames()
+	cols := df.Columns()
 	fmt.Print("  ")
 	for _, name := range cols {
 		fmt.Printf("%-12s", name)
@@ -153,7 +167,7 @@ func printDataFrame(df *galleon.DataFrame) {
 	for i := 0; i < df.Height(); i++ {
 		fmt.Print("  ")
 		for _, name := range cols {
-			col := df.Column(name)
+			col := df.ColumnByName(name)
 			switch col.DType() {
 			case galleon.Int64:
 				fmt.Printf("%-12d", col.Int64()[i])
