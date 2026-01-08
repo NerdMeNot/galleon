@@ -261,7 +261,7 @@ grouped := df.GroupBy("category")
 result := grouped.Sum("value")
 ```
 
-See [GroupBy API](guide-groupby.md) for detailed documentation.
+See [GroupBy Guide](../02-guides/02-groupby.md) for detailed documentation.
 
 ## Join Operations
 
@@ -308,7 +308,7 @@ RightOn(columns ...string) JoinOption
 Suffix(suffix string) JoinOption
 ```
 
-See [Join Operations](guide-joins.md) for detailed documentation.
+See [Join Operations](../02-guides/03-joins.md) for detailed documentation.
 
 ## Lazy Evaluation
 

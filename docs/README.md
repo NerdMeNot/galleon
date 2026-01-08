@@ -6,54 +6,54 @@ Welcome to the Galleon documentation. This directory contains comprehensive docu
 
 ```
 docs/
-├── getting-started/     # Installation and quick start
-│   ├── installation.md
-│   └── quickstart.md
-├── api/                 # API reference
-│   ├── dataframe.md
-│   ├── series.md
-│   ├── expressions.md
-│   ├── io.md
-│   └── configuration.md
-├── guides/              # In-depth guides
-│   ├── groupby.md
-│   ├── joins.md
-│   └── lazy.md
-└── reference/           # Reference material
-    ├── types.md
-    └── performance.md
+├── 01-getting-started/      # Installation and quick start
+│   ├── 01-installation.md
+│   └── 02-quickstart.md
+├── 02-guides/               # In-depth guides
+│   ├── 01-lazy.md
+│   ├── 02-groupby.md
+│   └── 03-joins.md
+├── 03-api/                  # API reference
+│   ├── 01-dataframe.md
+│   ├── 02-series.md
+│   ├── 03-expressions.md
+│   ├── 04-io.md
+│   └── 05-configuration.md
+└── 04-reference/            # Reference material
+    ├── 01-types.md
+    └── 02-performance.md
 ```
 
 ## Getting Started
 
-- [Installation Guide](getting-started/installation.md) - How to install and build Galleon
-- [Quick Start](getting-started/quickstart.md) - Get up and running in 5 minutes
+- [Installation Guide](01-getting-started/01-installation.md) - How to install and build Galleon
+- [Quick Start](01-getting-started/02-quickstart.md) - Get up and running in 5 minutes
 
 ## API Reference
 
-- [DataFrame API](api/dataframe.md) - DataFrame operations and methods
-- [Series API](api/series.md) - Series operations and methods
-- [Expressions API](api/expressions.md) - Expression building for queries
-- [I/O API](api/io.md) - Reading and writing data files
-- [Configuration API](api/configuration.md) - Thread and performance configuration
+- [DataFrame API](03-api/01-dataframe.md) - DataFrame operations and methods
+- [Series API](03-api/02-series.md) - Series operations and methods
+- [Expressions API](03-api/03-expressions.md) - Expression building for queries
+- [I/O API](03-api/04-io.md) - Reading and writing data files
+- [Configuration API](03-api/05-configuration.md) - Thread and performance configuration
 
 ## Guides
 
-- [GroupBy Operations](guides/groupby.md) - Comprehensive groupby guide
-- [Join Operations](guides/joins.md) - Join types and best practices
-- [Lazy Evaluation](guides/lazy.md) - LazyFrame and query optimization
+- [Lazy Evaluation](02-guides/01-lazy.md) - LazyFrame and query optimization
+- [GroupBy Operations](02-guides/02-groupby.md) - Comprehensive groupby guide
+- [Join Operations](02-guides/03-joins.md) - Join types and best practices
 
 ## Reference
 
-- [Type System](reference/types.md) - Data types and type handling
-- [Performance Tips](reference/performance.md) - Optimization guidelines
+- [Type System](04-reference/01-types.md) - Data types and type handling
+- [Performance Tips](04-reference/02-performance.md) - Optimization guidelines
 
 ## Quick Links
 
 | Topic | Description |
 |-------|-------------|
-| [DataFrame](api/dataframe.md) | Core DataFrame type and operations |
-| [Series](api/series.md) | Column data type |
-| [Expressions](api/expressions.md) | Query building |
-| [I/O](api/io.md) | CSV, JSON, Parquet |
-| [Performance](reference/performance.md) | Optimization tips |
+| [DataFrame](03-api/01-dataframe.md) | Core DataFrame type and operations |
+| [Series](03-api/02-series.md) | Column data type |
+| [Expressions](03-api/03-expressions.md) | Query building |
+| [I/O](03-api/04-io.md) | CSV, JSON, Parquet |
+| [Performance](04-reference/02-performance.md) | Optimization tips |

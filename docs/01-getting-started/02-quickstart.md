@@ -276,8 +276,8 @@ Gizmo           900.00
 
 ## Next Steps
 
-- [DataFrame API](api-dataframe.md) - Full DataFrame reference
-- [GroupBy Guide](guide-groupby.md) - Advanced aggregations
-- [Join Guide](guide-joins.md) - Combining DataFrames
-- [Lazy Evaluation](guide-lazy.md) - Query optimization
-- [Performance Tips](reference-performance.md) - Optimization guide
+- [DataFrame API](../03-api/01-dataframe.md) - Full DataFrame reference
+- [GroupBy Guide](../02-guides/02-groupby.md) - Advanced aggregations
+- [Join Guide](../02-guides/03-joins.md) - Combining DataFrames
+- [Lazy Evaluation](../02-guides/01-lazy.md) - Query optimization
+- [Performance Tips](../04-reference/02-performance.md) - Optimization guide

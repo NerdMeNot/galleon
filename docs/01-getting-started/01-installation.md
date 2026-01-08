@@ -261,6 +261,6 @@ go build -tags dev ./...
 
 ## Next Steps
 
-- [Quick Start](quickstart.md) - Get started with Galleon
-- [API Reference](../api/dataframe.md) - Full API documentation
+- [Quick Start](02-quickstart.md) - Get started with Galleon
+- [API Reference](../03-api/01-dataframe.md) - Full API documentation
 - [Examples](../../go/examples/README.md) - Code examples
