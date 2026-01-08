@@ -4,25 +4,19 @@ Get up and running with Galleon in 5 minutes.
 
 ## Prerequisites
 
-- Go 1.21 or later
-- Zig 0.13 or later (for building the core library)
+- **Go**: 1.21 or later
+- **C Compiler**: Required for CGO
+  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+  - **Linux**: GCC (usually pre-installed)
+  - **Windows**: MinGW-w64 or MSVC
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/NerdMeNot/galleon.git
-cd galleon
-
-# Build the Zig core library
-cd core
-zig build -Doptimize=ReleaseFast
-cd ..
-
-# Run Go tests to verify
-cd go
-go test ./...
+go get github.com/NerdMeNot/galleon/go
 ```
+
+That's it! Prebuilt libraries are included for all major platforms.
 
 ## Your First DataFrame
 
@@ -51,7 +45,7 @@ func main() {
 
     // Print DataFrame info
     fmt.Printf("Rows: %d, Columns: %d\n", df.Height(), df.Width())
-    fmt.Printf("Columns: %v\n", df.ColumnNames())
+    fmt.Printf("Columns: %v\n", df.Columns())
 }
 ```
 
@@ -67,7 +61,7 @@ Columns: [id name score]
 
 ```go
 // Get a column and compute statistics
-scores := df.Column("score")
+scores := df.ColumnByName("score")
 fmt.Printf("Sum:  %.2f\n", scores.Sum())
 fmt.Printf("Mean: %.2f\n", scores.Mean())
 fmt.Printf("Min:  %.2f\n", scores.Min())
@@ -78,9 +72,12 @@ fmt.Printf("Max:  %.2f\n", scores.Max())
 
 ```go
 // Filter rows where score > 85
-highScores := df.Filter(
-    galleon.Col("score").Gt(galleon.Lit(85.0)),
-)
+scores := df.ColumnByName("score")
+mask := make([]bool, df.Height())
+for i, v := range scores.Float64() {
+    mask[i] = v > 85.0
+}
+highScores := df.Filter(mask)
 fmt.Printf("High scorers: %d\n", highScores.Height())
 ```
 
@@ -88,16 +85,25 @@ fmt.Printf("High scorers: %d\n", highScores.Height())
 
 ```go
 // Sort by score descending
-sorted := df.Sort("score", false)
+sorted, err := df.SortBy("score", false)
+if err != nil {
+    panic(err)
+}
 ```
 
 ### Adding Columns
 
 ```go
 // Add a computed column
-df = df.WithColumn("grade",
-    galleon.Col("score").Div(galleon.Lit(10.0)),
-)
+scores := df.ColumnByName("score").Float64()
+grades := make([]float64, len(scores))
+for i, s := range scores {
+    grades[i] = s / 10.0
+}
+df, err = df.WithColumn(galleon.NewSeriesFloat64("grade", grades))
+if err != nil {
+    panic(err)
+}
 ```
 
 ## GroupBy and Aggregation
@@ -113,10 +119,13 @@ sales, _ := galleon.NewDataFrame(
     }),
 )
 
-// Group by region and sum
-result := sales.GroupBy("region").Agg(
-    galleon.Col("amount").Sum().Alias("total"),
-    galleon.Col("amount").Mean().Alias("average"),
+// Group by region - single aggregation
+result, _ := sales.GroupBy("region").Sum("amount")
+
+// Group by region - multiple aggregations
+result, _ = sales.GroupBy("region").Agg(
+    galleon.AggSum("amount").Alias("total"),
+    galleon.AggMean("amount").Alias("average"),
 )
 ```
 
@@ -158,14 +167,16 @@ orders, _ := galleon.NewDataFrame(
 )
 
 customers, _ := galleon.NewDataFrame(
-    galleon.NewSeriesInt64("id", []int64{1, 2, 3}),
+    galleon.NewSeriesInt64("customer_id", []int64{1, 2, 3}),
     galleon.NewSeriesString("name", []string{"Alice", "Bob", "Charlie"}),
 )
 
-// Join on customer_id = id
-result, _ := orders.Join(customers,
-    galleon.LeftOn("customer_id"),
-    galleon.RightOn("id"),
+// Inner join on same column name
+result, _ := orders.Join(customers, galleon.On("customer_id"))
+
+// Join on different column names
+result, _ = orders.Join(customers,
+    galleon.LeftOn("customer_id").RightOn("customer_id"),
 )
 ```
 
@@ -174,18 +185,24 @@ result, _ := orders.Join(customers,
 For large datasets, use lazy evaluation:
 
 ```go
-result, err := galleon.ScanCSV("large_file.csv").
-    Filter(galleon.Col("value").Gt(galleon.Lit(100))).
-    GroupBy(galleon.Col("category")).
-    Agg(galleon.Col("value").Sum().Alias("total")).
-    Sort(galleon.Col("total"), false).
-    Limit(10).
-    Collect()
+// Convert DataFrame to LazyFrame
+lazy := df.Lazy()
+
+// Build a query - nothing executes yet
+query := lazy.
+    Filter(galleon.Col("price").Gt(galleon.Lit(50.0))).
+    GroupBy("category").
+    Agg(galleon.Col("price").Sum().Alias("total")).
+    Sort("total", false).
+    Head(10)
+
+// Execute the query
+result, err := query.Collect()
 ```
 
 Benefits:
-- Predicate pushdown
-- Projection pushdown
+- Deferred execution
+- Query optimization
 - Memory efficiency
 
 ## Thread Configuration
@@ -205,6 +222,7 @@ package main
 
 import (
     "fmt"
+    "strings"
     galleon "github.com/NerdMeNot/galleon/go"
 )
 
@@ -222,28 +240,26 @@ func main() {
         }),
     )
 
-    // Pipeline: Filter, Group, Aggregate, Sort
-    result := df.
+    // Using Lazy API for chained operations
+    result, _ := df.Lazy().
         Filter(galleon.Col("sales").Gt(galleon.Lit(500.0))).
         GroupBy("product").
         Agg(
             galleon.Col("sales").Sum().Alias("total_sales"),
-            galleon.Col("sales").Count().Alias("num_sales"),
         ).
-        Sort("total_sales", false)
+        Sort("total_sales", false).
+        Collect()
 
     // Print results
     fmt.Println("Sales Summary:")
-    fmt.Printf("%-10s %12s %10s\n", "Product", "Total Sales", "Count")
-    fmt.Println(strings.Repeat("-", 35))
+    fmt.Printf("%-10s %12s\n", "Product", "Total Sales")
+    fmt.Println(strings.Repeat("-", 25))
 
-    products := result.Column("product").Strings()
-    totals := result.Column("total_sales").Float64()
-    counts := result.Column("num_sales").Int64()
+    products := result.ColumnByName("product").Strings()
+    totals := result.ColumnByName("total_sales").Float64()
 
     for i := 0; i < result.Height(); i++ {
-        fmt.Printf("%-10s %12.2f %10d\n",
-            products[i], totals[i], counts[i])
+        fmt.Printf("%-10s %12.2f\n", products[i], totals[i])
     }
 }
 ```
@@ -251,11 +267,11 @@ func main() {
 Output:
 ```
 Sales Summary:
-Product     Total Sales      Count
------------------------------------
-Gadget         3300.00          2
-Widget         2200.00          2
-Gizmo           900.00          1
+Product     Total Sales
+-------------------------
+Gadget         3300.00
+Widget         2200.00
+Gizmo           900.00
 ```
 
 ## Next Steps

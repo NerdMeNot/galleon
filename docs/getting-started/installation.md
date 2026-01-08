@@ -1,114 +1,130 @@
 # Installation Guide
 
-Complete instructions for installing and building Galleon.
+Complete instructions for installing and using Galleon.
 
-## System Requirements
+## For Users
 
-### Required
+### Quick Install
+
+Galleon comes with prebuilt libraries for all major platforms. Just install with `go get`:
+
+```bash
+go get github.com/NerdMeNot/galleon/go
+```
+
+That's it! No Zig installation required.
+
+### Supported Platforms
+
+| Platform | Architecture | Status |
+|----------|--------------|--------|
+| macOS | Apple Silicon (M1/M2/M3) | ✅ |
+| macOS | Intel x86_64 | ✅ |
+| Linux | x86_64 | ✅ |
+| Linux | ARM64 | ✅ |
+| Windows | x86_64 | ✅ |
+
+### Requirements
 
 - **Go**: 1.21 or later
-- **Zig**: 0.13 or later
-- **Operating System**: macOS, Linux, or Windows with WSL
+- **C Compiler**: Required for CGO
+  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+  - **Linux**: GCC (usually pre-installed, or `apt install build-essential`)
+  - **Windows**: MinGW-w64 or MSVC
 
-### Optional
+### Verify Installation
 
-- **C Compiler**: For CGO (usually included with OS)
+```go
+package main
+
+import (
+    "fmt"
+    galleon "github.com/NerdMeNot/galleon/go"
+)
+
+func main() {
+    s := galleon.NewSeriesFloat64("test", []float64{1, 2, 3, 4, 5})
+    fmt.Printf("Sum: %.0f\n", s.Sum()) // Output: Sum: 15
+}
+```
+
+---
+
+## For Developers
+
+If you're contributing to Galleon or modifying the Zig core library, follow these instructions.
+
+### Prerequisites
+
+- **Go**: 1.21 or later
+- **Zig**: 0.15.2 or later
 - **Git**: For cloning the repository
 
-## Installation Steps
+#### Install Zig
 
-### 1. Install Prerequisites
-
-#### macOS
-
+**macOS:**
 ```bash
-# Install Zig
 brew install zig
-
-# Verify Go (usually pre-installed or via brew)
-go version
-
-# Verify Zig
-zig version
 ```
 
-#### Linux (Ubuntu/Debian)
-
+**Linux:**
 ```bash
-# Install Zig
-snap install zig --classic --beta
-# Or download from https://ziglang.org/download/
-
-# Install Go
-sudo apt-get update
-sudo apt-get install golang-go
-
-# Verify versions
-go version
-zig version
+# Download from https://ziglang.org/download/
+wget https://ziglang.org/builds/zig-linux-x86_64-0.15.2.tar.xz
+tar xf zig-linux-x86_64-0.15.2.tar.xz
+export PATH=$PATH:$PWD/zig-linux-x86_64-0.15.2
 ```
 
-#### Windows (WSL)
-
+**Verify:**
 ```bash
-# In WSL, follow Linux instructions
-sudo apt-get update
-sudo apt-get install golang-go
-
-# Install Zig
-wget https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
-tar xf zig-linux-x86_64-0.13.0.tar.xz
-export PATH=$PATH:$PWD/zig-linux-x86_64-0.13.0
+zig version  # Should show 0.15.2 or later
 ```
 
-### 2. Clone the Repository
+### Clone and Build
 
 ```bash
+# Clone the repository
 git clone https://github.com/NerdMeNot/galleon.git
 cd galleon
-```
 
-### 3. Build the Zig Core Library
-
-```bash
+# Build the Zig core library
 cd core
-
-# Development build (faster compilation)
-zig build
-
-# Release build (optimized for performance)
 zig build -Doptimize=ReleaseFast
-
 cd ..
-```
 
-This creates:
-- `core/zig-out/lib/libgalleon.a` (or `.dylib`/`.so`)
-- `core/zig-out/include/galleon.h`
-
-### 4. Verify the Go Module
-
-```bash
+# Test with the dev build tag
 cd go
-
-# Download dependencies
-go mod download
-
-# Run tests
-go test ./...
-
-# Run a specific test
-go test -v -run TestSum
-
-cd ..
+go test -tags dev ./...
 ```
 
-### 5. Run Examples
+### Development Workflow
+
+When modifying Zig code, use the `-tags dev` flag to use your local build:
 
 ```bash
-cd examples/01_basic_usage
-go run main.go
-cd ../..
+# Build Zig library
+cd core && zig build -Doptimize=ReleaseFast && cd ..
+
+# Build/test Go with dev tag
+cd go
+go build -tags dev ./...
+go test -tags dev ./...
+```
+
+### Rebuilding Prebuilt Libraries
+
+After making changes to the Zig code, rebuild all platform libraries:
+
+```bash
+./scripts/build-all-platforms.sh
+```
+
+This cross-compiles for all 5 supported platforms from your machine.
+
+Then commit:
+```bash
+git add go/lib/
+git commit -m "Rebuild prebuilt libraries"
 ```
 
 ## Project Structure
@@ -126,9 +142,15 @@ galleon/
 │   ├── galleon.go        # Main Go API
 │   ├── series.go         # Series type
 │   ├── dataframe.go      # DataFrame type
-│   ├── expr.go           # Expression system
-│   ├── lazy.go           # Lazy evaluation
+│   ├── lib/              # Prebuilt libraries
+│   │   ├── darwin_arm64/
+│   │   ├── darwin_amd64/
+│   │   ├── linux_amd64/
+│   │   ├── linux_arm64/
+│   │   └── windows_amd64/
 │   └── go.mod            # Go module
+├── scripts/               # Build scripts
+│   └── build-all-platforms.sh
 ├── examples/              # Usage examples
 ├── docs/                  # Documentation
 └── benchmarks/            # Benchmark code
@@ -136,17 +158,10 @@ galleon/
 
 ## Using Galleon in Your Project
 
-### As a Local Dependency
+### Standard Installation
 
-```go
-// go.mod
-module myproject
-
-go 1.21
-
-require github.com/NerdMeNot/galleon/go v0.1.0
-
-replace github.com/NerdMeNot/galleon/go => /path/to/galleon/go
+```bash
+go get github.com/NerdMeNot/galleon/go
 ```
 
 ### Import and Use
@@ -159,8 +174,10 @@ import (
 )
 
 func main() {
-    series := galleon.NewSeriesFloat64("values", []float64{1, 2, 3})
-    println(series.Sum())
+    df, _ := galleon.NewDataFrame(
+        galleon.NewSeriesFloat64("values", []float64{1, 2, 3}),
+    )
+    println(df.Height()) // 3
 }
 ```
 
@@ -169,141 +186,81 @@ func main() {
 ### Zig Build Modes
 
 ```bash
-# Debug (default) - includes debug info, slower
+# Debug (default) - includes debug info
 zig build
 
-# ReleaseFast - optimized for speed
+# ReleaseFast - optimized for speed (recommended)
 zig build -Doptimize=ReleaseFast
 
 # ReleaseSafe - optimized with safety checks
 zig build -Doptimize=ReleaseSafe
 
-# ReleaseSmall - optimized for size
+# ReleaseSmall - optimized for binary size
 zig build -Doptimize=ReleaseSmall
 ```
 
-### CGO Configuration
-
-The Go package uses CGO to call the Zig library. The paths are configured in `go/galleon.go`:
-
-```go
-/*
-#cgo CFLAGS: -I${SRCDIR}/../core/zig-out/include
-#cgo LDFLAGS: -L${SRCDIR}/../core/zig-out/lib -lgalleon
-*/
-```
-
-### Custom Build Location
-
-If you build the Zig library in a different location:
+### Cross-Compilation Targets
 
 ```bash
-# Set custom library path
-export CGO_LDFLAGS="-L/custom/path/lib -lgalleon"
-export CGO_CFLAGS="-I/custom/path/include"
+# macOS ARM64
+zig build -Dtarget=aarch64-macos -Doptimize=ReleaseFast
+
+# macOS Intel
+zig build -Dtarget=x86_64-macos -Doptimize=ReleaseFast
+
+# Linux x86_64
+zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseFast
+
+# Linux ARM64
+zig build -Dtarget=aarch64-linux-gnu -Doptimize=ReleaseFast
+
+# Windows x86_64
+zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast
 ```
 
 ## Troubleshooting
 
-### Build Errors
+### "cannot find -lgalleon"
 
-#### "zig: command not found"
+**For users:** Ensure you're on a supported platform. The prebuilt libraries should be included automatically.
 
-Ensure Zig is in your PATH:
+**For developers:** Build the Zig library first:
+```bash
+cd core && zig build -Doptimize=ReleaseFast
+```
+
+Then use `-tags dev`:
+```bash
+go build -tags dev ./...
+```
+
+### "CGO_ENABLED=0"
+
+CGO must be enabled:
+```bash
+export CGO_ENABLED=1
+go build ./...
+```
+
+### "zig: command not found"
+
+Add Zig to your PATH:
 ```bash
 export PATH=$PATH:/path/to/zig
 ```
 
-#### "cannot find -lgalleon"
+### Platform Not Supported
 
-The Zig library hasn't been built:
+If you're on an unsupported platform, you can build from source:
 ```bash
 cd core
 zig build -Doptimize=ReleaseFast
-```
-
-#### "undefined: C.xxx"
-
-CGO is not enabled or paths are wrong:
-```bash
-# Verify CGO is enabled
-go env CGO_ENABLED  # Should be "1"
-
-# Enable if needed
-export CGO_ENABLED=1
-```
-
-### Runtime Errors
-
-#### "dyld: Library not loaded: libgalleon.dylib"
-
-On macOS, set the library path:
-```bash
-export DYLD_LIBRARY_PATH=/path/to/galleon/core/zig-out/lib:$DYLD_LIBRARY_PATH
-```
-
-#### "error while loading shared libraries"
-
-On Linux, set the library path:
-```bash
-export LD_LIBRARY_PATH=/path/to/galleon/core/zig-out/lib:$LD_LIBRARY_PATH
-```
-
-### Static Linking
-
-For deployment without shared libraries:
-
-```bash
-# Build static library
-cd core
-zig build -Doptimize=ReleaseFast
-
-# The default build produces a static library (.a)
-# CGO will link it statically
-```
-
-## Platform-Specific Notes
-
-### macOS
-
-- Works on both Intel and Apple Silicon (M1/M2/M3)
-- Zig cross-compiles automatically for the current architecture
-- No additional dependencies needed
-
-### Linux
-
-- Tested on Ubuntu 20.04+, Debian 11+
-- Works on x86_64 and ARM64
-- May need `build-essential` for GCC:
-  ```bash
-  sudo apt-get install build-essential
-  ```
-
-### Windows
-
-- Use WSL (Windows Subsystem for Linux) for best experience
-- Native Windows support is experimental
-- Ensure paths use forward slashes in configuration
-
-## Verifying Installation
-
-Run the verification script:
-
-```bash
-cd go
-go test -v -run TestBasic
-```
-
-Expected output:
-```
-=== RUN   TestBasic
---- PASS: TestBasic (0.00s)
-PASS
-ok      github.com/NerdMeNot/galleon/go    0.005s
+cd ../go
+go build -tags dev ./...
 ```
 
 ## Next Steps
 
 - [Quick Start](quickstart.md) - Get started with Galleon
-- [API Reference](api-dataframe.md) - Full API documentation
-- [Examples](../examples/README.md) - Code examples
+- [API Reference](../api/dataframe.md) - Full API documentation
+- [Examples](../../go/examples/README.md) - Code examples
