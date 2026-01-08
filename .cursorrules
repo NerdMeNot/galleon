@@ -1,0 +1,49 @@
+# Galleon Project Rules for Cursor AI
+
+## Project Context
+Galleon is a Go DataFrame library with a Zig SIMD backend connected via CGO.
+
+## Key Files
+- `core/src/simd.zig` - SIMD operations (joins, aggregations, filtering)
+- `core/src/main.zig` - CGO exports (must match galleon.h)
+- `core/include/galleon.h` - C header for CGO
+- `go/galleon.go` - CGO wrappers
+- `go/join.go`, `go/groupby.go` - High-level operations
+
+## Build Process
+1. After Zig changes: `cd core && zig build -Doptimize=ReleaseFast`
+2. After Go changes: `cd go && go build ./...`
+3. Run tests: `cd go && go test ./...`
+
+## CGO Pattern
+When adding new Zig functions:
+1. Add to `simd.zig` or appropriate module
+2. Export in `main.zig` with C ABI
+3. Declare in `galleon.h`
+4. Wrap in `galleon.go`
+
+## Code Style
+- Go: standard gofmt conventions
+- Zig: snake_case, explicit error handling
+- Comments for all exported functions
+
+## Memory Management
+- Zig uses c_allocator for FFI compatibility
+- Go uses runtime.SetFinalizer for cleanup
+- Zero-copy: Go slices view Zig memory
+
+## Threading
+- MAX_THREADS = 32 (compile-time)
+- configured_max_threads (runtime, 0 = auto)
+- Always use getMaxThreads() in parallel code
+
+## Performance Rules
+- Avoid CGO in tight loops
+- Prefer end-to-end operations (single CGO call)
+- Parallelize for data > 10K rows
+- Use multi-accumulator pattern for SIMD reductions
+
+## Import Path
+```go
+import "github.com/NerdMeNot/galleon/go"
+```

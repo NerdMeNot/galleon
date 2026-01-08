@@ -1,0 +1,4 @@
+zig = "0.15.2"
+go = "1.25.5"
+[plugins.tools]
+zig = "github://konomae/zig-plugin"

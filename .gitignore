@@ -1,0 +1,63 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Zig
+core/zig-cache/
+core/.zig-cache/
+core/zig-out/
+*.o
+*.a
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.eggs/
+
+# Local settings
+.env
+.env.local
+*.local.json
+
+# Build artifacts
+dist/
+build/
+
+# Test data
+*.tmp
+/tmp/
+
+# Benchmark outputs
+*.prof
+*.trace
+
+# Documentation build
+docs/_build/
