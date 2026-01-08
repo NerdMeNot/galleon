@@ -357,3 +357,272 @@ func containsHelper(s, substr string) bool {
 	}
 	return false
 }
+
+// Additional tests for coverage
+
+func TestDataFrameSchema(t *testing.T) {
+	col1 := NewSeriesInt64("id", []int64{1, 2, 3})
+	col2 := NewSeriesFloat64("value", []float64{1.5, 2.5, 3.5})
+	col3 := NewSeriesString("name", []string{"a", "b", "c"})
+	col4 := NewSeriesBool("active", []bool{true, false, true})
+
+	df, _ := NewDataFrame(col1, col2, col3, col4)
+
+	schema := df.Schema()
+	if schema.Len() != 4 {
+		t.Errorf("Schema Len = %d, want 4", schema.Len())
+	}
+
+	// Check column names
+	names := schema.Names()
+	if names[0] != "id" || names[1] != "value" || names[2] != "name" || names[3] != "active" {
+		t.Errorf("Schema Names = %v", names)
+	}
+
+	// Check dtypes
+	dtypes := schema.DTypes()
+	if dtypes[0] != Int64 {
+		t.Errorf("Schema dtype[0] = %v, want Int64", dtypes[0])
+	}
+	if dtypes[1] != Float64 {
+		t.Errorf("Schema dtype[1] = %v, want Float64", dtypes[1])
+	}
+	if dtypes[2] != String {
+		t.Errorf("Schema dtype[2] = %v, want String", dtypes[2])
+	}
+	if dtypes[3] != Bool {
+		t.Errorf("Schema dtype[3] = %v, want Bool", dtypes[3])
+	}
+}
+
+func TestDataFrameFilterByIndicesAllTypes(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesFloat64("f64", []float64{1, 2, 3, 4, 5}),
+		NewSeriesFloat32("f32", []float32{1, 2, 3, 4, 5}),
+		NewSeriesInt64("i64", []int64{1, 2, 3, 4, 5}),
+		NewSeriesInt32("i32", []int32{1, 2, 3, 4, 5}),
+		NewSeriesBool("bool", []bool{true, false, true, false, true}),
+		NewSeriesString("str", []string{"a", "b", "c", "d", "e"}),
+	)
+
+	indices := []uint32{4, 2, 0}
+	df2, err := df.FilterByIndices(indices)
+	if err != nil {
+		t.Fatalf("FilterByIndices failed: %v", err)
+	}
+	if df2.Height() != 3 {
+		t.Errorf("FilterByIndices Height = %d, want 3", df2.Height())
+	}
+
+	// Check Float32
+	f32 := df2.ColumnByName("f32").Float32()
+	if f32[0] != 5 || f32[1] != 3 || f32[2] != 1 {
+		t.Errorf("Float32 = %v, want [5, 3, 1]", f32)
+	}
+
+	// Check Int32
+	i32 := df2.ColumnByName("i32").Int32()
+	if i32[0] != 5 || i32[1] != 3 || i32[2] != 1 {
+		t.Errorf("Int32 = %v, want [5, 3, 1]", i32)
+	}
+
+	// Check Bool - indices [4, 2, 0] from [true, false, true, false, true] = [true, true, true]
+	b := df2.ColumnByName("bool").Bool()
+	if !b[0] || !b[1] || !b[2] {
+		t.Errorf("Bool = %v, want [true, true, true]", b)
+	}
+
+	// Check String
+	s := df2.ColumnByName("str").Strings()
+	if s[0] != "e" || s[1] != "c" || s[2] != "a" {
+		t.Errorf("String = %v, want [e, c, a]", s)
+	}
+}
+
+func TestDataFrameDescribeAllTypes(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesFloat64("f64", []float64{1.0, 2.0, 3.0}),
+		NewSeriesFloat32("f32", []float32{1.0, 2.0, 3.0}),
+		NewSeriesInt64("i64", []int64{1, 2, 3}),
+		NewSeriesInt32("i32", []int32{1, 2, 3}),
+		NewSeriesBool("bool", []bool{true, false, true}),
+		NewSeriesString("str", []string{"a", "b", "c"}),
+	)
+
+	desc := df.Describe()
+
+	// Float64
+	if desc["f64"]["count"] != 3.0 {
+		t.Errorf("f64 count = %v, want 3", desc["f64"]["count"])
+	}
+
+	// Float32 should also be described
+	if desc["f32"]["count"] != 3.0 {
+		t.Errorf("f32 count = %v, want 3", desc["f32"]["count"])
+	}
+
+	// Int64
+	if desc["i64"]["count"] != 3.0 {
+		t.Errorf("i64 count = %v, want 3", desc["i64"]["count"])
+	}
+
+	// Int32
+	if desc["i32"]["count"] != 3.0 {
+		t.Errorf("i32 count = %v, want 3", desc["i32"]["count"])
+	}
+}
+
+func TestDataFrameDescribeNoNumeric(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesBool("bool", []bool{true, false, true}),
+		NewSeriesString("str", []string{"a", "b", "c"}),
+	)
+
+	desc := df.Describe()
+	if desc != nil {
+		t.Errorf("Describe with no numeric columns should return nil, got %v", desc)
+	}
+}
+
+func TestDataFrameDescribeParallel(t *testing.T) {
+	// Create large dataset to trigger parallel path
+	n := 10000 // Above MinRowsForParallel default of 8192
+	f64Data := make([]float64, n)
+	i64Data := make([]int64, n)
+	f32Data := make([]float32, n)
+	for i := 0; i < n; i++ {
+		f64Data[i] = float64(i)
+		i64Data[i] = int64(i)
+		f32Data[i] = float32(i)
+	}
+
+	df, _ := NewDataFrame(
+		NewSeriesFloat64("f64", f64Data),
+		NewSeriesInt64("i64", i64Data),
+		NewSeriesFloat32("f32", f32Data),
+	)
+
+	desc := df.Describe()
+
+	// Verify all columns are described
+	if len(desc) != 3 {
+		t.Errorf("Describe should have 3 columns, got %d", len(desc))
+	}
+
+	// Check counts
+	if desc["f64"]["count"] != float64(n) {
+		t.Errorf("f64 count = %v, want %d", desc["f64"]["count"], n)
+	}
+	if desc["i64"]["count"] != float64(n) {
+		t.Errorf("i64 count = %v, want %d", desc["i64"]["count"], n)
+	}
+	if desc["f32"]["count"] != float64(n) {
+		t.Errorf("f32 count = %v, want %d", desc["f32"]["count"], n)
+	}
+}
+
+func TestDataFrameFilterByMaskAllTypes(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesFloat32("f32", []float32{1, 2, 3}),
+		NewSeriesInt32("i32", []int32{10, 20, 30}),
+		NewSeriesBool("bool", []bool{true, false, true}),
+		NewSeriesString("str", []string{"a", "b", "c"}),
+	)
+
+	mask := []byte{1, 0, 1}
+	df2, err := df.FilterByMask(mask)
+	if err != nil {
+		t.Fatalf("FilterByMask failed: %v", err)
+	}
+	if df2.Height() != 2 {
+		t.Errorf("FilterByMask Height = %d, want 2", df2.Height())
+	}
+
+	// Check Float32
+	f32 := df2.ColumnByName("f32").Float32()
+	if f32[0] != 1 || f32[1] != 3 {
+		t.Errorf("Float32 = %v, want [1, 3]", f32)
+	}
+
+	// Check Int32
+	i32 := df2.ColumnByName("i32").Int32()
+	if i32[0] != 10 || i32[1] != 30 {
+		t.Errorf("Int32 = %v, want [10, 30]", i32)
+	}
+
+	// Check Bool
+	b := df2.ColumnByName("bool").Bool()
+	if !b[0] || !b[1] {
+		t.Errorf("Bool = %v, want [true, true]", b)
+	}
+
+	// Check String
+	s := df2.ColumnByName("str").Strings()
+	if s[0] != "a" || s[1] != "c" {
+		t.Errorf("String = %v, want [a, c]", s)
+	}
+}
+
+func TestDataFrameHeadTailEdgeCases(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesInt64("a", []int64{1, 2, 3, 4, 5}),
+	)
+
+	// Head more than available
+	df2 := df.Head(100)
+	if df2.Height() != 5 {
+		t.Errorf("Head(100) Height = %d, want 5", df2.Height())
+	}
+
+	// Tail more than available
+	df3 := df.Tail(100)
+	if df3.Height() != 5 {
+		t.Errorf("Tail(100) Height = %d, want 5", df3.Height())
+	}
+}
+
+func TestDataFrameSortByNonexistent(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesInt64("a", []int64{1, 2, 3}),
+	)
+
+	_, err := df.SortBy("nonexistent", true)
+	if err == nil {
+		t.Error("SortBy nonexistent column should fail")
+	}
+}
+
+func TestDataFrameRenameNonexistent(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesInt64("a", []int64{1, 2, 3}),
+	)
+
+	_, err := df.Rename("nonexistent", "b")
+	if err == nil {
+		t.Error("Rename nonexistent column should fail")
+	}
+}
+
+func TestDataFrameWithColumnLengthMismatch(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesInt64("a", []int64{1, 2, 3}),
+	)
+
+	newCol := NewSeriesInt64("b", []int64{1, 2}) // Wrong length
+	_, err := df.WithColumn(newCol)
+	if err == nil {
+		t.Error("WithColumn with mismatched length should fail")
+	}
+}
+
+func TestDataFrameFilterByMaskLengthMismatch(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesInt64("a", []int64{1, 2, 3}),
+	)
+
+	mask := []byte{1, 0} // Wrong length
+	_, err := df.FilterByMask(mask)
+	if err == nil {
+		t.Error("FilterByMask with mismatched length should fail")
+	}
+}
