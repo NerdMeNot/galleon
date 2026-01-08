@@ -50,12 +50,23 @@ jobs:
         run: |
           cd core
           zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
+          echo "Build output:"
+          ls -la zig-out/lib/ || echo "No lib directory"
 
       - name: Prepare artifact
         run: |
           mkdir -p prebuilt/${{ matrix.artifact }}
-          cp core/zig-out/lib/libgalleon.a prebuilt/${{ matrix.artifact }}/
-          # Also copy header for completeness
+          # Copy library (handle both .a and .lib for Windows)
+          if [ -f core/zig-out/lib/libgalleon.a ]; then
+            cp core/zig-out/lib/libgalleon.a prebuilt/${{ matrix.artifact }}/
+          elif [ -f core/zig-out/lib/galleon.lib ]; then
+            cp core/zig-out/lib/galleon.lib prebuilt/${{ matrix.artifact }}/libgalleon.a
+          else
+            echo "ERROR: No library found!"
+            ls -laR core/zig-out/ || true
+            exit 1
+          fi
+          # Also copy header
           cp core/include/galleon.h prebuilt/${{ matrix.artifact }}/
 
       - name: Upload artifact
