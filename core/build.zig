@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true, // Required for cross-compilation and C allocator
     });
 
     // Static library for Go CGO linking
@@ -17,6 +18,7 @@ pub fn build(b: *std.Build) void {
         .name = "galleon",
         .root_module = galleon_mod,
     });
+    lib.linkLibC();
     b.installArtifact(lib);
 
     // Install header file
