@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Galleon GroupBy Example ===\n")
+	fmt.Println("=== Galleon GroupBy Example ===")
 
 	// Create sample sales data
 	df, _ := galleon.NewDataFrame(

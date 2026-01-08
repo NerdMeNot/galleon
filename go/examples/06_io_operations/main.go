@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Galleon I/O Operations Example ===\n")
+	fmt.Println("=== Galleon I/O Operations Example ===")
 
 	// Create temp directory for examples
 	tmpDir, err := os.MkdirTemp("", "galleon_io_example")

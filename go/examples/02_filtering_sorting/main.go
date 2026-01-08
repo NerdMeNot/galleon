@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Galleon Filtering and Sorting Example ===\n")
+	fmt.Println("=== Galleon Filtering and Sorting Example ===")
 
 	// Create sample data
 	df, _ := galleon.NewDataFrame(

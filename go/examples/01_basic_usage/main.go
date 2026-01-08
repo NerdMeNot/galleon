@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Galleon Basic Usage Example ===\n")
+	fmt.Println("=== Galleon Basic Usage Example ===")
 
 	// =========================================================================
 	// Creating Series

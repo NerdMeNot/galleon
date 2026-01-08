@@ -389,6 +389,412 @@ func TestJoinStringKeys(t *testing.T) {
 	}
 }
 
+// Additional tests for coverage
+
+func TestJoinFloat32Keys(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesFloat32("key", []float32{1.0, 2.0, 3.0}),
+		NewSeriesString("name", []string{"A", "B", "C"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesFloat32("key", []float32{1.0, 2.0, 4.0}),
+		NewSeriesInt64("value", []int64{100, 200, 400}),
+	)
+
+	result, err := left.Join(right, On("key"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	if result.Height() != 2 {
+		t.Errorf("expected 2 rows, got %d", result.Height())
+	}
+}
+
+func TestJoinFloat64Keys(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesFloat64("key", []float64{1.0, 2.0, 3.0}),
+		NewSeriesString("name", []string{"A", "B", "C"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesFloat64("key", []float64{1.0, 2.0, 4.0}),
+		NewSeriesInt64("value", []int64{100, 200, 400}),
+	)
+
+	result, err := left.Join(right, On("key"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	if result.Height() != 2 {
+		t.Errorf("expected 2 rows, got %d", result.Height())
+	}
+}
+
+func TestJoinInt32Keys(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesInt32("key", []int32{1, 2, 3}),
+		NewSeriesString("name", []string{"A", "B", "C"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt32("key", []int32{1, 2, 4}),
+		NewSeriesInt64("value", []int64{100, 200, 400}),
+	)
+
+	result, err := left.Join(right, On("key"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	if result.Height() != 2 {
+		t.Errorf("expected 2 rows, got %d", result.Height())
+	}
+}
+
+func TestJoinBoolKeys(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesBool("active", []bool{true, false, true}),
+		NewSeriesString("name", []string{"A", "B", "C"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesBool("active", []bool{true, false}),
+		NewSeriesInt64("count", []int64{100, 200}),
+	)
+
+	result, err := left.Join(right, On("active"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	// true matches 2 left rows, false matches 1 = 3 rows
+	if result.Height() != 3 {
+		t.Errorf("expected 3 rows, got %d", result.Height())
+	}
+}
+
+func TestLeftJoinStringKeys(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesString("code", []string{"US", "UK", "DE"}),
+		NewSeriesString("country", []string{"United States", "United Kingdom", "Germany"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesString("code", []string{"US", "FR"}),
+		NewSeriesInt64("population", []int64{330, 65}),
+	)
+
+	result, err := left.LeftJoin(right, On("code"))
+	if err != nil {
+		t.Fatalf("failed to left join: %v", err)
+	}
+
+	// All 3 left rows preserved
+	if result.Height() != 3 {
+		t.Errorf("expected 3 rows, got %d", result.Height())
+	}
+}
+
+func TestRightJoinStringKeys(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesString("code", []string{"US", "UK"}),
+		NewSeriesString("country", []string{"United States", "United Kingdom"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesString("code", []string{"US", "UK", "FR"}),
+		NewSeriesInt64("population", []int64{330, 67, 65}),
+	)
+
+	result, err := left.RightJoin(right, On("code"))
+	if err != nil {
+		t.Fatalf("failed to right join: %v", err)
+	}
+
+	// All 3 right rows preserved
+	if result.Height() != 3 {
+		t.Errorf("expected 3 rows, got %d", result.Height())
+	}
+}
+
+func TestOuterJoinStringKeys(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesString("code", []string{"US", "UK"}),
+		NewSeriesString("name", []string{"A", "B"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesString("code", []string{"UK", "FR"}),
+		NewSeriesInt64("value", []int64{1, 2}),
+	)
+
+	result, err := left.OuterJoin(right, On("code"))
+	if err != nil {
+		t.Fatalf("failed to outer join: %v", err)
+	}
+
+	// US (left only), UK (both), FR (right only) = 3 rows
+	if result.Height() != 3 {
+		t.Errorf("expected 3 rows, got %d", result.Height())
+	}
+}
+
+func TestJoinMissingLeftColumn(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+	)
+
+	_, err := left.Join(right, LeftOn("nonexistent").RightOn("id"))
+	if err == nil {
+		t.Error("expected error for nonexistent left column")
+	}
+}
+
+func TestJoinMissingRightColumn(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+	)
+
+	_, err := left.Join(right, LeftOn("id").RightOn("nonexistent"))
+	if err == nil {
+		t.Error("expected error for nonexistent right column")
+	}
+}
+
+func TestJoinMismatchedKeyLengths(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+		NewSeriesInt64("key2", []int64{1, 2}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+	)
+
+	_, err := left.Join(right, LeftOn("id", "key2").RightOn("id"))
+	if err == nil {
+		t.Error("expected error for mismatched key lengths")
+	}
+}
+
+func TestJoinNoJoinSpec(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+	)
+
+	_, err := left.Join(right, JoinOptions{suffix: "_right"})
+	if err == nil {
+		t.Error("expected error when no join columns specified")
+	}
+}
+
+func TestCrossJoinEmptyLeft(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesString("a", []string{}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesString("b", []string{"x", "y"}),
+	)
+
+	result, err := left.CrossJoin(right)
+	if err != nil {
+		t.Fatalf("failed to cross join: %v", err)
+	}
+
+	if result.Height() != 0 {
+		t.Errorf("expected 0 rows, got %d", result.Height())
+	}
+}
+
+func TestCrossJoinColumnCollision(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesString("name", []string{"A", "B"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesString("name", []string{"X", "Y"}),
+	)
+
+	result, err := left.CrossJoin(right)
+	if err != nil {
+		t.Fatalf("failed to cross join: %v", err)
+	}
+
+	if result.ColumnByName("name") == nil {
+		t.Error("missing 'name' column")
+	}
+	if result.ColumnByName("name_right") == nil {
+		t.Error("missing 'name_right' column")
+	}
+}
+
+func TestJoinFloat32Values(t *testing.T) {
+	// Test that Float32 values are correctly gathered
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+		NewSeriesFloat32("val", []float32{1.5, 2.5}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+		NewSeriesFloat32("other", []float32{10.5, 20.5}),
+	)
+
+	result, err := left.Join(right, On("id"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	// Verify Float32 values preserved
+	valCol := result.ColumnByName("val")
+	if valCol.DType() != Float32 {
+		t.Error("val should remain Float32")
+	}
+
+	otherCol := result.ColumnByName("other")
+	if otherCol.DType() != Float32 {
+		t.Error("other should remain Float32")
+	}
+}
+
+func TestJoinInt32Values(t *testing.T) {
+	// Test that Int32 values are correctly gathered
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+		NewSeriesInt32("val", []int32{10, 20}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+		NewSeriesInt32("other", []int32{100, 200}),
+	)
+
+	result, err := left.Join(right, On("id"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	// Verify Int32 values preserved
+	valCol := result.ColumnByName("val")
+	if valCol.DType() != Int32 {
+		t.Error("val should remain Int32")
+	}
+
+	otherCol := result.ColumnByName("other")
+	if otherCol.DType() != Int32 {
+		t.Error("other should remain Int32")
+	}
+}
+
+func TestLeftJoinAllMatches(t *testing.T) {
+	// When all left rows match, no nulls needed
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+		NewSeriesString("name", []string{"A", "B"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+		NewSeriesFloat64("value", []float64{100, 200}),
+	)
+
+	result, err := left.LeftJoin(right, On("id"))
+	if err != nil {
+		t.Fatalf("failed to left join: %v", err)
+	}
+
+	if result.Height() != 2 {
+		t.Errorf("expected 2 rows, got %d", result.Height())
+	}
+
+	// All values should be non-zero
+	valCol := result.ColumnByName("value")
+	for i := 0; i < result.Height(); i++ {
+		v, _ := valCol.GetFloat64(i)
+		if v == 0 {
+			t.Errorf("expected non-zero value at row %d", i)
+		}
+	}
+}
+
+func TestJoinLeftOnRightOn(t *testing.T) {
+	// Test using both LeftOn and RightOn with different column names
+	left, _ := NewDataFrame(
+		NewSeriesInt64("left_key", []int64{1, 2, 3}),
+		NewSeriesString("left_val", []string{"A", "B", "C"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("right_key", []int64{2, 3, 4}),
+		NewSeriesString("right_val", []string{"X", "Y", "Z"}),
+	)
+
+	result, err := left.Join(right, LeftOn("left_key").RightOn("right_key"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	// Should have 2 matches (2, 3)
+	if result.Height() != 2 {
+		t.Errorf("expected 2 rows, got %d", result.Height())
+	}
+
+	// Both key columns should be present
+	if result.ColumnByName("left_key") == nil {
+		t.Error("missing 'left_key' column")
+	}
+	if result.ColumnByName("right_key") == nil {
+		t.Error("missing 'right_key' column")
+	}
+}
+
+func TestJoinEmptyLeftAndRight(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{}),
+		NewSeriesString("name", []string{}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{}),
+		NewSeriesFloat64("value", []float64{}),
+	)
+
+	result, err := left.Join(right, On("id"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	if result.Height() != 0 {
+		t.Errorf("expected 0 rows, got %d", result.Height())
+	}
+}
+
+func TestDefaultJoinOptions(t *testing.T) {
+	opts := DefaultJoinOptions()
+	if opts.suffix != "_right" {
+		t.Errorf("expected suffix '_right', got '%s'", opts.suffix)
+	}
+	if opts.how != InnerJoin {
+		t.Errorf("expected InnerJoin, got %d", opts.how)
+	}
+}
+
 func BenchmarkInnerJoin(b *testing.B) {
 	// Create DataFrames with 10k rows
 	n := 10000

@@ -17,7 +17,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Galleon Join Example ===\n")
+	fmt.Println("=== Galleon Join Example ===")
 
 	// =========================================================================
 	// Create Sample Data

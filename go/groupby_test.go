@@ -470,6 +470,511 @@ func TestGroupByWithAlias(t *testing.T) {
 	}
 }
 
+// Additional tests for coverage
+
+func TestGroupByNoKeys(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesFloat64("value", []float64{1, 2, 3}),
+	)
+
+	gb := df.GroupBy()
+	_, err := gb.Sum("value")
+	if err == nil {
+		t.Error("expected error for GroupBy with no keys")
+	}
+}
+
+func TestGroupByFloat32Key(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesFloat32("key", []float32{1.0, 2.0, 1.0, 2.0}),
+		NewSeriesFloat64("value", []float64{10, 20, 30, 40}),
+	)
+
+	result, err := df.GroupBy("key").Sum("value")
+	if err != nil {
+		t.Fatalf("failed to compute sum: %v", err)
+	}
+
+	if result.Height() != 2 {
+		t.Errorf("expected 2 groups, got %d", result.Height())
+	}
+}
+
+func TestGroupByInt32Key(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesInt32("key", []int32{1, 2, 1, 2}),
+		NewSeriesFloat64("value", []float64{10, 20, 30, 40}),
+	)
+
+	result, err := df.GroupBy("key").Sum("value")
+	if err != nil {
+		t.Fatalf("failed to compute sum: %v", err)
+	}
+
+	if result.Height() != 2 {
+		t.Errorf("expected 2 groups, got %d", result.Height())
+	}
+}
+
+func TestGroupByBoolKey(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesBool("active", []bool{true, false, true, false, true}),
+		NewSeriesFloat64("score", []float64{10, 20, 30, 40, 50}),
+	)
+
+	result, err := df.GroupBy("active").Sum("score")
+	if err != nil {
+		t.Fatalf("failed to compute sum: %v", err)
+	}
+
+	if result.Height() != 2 {
+		t.Errorf("expected 2 groups, got %d", result.Height())
+	}
+
+	// Verify sums: true = 10+30+50 = 90, false = 20+40 = 60
+	activeCol := result.ColumnByName("active")
+	sumCol := result.ColumnByName("score_sum")
+
+	for i := 0; i < result.Height(); i++ {
+		active := activeCol.Bool()[i]
+		sum, _ := sumCol.GetFloat64(i)
+
+		if active && sum != 90 {
+			t.Errorf("true sum: expected 90, got %f", sum)
+		}
+		if !active && sum != 60 {
+			t.Errorf("false sum: expected 60, got %f", sum)
+		}
+	}
+}
+
+func TestGroupBySumFloat32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "B", "A", "B"}),
+		NewSeriesFloat32("value", []float32{1.0, 2.0, 3.0, 4.0}),
+	)
+
+	result, err := df.GroupBy("group").Sum("value")
+	if err != nil {
+		t.Fatalf("failed to compute sum: %v", err)
+	}
+
+	groupCol := result.ColumnByName("group")
+	sumCol := result.ColumnByName("value_sum")
+
+	for i := 0; i < result.Height(); i++ {
+		grp, _ := groupCol.GetString(i)
+		sum, _ := sumCol.GetFloat64(i)
+
+		switch grp {
+		case "A":
+			if sum != 4 { // 1 + 3
+				t.Errorf("A sum: expected 4, got %f", sum)
+			}
+		case "B":
+			if sum != 6 { // 2 + 4
+				t.Errorf("B sum: expected 6, got %f", sum)
+			}
+		}
+	}
+}
+
+func TestGroupBySumInt32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "B", "A", "B"}),
+		NewSeriesInt32("value", []int32{1, 2, 3, 4}),
+	)
+
+	result, err := df.GroupBy("group").Sum("value")
+	if err != nil {
+		t.Fatalf("failed to compute sum: %v", err)
+	}
+
+	groupCol := result.ColumnByName("group")
+	sumCol := result.ColumnByName("value_sum")
+
+	for i := 0; i < result.Height(); i++ {
+		grp, _ := groupCol.GetString(i)
+		sum, _ := sumCol.GetFloat64(i)
+
+		switch grp {
+		case "A":
+			if sum != 4 {
+				t.Errorf("A sum: expected 4, got %f", sum)
+			}
+		case "B":
+			if sum != 6 {
+				t.Errorf("B sum: expected 6, got %f", sum)
+			}
+		}
+	}
+}
+
+func TestGroupByMeanFloat32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A"}),
+		NewSeriesFloat32("value", []float32{2.0, 4.0}),
+	)
+
+	result, err := df.GroupBy("group").Mean("value")
+	if err != nil {
+		t.Fatalf("failed to compute mean: %v", err)
+	}
+
+	meanCol := result.ColumnByName("value_mean")
+	mean, _ := meanCol.GetFloat64(0)
+
+	if mean != 3.0 {
+		t.Errorf("expected mean 3.0, got %f", mean)
+	}
+}
+
+func TestGroupByMeanInt32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A"}),
+		NewSeriesInt32("value", []int32{2, 4}),
+	)
+
+	result, err := df.GroupBy("group").Mean("value")
+	if err != nil {
+		t.Fatalf("failed to compute mean: %v", err)
+	}
+
+	meanCol := result.ColumnByName("value_mean")
+	mean, _ := meanCol.GetFloat64(0)
+
+	if mean != 3.0 {
+		t.Errorf("expected mean 3.0, got %f", mean)
+	}
+}
+
+func TestGroupByMinFloat32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesFloat32("value", []float32{3.0, 1.0, 2.0}),
+	)
+
+	result, err := df.GroupBy("group").Min("value")
+	if err != nil {
+		t.Fatalf("failed to compute min: %v", err)
+	}
+
+	minCol := result.ColumnByName("value_min")
+	min, _ := minCol.GetFloat64(0)
+
+	if min != 1.0 {
+		t.Errorf("expected min 1.0, got %f", min)
+	}
+}
+
+func TestGroupByMinInt32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesInt32("value", []int32{3, 1, 2}),
+	)
+
+	result, err := df.GroupBy("group").Min("value")
+	if err != nil {
+		t.Fatalf("failed to compute min: %v", err)
+	}
+
+	minCol := result.ColumnByName("value_min")
+	min := minCol.Int32()[0]
+
+	if min != 1 {
+		t.Errorf("expected min 1, got %d", min)
+	}
+}
+
+func TestGroupByMinString(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesString("value", []string{"cherry", "apple", "banana"}),
+	)
+
+	result, err := df.GroupBy("group").Min("value")
+	if err != nil {
+		t.Fatalf("failed to compute min: %v", err)
+	}
+
+	minCol := result.ColumnByName("value_min")
+	min := minCol.Strings()[0]
+
+	if min != "apple" {
+		t.Errorf("expected min 'apple', got '%s'", min)
+	}
+}
+
+func TestGroupByMaxFloat32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesFloat32("value", []float32{1.0, 3.0, 2.0}),
+	)
+
+	result, err := df.GroupBy("group").Max("value")
+	if err != nil {
+		t.Fatalf("failed to compute max: %v", err)
+	}
+
+	maxCol := result.ColumnByName("value_max")
+	max, _ := maxCol.GetFloat64(0)
+
+	if max != 3.0 {
+		t.Errorf("expected max 3.0, got %f", max)
+	}
+}
+
+func TestGroupByMaxInt32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesInt32("value", []int32{1, 3, 2}),
+	)
+
+	result, err := df.GroupBy("group").Max("value")
+	if err != nil {
+		t.Fatalf("failed to compute max: %v", err)
+	}
+
+	maxCol := result.ColumnByName("value_max")
+	max := maxCol.Int32()[0]
+
+	if max != 3 {
+		t.Errorf("expected max 3, got %d", max)
+	}
+}
+
+func TestGroupByMaxString(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesString("value", []string{"cherry", "apple", "banana"}),
+	)
+
+	result, err := df.GroupBy("group").Max("value")
+	if err != nil {
+		t.Fatalf("failed to compute max: %v", err)
+	}
+
+	maxCol := result.ColumnByName("value_max")
+	max := maxCol.Strings()[0]
+
+	if max != "cherry" {
+		t.Errorf("expected max 'cherry', got '%s'", max)
+	}
+}
+
+func TestGroupByFirstFloat32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesFloat32("value", []float32{1.0, 2.0, 3.0}),
+	)
+
+	result, err := df.GroupBy("group").First("value")
+	if err != nil {
+		t.Fatalf("failed to compute first: %v", err)
+	}
+
+	firstCol := result.ColumnByName("value_first")
+	first := firstCol.Float32()[0]
+
+	if first != 1.0 {
+		t.Errorf("expected first 1.0, got %f", first)
+	}
+}
+
+func TestGroupByFirstInt32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesInt32("value", []int32{1, 2, 3}),
+	)
+
+	result, err := df.GroupBy("group").First("value")
+	if err != nil {
+		t.Fatalf("failed to compute first: %v", err)
+	}
+
+	firstCol := result.ColumnByName("value_first")
+	first := firstCol.Int32()[0]
+
+	if first != 1 {
+		t.Errorf("expected first 1, got %d", first)
+	}
+}
+
+func TestGroupByFirstBool(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesBool("value", []bool{true, false, true}),
+	)
+
+	result, err := df.GroupBy("group").First("value")
+	if err != nil {
+		t.Fatalf("failed to compute first: %v", err)
+	}
+
+	firstCol := result.ColumnByName("value_first")
+	first := firstCol.Bool()[0]
+
+	if !first {
+		t.Errorf("expected first true, got %v", first)
+	}
+}
+
+func TestGroupByLastFloat32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesFloat32("value", []float32{1.0, 2.0, 3.0}),
+	)
+
+	result, err := df.GroupBy("group").Last("value")
+	if err != nil {
+		t.Fatalf("failed to compute last: %v", err)
+	}
+
+	lastCol := result.ColumnByName("value_last")
+	last := lastCol.Float32()[0]
+
+	if last != 3.0 {
+		t.Errorf("expected last 3.0, got %f", last)
+	}
+}
+
+func TestGroupByLastInt32(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesInt32("value", []int32{1, 2, 3}),
+	)
+
+	result, err := df.GroupBy("group").Last("value")
+	if err != nil {
+		t.Fatalf("failed to compute last: %v", err)
+	}
+
+	lastCol := result.ColumnByName("value_last")
+	last := lastCol.Int32()[0]
+
+	if last != 3 {
+		t.Errorf("expected last 3, got %d", last)
+	}
+}
+
+func TestGroupByLastBool(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "A"}),
+		NewSeriesBool("value", []bool{true, false, true}),
+	)
+
+	result, err := df.GroupBy("group").Last("value")
+	if err != nil {
+		t.Fatalf("failed to compute last: %v", err)
+	}
+
+	lastCol := result.ColumnByName("value_last")
+	last := lastCol.Bool()[0]
+
+	if !last {
+		t.Errorf("expected last true, got %v", last)
+	}
+}
+
+func TestGroupByInvalidKeyColumn(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "B"}),
+		NewSeriesFloat64("value", []float64{1, 2}),
+	)
+
+	gb := df.GroupBy("nonexistent")
+	if gb.NumGroups() != 0 {
+		t.Error("expected 0 groups for invalid key column")
+	}
+}
+
+func TestGroupByUnsupportedSumDtype(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "B"}),
+		NewSeriesString("value", []string{"x", "y"}),
+	)
+
+	_, err := df.GroupBy("group").Sum("value")
+	if err == nil {
+		t.Error("expected error for sum on string column")
+	}
+}
+
+func TestGroupByUnsupportedMeanDtype(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "B"}),
+		NewSeriesString("value", []string{"x", "y"}),
+	)
+
+	_, err := df.GroupBy("group").Mean("value")
+	if err == nil {
+		t.Error("expected error for mean on string column")
+	}
+}
+
+func TestGroupByMultiKeyFloat64(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesFloat64("key1", []float64{1.0, 1.0, 2.0, 2.0}),
+		NewSeriesFloat64("key2", []float64{10.0, 20.0, 10.0, 20.0}),
+		NewSeriesFloat64("value", []float64{100, 200, 300, 400}),
+	)
+
+	result, err := df.GroupBy("key1", "key2").Sum("value")
+	if err != nil {
+		t.Fatalf("failed to compute sum: %v", err)
+	}
+
+	if result.Height() != 4 {
+		t.Errorf("expected 4 groups, got %d", result.Height())
+	}
+}
+
+func TestGroupByToFloat64Conversion(t *testing.T) {
+	// Test toFloat64 helper with various types
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A", "A", "B", "B"}),
+		NewSeriesFloat32("val_f32", []float32{1.5, 2.5, 3.5, 4.5}),
+		NewSeriesInt32("val_i32", []int32{1, 2, 3, 4}),
+		NewSeriesInt64("val_i64", []int64{10, 20, 30, 40}),
+	)
+
+	// Variance and Std use toFloat64 internally
+	_, err := df.GroupBy("group").Var("val_f32")
+	if err != nil {
+		t.Fatalf("failed to compute variance for float32: %v", err)
+	}
+
+	_, err = df.GroupBy("group").Var("val_i32")
+	if err != nil {
+		t.Fatalf("failed to compute variance for int32: %v", err)
+	}
+
+	_, err = df.GroupBy("group").Var("val_i64")
+	if err != nil {
+		t.Fatalf("failed to compute variance for int64: %v", err)
+	}
+}
+
+func TestGroupBySingleRow(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesString("group", []string{"A"}),
+		NewSeriesFloat64("value", []float64{100}),
+	)
+
+	// Std/Var of single element should be NaN
+	stdResult, err := df.GroupBy("group").Std("value")
+	if err != nil {
+		t.Fatalf("failed to compute std: %v", err)
+	}
+
+	stdCol := stdResult.ColumnByName("value_std")
+	std, _ := stdCol.GetFloat64(0)
+
+	if !math.IsNaN(std) {
+		t.Errorf("expected NaN for std of single element, got %f", std)
+	}
+}
+
 func BenchmarkGroupBySum(b *testing.B) {
 	// Create a DataFrame with 100k rows and 100 groups
 	n := 100000

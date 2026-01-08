@@ -17,7 +17,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Galleon Lazy Evaluation Example ===\n")
+	fmt.Println("=== Galleon Lazy Evaluation Example ===")
 
 	// =========================================================================
 	// Create Sample Data
