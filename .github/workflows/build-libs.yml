@@ -1,0 +1,125 @@
+name: Build Precompiled Libraries
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    paths:
+      - 'core/src/**'
+      - 'core/build.zig'
+      - 'core/build.zig.zon'
+    branches:
+      - main
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS
+          - os: macos-latest
+            target: aarch64-macos
+            artifact: darwin_arm64
+          - os: macos-latest
+            target: x86_64-macos
+            artifact: darwin_amd64
+          # Linux
+          - os: ubuntu-latest
+            target: aarch64-linux-gnu
+            artifact: linux_arm64
+          - os: ubuntu-latest
+            target: x86_64-linux-gnu
+            artifact: linux_amd64
+          # Windows
+          - os: ubuntu-latest
+            target: x86_64-windows-gnu
+            artifact: windows_amd64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Build library
+        run: |
+          cd core
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p prebuilt/${{ matrix.artifact }}
+          cp core/zig-out/lib/libgalleon.a prebuilt/${{ matrix.artifact }}/
+          # Also copy header for completeness
+          cp core/include/galleon.h prebuilt/${{ matrix.artifact }}/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgalleon-${{ matrix.artifact }}
+          path: prebuilt/${{ matrix.artifact }}/
+          retention-days: 1
+
+  commit:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: prebuilt/
+          pattern: libgalleon-*
+          merge-multiple: false
+
+      - name: Organize artifacts
+        run: |
+          # Artifacts download as libgalleon-{platform}/libgalleon.a
+          # Reorganize to prebuilt/{platform}/libgalleon.a
+          mkdir -p go/lib
+          for dir in prebuilt/libgalleon-*/; do
+            platform=$(basename "$dir" | sed 's/libgalleon-//')
+            mkdir -p "go/lib/$platform"
+            cp "$dir"/* "go/lib/$platform/"
+          done
+          rm -rf prebuilt/
+
+          # List what we have
+          echo "Built libraries:"
+          find go/lib -name "*.a" -exec ls -lh {} \;
+
+      - name: Commit prebuilt libraries
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add go/lib/
+
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to prebuilt libraries"
+          else
+            git commit -m "Update prebuilt libraries
+
+          Built from: ${{ github.sha }}
+
+          Platforms:
+          - darwin_arm64 (macOS Apple Silicon)
+          - darwin_amd64 (macOS Intel)
+          - linux_arm64
+          - linux_amd64
+          - windows_amd64
+
+          [skip ci]"
+            git push
+          fi

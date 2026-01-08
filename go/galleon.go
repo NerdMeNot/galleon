@@ -1,9 +1,12 @@
 package galleon
 
-/*
-#cgo CFLAGS: -I${SRCDIR}/../core/zig-out/include
-#cgo LDFLAGS: -L${SRCDIR}/../core/zig-out/lib -lgalleon
+// CGO directives are in platform-specific files:
+// - cgo_dev.go: Local development (build with -tags dev)
+// - cgo_darwin_arm64.go, cgo_darwin_amd64.go: macOS prebuilt
+// - cgo_linux_amd64.go, cgo_linux_arm64.go: Linux prebuilt
+// - cgo_windows_amd64.go: Windows prebuilt
 
+/*
 #include "galleon.h"
 */
 import "C"
