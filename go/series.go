@@ -1,9 +1,6 @@
 package galleon
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/core/zig-out/include
-#cgo LDFLAGS: -L${SRCDIR}/core/zig-out/lib -lgalleon
-
 #include "galleon.h"
 #include <stdlib.h>
 */
