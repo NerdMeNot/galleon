@@ -6,6 +6,7 @@ Welcome to the Galleon documentation. This directory contains comprehensive docu
 
 ```
 docs/
+├── 00-philosophy.md         # Why Galleon exists
 ├── 01-getting-started/      # Installation and quick start
 │   ├── 01-installation.md
 │   └── 02-quickstart.md
@@ -23,6 +24,10 @@ docs/
     ├── 01-types.md
     └── 02-performance.md
 ```
+
+## Philosophy
+
+- [Why Galleon Exists](00-philosophy.md) - Design philosophy and architectural decisions
 
 ## Getting Started
 
