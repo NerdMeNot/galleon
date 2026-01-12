@@ -128,7 +128,7 @@ func main() {
 	fmt.Println(errors)
 	fmt.Println()
 
-	// Filter for WARNING or ERROR
+	// Add error/warning flags
 	issues, _ := logsDF.Lazy().
 		WithColumn("is_error", galleon.Col("message").Str().Contains("ERROR")).
 		WithColumn("is_warning", galleon.Col("message").Str().Contains("WARNING")).
@@ -170,7 +170,7 @@ func main() {
 	fmt.Println(pdfFiles)
 	fmt.Println()
 
-	// Filter files starting with 'report' or 'data'
+	// Filter files starting with specific prefixes
 	dataFiles, _ := filesDF.Lazy().
 		WithColumn("is_report", galleon.Col("filename").Str().StartsWith("report")).
 		WithColumn("is_data", galleon.Col("filename").Str().StartsWith("data")).
@@ -211,7 +211,7 @@ func main() {
 	fmt.Println(updatedCodes)
 	fmt.Println()
 
-	// Example 6: Email Validation Pipeline
+	// Example 6: Email Processing Pipeline
 	fmt.Println("Example 6: Email Processing Pipeline")
 	fmt.Println("------------------------------------")
 
@@ -234,21 +234,14 @@ func main() {
 	fmt.Println(emailsDF)
 	fmt.Println()
 
-	// Clean and validate company emails
+	// Normalize emails (lowercase) and check if company email
 	processedEmails, _ := emailsDF.Lazy().
-		// Normalize: lowercase and trim
-		WithColumn("email_clean", galleon.Col("email").Str().Lower().Str().Trim()).
-		// Check if company email
-		WithColumn("is_company_email", galleon.Col("email_clean").Str().Contains("@company.com")).
-		// Filter to company emails only
-		Filter(galleon.Col("is_company_email").Eq(true)).
-		Select(
-			galleon.Col("user_id"),
-			galleon.Col("email_clean"),
-		).
+		WithColumn("email_lower", galleon.Col("email").Str().Lower()).
+		WithColumn("email_trimmed", galleon.Col("email").Str().Trim()).
+		WithColumn("is_company_email", galleon.Col("email").Str().Contains("@company.com")).
 		Collect()
 
-	fmt.Println("Processed Company Emails:")
+	fmt.Println("Processed Emails:")
 	fmt.Println(processedEmails)
 	fmt.Println()
 
@@ -278,25 +271,22 @@ func main() {
 	fmt.Println(feedbackDF)
 	fmt.Println()
 
-	// Categorize by keywords
+	// Categorize by keywords (case-insensitive via lowercase first)
+	// Note: We process lowercase separately since chaining Str() twice isn't supported
 	categorized, _ := feedbackDF.Lazy().
 		WithColumn("text_lower", galleon.Col("text").Str().Lower()).
+		Collect()
+
+	// Now check patterns on the lowercase version
+	categorized2, _ := categorized.Lazy().
 		WithColumn("mentions_shipping", galleon.Col("text_lower").Str().Contains("shipping")).
 		WithColumn("mentions_quality", galleon.Col("text_lower").Str().Contains("quality")).
 		WithColumn("mentions_damage", galleon.Col("text_lower").Str().Contains("damage")).
 		WithColumn("mentions_service", galleon.Col("text_lower").Str().Contains("service")).
-		Select(
-			galleon.Col("feedback_id"),
-			galleon.Col("text"),
-			galleon.Col("mentions_shipping"),
-			galleon.Col("mentions_quality"),
-			galleon.Col("mentions_damage"),
-			galleon.Col("mentions_service"),
-		).
 		Collect()
 
 	fmt.Println("Categorized Feedback:")
-	fmt.Println(categorized)
+	fmt.Println(categorized2)
 	fmt.Println()
 
 	// Example 8: URL Processing
@@ -341,5 +331,5 @@ func main() {
 	fmt.Println(secureAPIs)
 	fmt.Println()
 
-	fmt.Println("✓ String Operations Examples Complete!")
+	fmt.Println("String Operations Examples Complete!")
 }

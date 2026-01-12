@@ -91,9 +91,9 @@ func main() {
 	fmt.Println("-------------------------")
 
 	result4, err := df.Lazy().
-		WithColumn("ma3", galleon.Col("close").RollingMean(3, 1)).
-		WithColumn("ma5", galleon.Col("close").RollingMean(5, 1)).
-		WithColumn("rolling_vol_3d", galleon.Col("volume").RollingSum(3, 1)).
+		WithColumn("ma3", galleon.Col("close").RollingMean(3)).
+		WithColumn("ma5", galleon.Col("close").RollingMean(5)).
+		WithColumn("rolling_vol_3d", galleon.Col("volume").RollingSum(3)).
 		Collect()
 	if err != nil {
 		panic(err)
@@ -112,11 +112,11 @@ func main() {
 		WithColumn("daily_return", galleon.Col("close").PctChange()).
 		WithColumn("price_change", galleon.Col("close").Diff()).
 		// Moving averages
-		WithColumn("sma5", galleon.Col("close").RollingMean(5, 3)).
+		WithColumn("sma5", galleon.Col("close").RollingMean(5)).
 		// Running metrics
 		WithColumn("max_price_so_far", galleon.Col("close").CumMax()).
 		// Volume analysis
-		WithColumn("volume_ma3", galleon.Col("volume").RollingMean(3, 1)).
+		WithColumn("volume_ma3", galleon.Col("volume").RollingMean(3)).
 		Collect()
 	if err != nil {
 		panic(err)
@@ -126,7 +126,7 @@ func main() {
 	fmt.Println(technical)
 	fmt.Println()
 
-	// Example 6: Calculating Drawdown
+	// Example 6: Calculating Drawdown (manual calculation)
 	fmt.Println("Example 6: Drawdown Analysis")
 	fmt.Println("----------------------------")
 
@@ -135,26 +135,25 @@ func main() {
 		WithColumn("running_max", galleon.Col("close").CumMax()).
 		Collect()
 
-	// Calculate drawdown using the running max
-	drawdown, err := withMax.Lazy().
-		WithColumn("drawdown",
-			galleon.Col("close").Sub(galleon.Col("running_max")).
-				Div(galleon.Col("running_max")).
-				Mul(galleon.Lit(100.0)), // Convert to percentage
-		).
-		Select(
-			galleon.Col("date"),
-			galleon.Col("close"),
-			galleon.Col("running_max"),
-			galleon.Col("drawdown"),
-		).
-		Collect()
-	if err != nil {
-		panic(err)
+	// Calculate drawdown manually (since chained arithmetic isn't supported)
+	closeData := withMax.ColumnByName("close").Float64()
+	maxData := withMax.ColumnByName("running_max").Float64()
+	drawdownData := make([]float64, len(closeData))
+	for i := range closeData {
+		if maxData[i] > 0 {
+			drawdownData[i] = ((closeData[i] - maxData[i]) / maxData[i]) * 100.0
+		}
 	}
 
+	drawdownDF, _ := galleon.NewDataFrame(
+		galleon.NewSeriesString("date", dates),
+		galleon.NewSeriesFloat64("close", closeData),
+		galleon.NewSeriesFloat64("running_max", maxData),
+		galleon.NewSeriesFloat64("drawdown", drawdownData),
+	)
+
 	fmt.Println("Drawdown Analysis (% from peak):")
-	fmt.Println(drawdown)
+	fmt.Println(drawdownDF)
 	fmt.Println()
 
 	// Example 7: Week-over-Week Comparison
@@ -190,7 +189,7 @@ func main() {
 	fmt.Println(finalWow)
 	fmt.Println()
 
-	// Example 8: Volatility Calculation
+	// Example 8: Simple Volatility (using Std aggregation)
 	fmt.Println("Example 8: Volatility Analysis")
 	fmt.Println("------------------------------")
 
@@ -199,25 +198,23 @@ func main() {
 		WithColumn("return", galleon.Col("close").PctChange()).
 		Collect()
 
-	// Calculate rolling standard deviation of returns (volatility)
-	volatility, err := withReturns.Lazy().
-		WithColumn("volatility_5d",
-			galleon.Col("return").RollingStd(5, 3),
-		).
-		Select(
-			galleon.Col("date"),
-			galleon.Col("close"),
-			galleon.Col("return"),
-			galleon.Col("volatility_5d"),
-		).
-		Collect()
-	if err != nil {
-		panic(err)
-	}
+	// Get the returns data
+	returns := withReturns.ColumnByName("return").Float64()
 
-	fmt.Println("5-Day Rolling Volatility:")
-	fmt.Println(volatility)
+	// Calculate simple statistics on returns
+	returnSeries := galleon.NewSeriesFloat64("returns", returns[1:]) // Skip first NaN
+	stats := returnSeries.Describe()
+
+	fmt.Println("Return Statistics:")
+	fmt.Printf("  Mean Return: %.4f\n", stats["mean"])
+	fmt.Printf("  Std Dev (Volatility): %.4f\n", stats["std"])
+	fmt.Printf("  Min Return: %.4f\n", stats["min"])
+	fmt.Printf("  Max Return: %.4f\n", stats["max"])
 	fmt.Println()
 
-	fmt.Println("✓ Window Functions Examples Complete!")
+	fmt.Println("Returns Data:")
+	fmt.Println(withReturns)
+	fmt.Println()
+
+	fmt.Println("Window Functions Examples Complete!")
 }

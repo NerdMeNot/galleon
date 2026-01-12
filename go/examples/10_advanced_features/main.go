@@ -70,18 +70,18 @@ func main() {
 	withDiscount, _ := salesDF.Lazy().
 		Apply("sales", func(s *galleon.Series) (*galleon.Series, error) {
 			data := s.Float64()
-			discount := make([]float64, len(data))
 			finalPrice := make([]float64, len(data))
 
 			for i, amount := range data {
+				var discount float64
 				if amount < 100 {
-					discount[i] = 0.0
+					discount = 0.0
 				} else if amount < 500 {
-					discount[i] = 0.10
+					discount = 0.10
 				} else {
-					discount[i] = 0.20
+					discount = 0.20
 				}
-				finalPrice[i] = amount * (1 - discount[i])
+				finalPrice[i] = amount * (1 - discount)
 			}
 
 			return galleon.NewSeriesFloat64("final_price", finalPrice), nil
@@ -206,8 +206,9 @@ func main() {
 		Cache() // Cache the joined table
 
 	// Multiple aggregations on the cached join
+	// Note: GroupBy takes string column names, not expressions
 	totalByUser, _ := joined.
-		GroupBy(galleon.Col("name")).
+		GroupBy("name").
 		Agg(galleon.Col("amount").Sum().Alias("total_amount")).
 		Collect()
 
@@ -216,7 +217,7 @@ func main() {
 	fmt.Println()
 
 	countByUser, _ := joined.
-		GroupBy(galleon.Col("name")).
+		GroupBy("name").
 		Agg(galleon.Col("order_id").Count().Alias("order_count")).
 		Collect()
 
@@ -293,11 +294,10 @@ func main() {
 	fmt.Println()
 
 	// Safe division with error handling
+	// Note: UDF operates on one column, so we need to pass denominator data through closure
 	safeDivision, _ := divisionDF.Lazy().
 		Apply("numerator", func(s *galleon.Series) (*galleon.Series, error) {
 			nums := s.Float64()
-			// Get denominator from the same DataFrame would need context
-			// For this example, we'll show the pattern
 			result := make([]float64, len(nums))
 			for i, n := range nums {
 				d := denominators[i]
@@ -336,8 +336,9 @@ func main() {
 	fmt.Println()
 
 	// Expensive aggregation cached
+	// Note: GroupBy takes string column names
 	expensiveAgg := perfDF.Lazy().
-		GroupBy(galleon.Col("category")).
+		GroupBy("category").
 		Agg(
 			galleon.Col("amount").Sum().Alias("total"),
 			galleon.Col("amount").Mean().Alias("mean"),
@@ -354,9 +355,9 @@ func main() {
 	fmt.Println(highTotals)
 	fmt.Println()
 
-	// Query 2: Sort by mean
+	// Query 2: Sort by mean (using string column name)
 	sortedByMean, _ := expensiveAgg.
-		Sort(galleon.Col("mean"), false).
+		Sort("mean", false).
 		Head(3).
 		Collect()
 
@@ -373,7 +374,7 @@ func main() {
 	fmt.Println(categoryCount)
 	fmt.Println()
 
-	fmt.Println("✓ Advanced Features Examples Complete!")
+	fmt.Println("Advanced Features Examples Complete!")
 	fmt.Println("\nKey Takeaways:")
 	fmt.Println("- UDFs enable custom business logic not available in built-in operations")
 	fmt.Println("- Caching materializes expensive computations for reuse")

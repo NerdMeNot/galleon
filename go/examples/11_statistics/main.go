@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 
 	galleon "github.com/NerdMeNot/galleon/go"
 )
@@ -119,9 +120,9 @@ func main() {
 	fmt.Println("...")
 	fmt.Println()
 
-	// Analyze shape by distribution type
+	// Analyze shape by distribution type (GroupBy takes strings)
 	shapeAnalysis, _ := distDF.Lazy().
-		GroupBy(galleon.Col("distribution")).
+		GroupBy("distribution").
 		Agg(
 			galleon.Col("value").Mean().Alias("mean"),
 			galleon.Col("value").Median().Alias("median"),
@@ -136,7 +137,7 @@ func main() {
 	fmt.Println("Interpretation:")
 	fmt.Println("  Skewness > 0: Right-skewed (tail on right)")
 	fmt.Println("  Skewness < 0: Left-skewed (tail on left)")
-	fmt.Println("  Skewness ≈ 0: Symmetric")
+	fmt.Println("  Skewness ~ 0: Symmetric")
 	fmt.Println("  Kurtosis > 0: Heavy-tailed (outliers)")
 	fmt.Println("  Kurtosis < 0: Light-tailed")
 	fmt.Println()
@@ -158,20 +159,40 @@ func main() {
 	fmt.Println(studyDF)
 	fmt.Println()
 
-	// Calculate correlation
-	correlation, _ := studyDF.Lazy().
-		Select(
-			galleon.Col("study_hours").Correlation(galleon.Col("exam_score")).Alias("correlation"),
-		).
-		Collect()
+	// Calculate correlation manually using Series methods
+	studySeries := studyDF.ColumnByName("study_hours")
+	scoreSeries := studyDF.ColumnByName("exam_score")
 
-	fmt.Println("Correlation between Study Hours and Exam Score:")
-	fmt.Println(correlation)
+	// Get data and means
+	studyData := studySeries.Float64()
+	scoreData := scoreSeries.Float64()
+	studyMean := studySeries.Mean()
+	scoreMean := scoreSeries.Mean()
+
+	// Calculate standard deviations manually
+	var studyVar, scoreVar float64
+	for i := range studyData {
+		studyVar += (studyData[i] - studyMean) * (studyData[i] - studyMean)
+		scoreVar += (scoreData[i] - scoreMean) * (scoreData[i] - scoreMean)
+	}
+	n := float64(len(studyData) - 1)
+	studyStd := math.Sqrt(studyVar / n)
+	scoreStd := math.Sqrt(scoreVar / n)
+
+	// Calculate covariance and Pearson correlation
+	var covariance float64
+	for i := range studyData {
+		covariance += (studyData[i] - studyMean) * (scoreData[i] - scoreMean)
+	}
+	covariance /= n
+	correlation := covariance / (studyStd * scoreStd)
+
+	fmt.Printf("Correlation between Study Hours and Exam Score: %.4f\n", correlation)
 	fmt.Println()
 	fmt.Println("Interpretation:")
-	fmt.Println("  Correlation ≈ 1: Strong positive relationship")
-	fmt.Println("  Correlation ≈ 0: No relationship")
-	fmt.Println("  Correlation ≈ -1: Strong negative relationship")
+	fmt.Println("  Correlation ~ 1: Strong positive relationship")
+	fmt.Println("  Correlation ~ 0: No relationship")
+	fmt.Println("  Correlation ~ -1: Strong negative relationship")
 	fmt.Println()
 
 	// Example 5: Group Statistics
@@ -201,9 +222,9 @@ func main() {
 	fmt.Println(salesDF.Head(10))
 	fmt.Println()
 
-	// Comprehensive statistics by region
+	// Comprehensive statistics by region (GroupBy takes strings)
 	regionalStats, _ := salesDF.Lazy().
-		GroupBy(galleon.Col("region")).
+		GroupBy("region").
 		Agg(
 			galleon.Col("sales").Count().Alias("count"),
 			galleon.Col("sales").Mean().Alias("mean"),
@@ -261,14 +282,13 @@ func main() {
 	fmt.Printf("Upper Bound: %.2f\n", upperBound)
 	fmt.Println()
 
-	// Filter outliers
-	outliers, _ := responseDF.Lazy().
-		Filter(galleon.Col("response_time_ms").Lt(galleon.Lit(lowerBound)).
-			Or(galleon.Col("response_time_ms").Gt(galleon.Lit(upperBound)))).
-		Collect()
-
+	// Find outliers manually (filter values outside bounds)
 	fmt.Println("Detected Outliers:")
-	fmt.Println(outliers)
+	for _, v := range responseTimes {
+		if v < lowerBound || v > upperBound {
+			fmt.Printf("  %.2f ms (outlier)\n", v)
+		}
+	}
 	fmt.Println()
 
 	// Example 7: Performance Benchmarking
@@ -296,9 +316,9 @@ func main() {
 	fmt.Println(benchmarkDF)
 	fmt.Println()
 
-	// Statistical comparison
+	// Statistical comparison (GroupBy and Sort take strings)
 	benchmarkStats, _ := benchmarkDF.Lazy().
-		GroupBy(galleon.Col("algorithm")).
+		GroupBy("algorithm").
 		Agg(
 			galleon.Col("execution_time_ms").Mean().Alias("avg_time"),
 			galleon.Col("execution_time_ms").Median().Alias("median_time"),
@@ -307,7 +327,7 @@ func main() {
 			galleon.Col("execution_time_ms").Max().Alias("worst_time"),
 			galleon.Col("execution_time_ms").Quantile(0.95).Alias("p95"),
 		).
-		Sort(galleon.Col("median_time"), true).
+		Sort("median_time", true).
 		Collect()
 
 	fmt.Println("Benchmark Results (sorted by median):")
@@ -318,7 +338,7 @@ func main() {
 	fmt.Println("Example 8: Quality Control - Process Capability")
 	fmt.Println("-----------------------------------------------")
 
-	// Manufacturing measurements (target: 100mm ± 2mm)
+	// Manufacturing measurements (target: 100mm +/- 2mm)
 	measurements := []float64{
 		99.8, 100.2, 99.9, 100.1, 100.0, 99.7, 100.3, 99.9,
 		100.2, 99.8, 100.1, 99.9, 100.0, 100.2, 99.8, 100.1,
@@ -354,7 +374,7 @@ func main() {
 	target := 100.0
 	tolerance := 2.0
 
-	fmt.Printf("Target: %.1f mm ± %.1f mm\n", target, tolerance)
+	fmt.Printf("Target: %.1f mm +/- %.1f mm\n", target, tolerance)
 	fmt.Printf("Actual Mean: %.2f mm\n", mean)
 	fmt.Printf("Std Dev: %.3f mm\n", stdDev)
 	fmt.Printf("Range: [%.2f, %.2f]\n",
@@ -364,19 +384,18 @@ func main() {
 
 	// Check if process is in control (mean close to target, low variation)
 	if mean > target-0.5 && mean < target+0.5 && stdDev < 0.5 {
-		fmt.Println("✓ Process is in control (mean near target, low variation)")
+		fmt.Println("Process is in control (mean near target, low variation)")
 	} else {
-		fmt.Println("✗ Process needs adjustment")
+		fmt.Println("Process needs adjustment")
 	}
 	fmt.Println()
 
-	fmt.Println("✓ Advanced Statistics Examples Complete!")
+	fmt.Println("Advanced Statistics Examples Complete!")
 	fmt.Println("\nKey Takeaways:")
 	fmt.Println("- Median is robust to outliers, mean is sensitive")
 	fmt.Println("- Quantiles provide detailed distribution understanding")
 	fmt.Println("- Skewness measures distribution asymmetry")
 	fmt.Println("- Kurtosis measures tail heaviness")
-	fmt.Println("- Correlation measures linear relationships")
 	fmt.Println("- IQR method is effective for outlier detection")
 	fmt.Println("- GroupBy enables comparative statistical analysis")
 }
