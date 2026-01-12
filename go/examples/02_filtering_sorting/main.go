@@ -104,8 +104,8 @@ func main() {
 	fmt.Println("\n4. Column Selection")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	// Select specific columns
-	selected, err := df.Select("id", "value")
+	// Select specific columns using expressions (unified API)
+	selected, err := df.Select(galleon.Col("id"), galleon.Col("value"))
 	if err != nil {
 		fmt.Printf("Error selecting: %v\n", err)
 		return
@@ -142,10 +142,10 @@ func main() {
 	fmt.Println("\n6. Combining Operations")
 	fmt.Println("-" + string(make([]byte, 40)))
 
-	// Filter, sort, and select in sequence
-	result, _ := df.FilterByMask(byteMask) // value > 10
+	// Filter, sort, and select in sequence using unified API
+	result, _ := df.Filter(galleon.Col("value").Gt(galleon.Lit(10.0)))
 	result, _ = result.SortBy("value", false)
-	result, _ = result.Select("id", "value")
+	result, _ = result.Select(galleon.Col("id"), galleon.Col("value"))
 	result = result.Head(5)
 
 	fmt.Println("Top 5 by value (where value > 10):")

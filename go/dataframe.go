@@ -410,8 +410,42 @@ func (df *DataFrame) ColumnByName(name string) *Series {
 	return df.columns[idx]
 }
 
-// Select returns a new DataFrame with only the specified columns
-func (df *DataFrame) Select(names ...string) (*DataFrame, error) {
+// Select returns a new DataFrame with columns computed from expressions.
+// This is the unified API matching LazyFrame.Select.
+//
+// Example:
+//
+//	df.Select(Col("a"), Col("b").Mul(Lit(2)).Alias("double_b"))
+func (df *DataFrame) Select(exprs ...Expr) (*DataFrame, error) {
+	if len(exprs) == 0 {
+		return NewDataFrame()
+	}
+
+	columns := make([]*Series, 0, len(exprs))
+	for _, expr := range exprs {
+		// Handle * (all columns) specially
+		if _, ok := expr.(*allColsExpr); ok {
+			for _, col := range df.columns {
+				columns = append(columns, col)
+			}
+			continue
+		}
+
+		col, err := evaluateExpr(expr, df)
+		if err != nil {
+			return nil, fmt.Errorf("select error: %w", err)
+		}
+		columns = append(columns, col)
+	}
+
+	return NewDataFrame(columns...)
+}
+
+// SelectColumns returns a new DataFrame with only the specified columns by name.
+// This is a convenience method; prefer Select(Col("a"), Col("b")) for consistency.
+//
+// Deprecated: Use Select(Col("a"), Col("b")) instead.
+func (df *DataFrame) SelectColumns(names ...string) (*DataFrame, error) {
 	cols := make([]*Series, 0, len(names))
 	for _, name := range names {
 		col := df.ColumnByName(name)
@@ -483,7 +517,23 @@ func (df *DataFrame) Tail(n int) *DataFrame {
 	return result
 }
 
-// FilterByMask returns a new DataFrame with only rows where mask is true
+// Filter returns a new DataFrame with only rows where the predicate is true.
+// This is the unified API matching LazyFrame.Filter.
+//
+// Example:
+//
+//	df.Filter(Col("age").Gt(Lit(30)))
+//	df.Filter(Col("active").Eq(Lit(true)))
+func (df *DataFrame) Filter(predicate Expr) (*DataFrame, error) {
+	mask, err := evaluatePredicate(predicate, df)
+	if err != nil {
+		return nil, fmt.Errorf("filter error: %w", err)
+	}
+	return df.FilterByMask(mask)
+}
+
+// FilterByMask returns a new DataFrame with only rows where mask is true.
+// This is a lower-level method; prefer Filter(predicate) for consistency.
 func (df *DataFrame) FilterByMask(mask []byte) (*DataFrame, error) {
 	if len(mask) != df.height {
 		return nil, fmt.Errorf("mask length %d doesn't match DataFrame height %d", len(mask), df.height)
@@ -611,8 +661,32 @@ func (df *DataFrame) SortBy(column string, ascending bool) (*DataFrame, error) {
 	return df.FilterByIndices(indices)
 }
 
-// WithColumn returns a new DataFrame with an additional or replaced column
-func (df *DataFrame) WithColumn(col *Series) (*DataFrame, error) {
+// WithColumn returns a new DataFrame with an additional or replaced column.
+// The expression is evaluated and the result is assigned to the given column name.
+// This is the unified API matching LazyFrame.WithColumn.
+//
+// Example:
+//
+//	df.WithColumn("double_x", Col("x").Mul(Lit(2)))
+func (df *DataFrame) WithColumn(name string, expr Expr) (*DataFrame, error) {
+	// Evaluate the expression
+	col, err := evaluateExpr(expr, df)
+	if err != nil {
+		return nil, fmt.Errorf("with_column error: %w", err)
+	}
+
+	// Rename to the target name
+	col = col.Rename(name)
+
+	// Use the series-based implementation
+	return df.WithColumnSeries(col)
+}
+
+// WithColumnSeries returns a new DataFrame with an additional or replaced column.
+// This is a lower-level method that takes a pre-built Series.
+//
+// Deprecated: Use WithColumn(name, expr) instead for consistency with LazyFrame.
+func (df *DataFrame) WithColumnSeries(col *Series) (*DataFrame, error) {
 	if col.Len() != df.height && df.height > 0 {
 		return nil, fmt.Errorf("column '%s' has length %d, expected %d", col.Name(), col.Len(), df.height)
 	}

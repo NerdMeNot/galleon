@@ -155,7 +155,7 @@ func executeWithColumn(plan *LogicalPlan) (*DataFrame, error) {
 		return nil, fmt.Errorf("with_column error: %w", err)
 	}
 
-	return df.WithColumn(col)
+	return df.WithColumnSeries(col)
 }
 
 // ============================================================================

@@ -68,22 +68,22 @@ func TestDataFrameSelect(t *testing.T) {
 
 	df, _ := NewDataFrame(col1, col2, col3)
 
-	// Select single column
-	df2, err := df.Select("b")
+	// Select single column using expression
+	df2, err := df.Select(Col("b"))
 	if err != nil {
 		t.Fatalf("Select failed: %v", err)
 	}
 	if df2.Width() != 1 {
-		t.Errorf("Select('b') Width = %d, want 1", df2.Width())
+		t.Errorf("Select(Col('b')) Width = %d, want 1", df2.Width())
 	}
 
-	// Select multiple columns
-	df3, err := df.Select("c", "a")
+	// Select multiple columns using expressions
+	df3, err := df.Select(Col("c"), Col("a"))
 	if err != nil {
 		t.Fatalf("Select failed: %v", err)
 	}
 	if df3.Width() != 2 {
-		t.Errorf("Select('c', 'a') Width = %d, want 2", df3.Width())
+		t.Errorf("Select(Col('c'), Col('a')) Width = %d, want 2", df3.Width())
 	}
 
 	// Verify order
@@ -93,9 +93,35 @@ func TestDataFrameSelect(t *testing.T) {
 	}
 
 	// Select nonexistent column
-	_, err = df.Select("nonexistent")
+	_, err = df.Select(Col("nonexistent"))
 	if err == nil {
-		t.Error("Select('nonexistent') should fail")
+		t.Error("Select(Col('nonexistent')) should fail")
+	}
+}
+
+func TestDataFrameSelectWithTransform(t *testing.T) {
+	col1 := NewSeriesFloat64("a", []float64{1.0, 2.0, 3.0})
+	col2 := NewSeriesFloat64("b", []float64{4.0, 5.0, 6.0})
+
+	df, _ := NewDataFrame(col1, col2)
+
+	// Select with transformation (same API as LazyFrame)
+	df2, err := df.Select(Col("a"), Col("b").Mul(Lit(2.0)).Alias("double_b"))
+	if err != nil {
+		t.Fatalf("Select with transform failed: %v", err)
+	}
+	if df2.Width() != 2 {
+		t.Errorf("Width = %d, want 2", df2.Width())
+	}
+
+	// Check transformed column
+	doubleB := df2.ColumnByName("double_b")
+	if doubleB == nil {
+		t.Fatal("Column 'double_b' not found")
+	}
+	data := doubleB.Float64()
+	if data[0] != 8.0 || data[1] != 10.0 || data[2] != 12.0 {
+		t.Errorf("double_b = %v, want [8, 10, 12]", data)
 	}
 }
 
@@ -152,7 +178,33 @@ func TestDataFrameFilter(t *testing.T) {
 
 	df, _ := NewDataFrame(col1, col2)
 
-	// Filter by mask
+	// Filter using expression (unified API with LazyFrame)
+	df2, err := df.Filter(Col("a").Gt(Lit(2.0)))
+	if err != nil {
+		t.Fatalf("Filter failed: %v", err)
+	}
+	if df2.Height() != 3 {
+		t.Errorf("Filter Height = %d, want 3", df2.Height())
+	}
+
+	dataA := df2.ColumnByName("a").Float64()
+	if dataA[0] != 3.0 || dataA[1] != 4.0 || dataA[2] != 5.0 {
+		t.Errorf("Filter a = %v, want [3, 4, 5]", dataA)
+	}
+
+	dataB := df2.ColumnByName("b").Float64()
+	if dataB[0] != 30.0 || dataB[1] != 40.0 || dataB[2] != 50.0 {
+		t.Errorf("Filter b = %v, want [30, 40, 50]", dataB)
+	}
+}
+
+func TestDataFrameFilterByMask(t *testing.T) {
+	col1 := NewSeriesFloat64("a", []float64{1.0, 2.0, 3.0, 4.0, 5.0})
+	col2 := NewSeriesFloat64("b", []float64{10.0, 20.0, 30.0, 40.0, 50.0})
+
+	df, _ := NewDataFrame(col1, col2)
+
+	// Filter by mask (lower-level API)
 	mask := []byte{1, 0, 1, 0, 1} // select rows 0, 2, 4
 	df2, err := df.FilterByMask(mask)
 	if err != nil {
@@ -228,19 +280,21 @@ func TestDataFrameWithColumn(t *testing.T) {
 
 	df, _ := NewDataFrame(col1, col2)
 
-	// Add new column
-	col3 := NewSeriesFloat64("c", []float64{7.0, 8.0, 9.0})
-	df2, err := df.WithColumn(col3)
+	// Add new column using expression (unified API)
+	df2, err := df.WithColumn("c", Col("a").Add(Lit(10.0)))
 	if err != nil {
 		t.Fatalf("WithColumn failed: %v", err)
 	}
 	if df2.Width() != 3 {
 		t.Errorf("WithColumn Width = %d, want 3", df2.Width())
 	}
+	cData := df2.ColumnByName("c").Float64()
+	if cData[0] != 11.0 || cData[1] != 12.0 || cData[2] != 13.0 {
+		t.Errorf("WithColumn c = %v, want [11, 12, 13]", cData)
+	}
 
-	// Replace existing column
-	col1New := NewSeriesFloat64("a", []float64{100.0, 200.0, 300.0})
-	df3, err := df.WithColumn(col1New)
+	// Replace existing column using expression
+	df3, err := df.WithColumn("a", Col("a").Mul(Lit(100.0)))
 	if err != nil {
 		t.Fatalf("WithColumn failed: %v", err)
 	}
@@ -250,6 +304,23 @@ func TestDataFrameWithColumn(t *testing.T) {
 	data := df3.ColumnByName("a").Float64()
 	if data[0] != 100.0 {
 		t.Errorf("WithColumn replaced value = %v, want 100", data[0])
+	}
+}
+
+func TestDataFrameWithColumnSeries(t *testing.T) {
+	col1 := NewSeriesFloat64("a", []float64{1.0, 2.0, 3.0})
+	col2 := NewSeriesFloat64("b", []float64{4.0, 5.0, 6.0})
+
+	df, _ := NewDataFrame(col1, col2)
+
+	// Add new column using WithColumnSeries (legacy API)
+	col3 := NewSeriesFloat64("c", []float64{7.0, 8.0, 9.0})
+	df2, err := df.WithColumnSeries(col3)
+	if err != nil {
+		t.Fatalf("WithColumnSeries failed: %v", err)
+	}
+	if df2.Width() != 3 {
+		t.Errorf("WithColumnSeries Width = %d, want 3", df2.Width())
 	}
 }
 
@@ -609,9 +680,9 @@ func TestDataFrameWithColumnLengthMismatch(t *testing.T) {
 	)
 
 	newCol := NewSeriesInt64("b", []int64{1, 2}) // Wrong length
-	_, err := df.WithColumn(newCol)
+	_, err := df.WithColumnSeries(newCol)
 	if err == nil {
-		t.Error("WithColumn with mismatched length should fail")
+		t.Error("WithColumnSeries with mismatched length should fail")
 	}
 }
 
