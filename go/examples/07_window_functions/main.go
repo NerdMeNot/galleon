@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Window Functions Example ===\n")
+	fmt.Println("=== Window Functions Example ===")
 
 	// Create sample time series data (daily stock prices)
 	dates := []string{

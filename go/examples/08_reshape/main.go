@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Reshape Operations Example ===\n")
+	fmt.Println("=== Reshape Operations Example ===")
 
 	// Example 1: Basic Pivot (Long to Wide)
 	fmt.Println("Example 1: Basic Pivot - Long to Wide Format")

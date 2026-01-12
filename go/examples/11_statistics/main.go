@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Advanced Statistics Example ===\n")
+	fmt.Println("=== Advanced Statistics Example ===")
 
 	// Example 1: Basic Statistical Aggregations
 	fmt.Println("Example 1: Complete Statistical Summary")

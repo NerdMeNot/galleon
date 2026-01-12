@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== String Operations Example ===\n")
+	fmt.Println("=== String Operations Example ===")
 
 	// Example 1: Basic Text Transformations
 	fmt.Println("Example 1: Text Case Transformations")

@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Advanced Features: UDF and Caching ===\n")
+	fmt.Println("=== Advanced Features: UDF and Caching ===")
 
 	// Example 1: Simple User-Defined Function
 	fmt.Println("Example 1: Simple UDF - Price Markup")
