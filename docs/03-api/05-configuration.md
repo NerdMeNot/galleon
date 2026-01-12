@@ -326,6 +326,22 @@ cfg.TableStyle = "minimal"
 fmt.Println(df.StringWithConfig(cfg))
 ```
 
+### Series.StringWithConfig
+
+Format Series with custom configuration.
+
+```go
+func (s *Series) StringWithConfig(cfg DisplayConfig) string
+```
+
+**Example:**
+```go
+cfg := galleon.DefaultDisplayConfig()
+cfg.FloatPrecision = 2
+cfg.TableStyle = "ascii"
+fmt.Println(series.StringWithConfig(cfg))
+```
+
 ## Display Configuration Best Practices
 
 ### For Log Files

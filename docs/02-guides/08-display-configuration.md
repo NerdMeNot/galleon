@@ -1,10 +1,10 @@
 # Display Configuration Guide
 
-Galleon provides a flexible display system for DataFrames with configurable formatting options, multiple table styles, and automatic truncation for large datasets.
+Galleon provides a flexible display system for DataFrames and Series with configurable formatting options, multiple table styles, and automatic truncation for large datasets.
 
 ## Overview
 
-When you print a DataFrame, Galleon automatically:
+When you print a DataFrame or Series, Galleon automatically:
 - Shows a shape header: `shape: (rows, cols)`
 - Displays column names and data types
 - Truncates large DataFrames (shows head + tail)
@@ -63,6 +63,79 @@ shape: (1000, 3)
 │      999 │ Item_999 │1497.0000 │
 │     1000 │Item_1000 │1498.5000 │
 ╰──────────┴──────────┴──────────╯
+```
+
+## Series Display
+
+Series use the same display configuration as DataFrames:
+
+```go
+s := galleon.NewSeriesFloat64("prices", []float64{10.5, 20.3, 15.7, 8.2, 25.1})
+fmt.Println(s)
+```
+
+Output:
+```
+Series: 'prices' (Float64)
+length: 5
+╭─────┬──────────╮
+│   0 │  10.5000 │
+│   1 │  20.3000 │
+│   2 │  15.7000 │
+│   3 │   8.2000 │
+│   4 │  25.1000 │
+╰─────┴──────────╯
+```
+
+### Large Series
+
+Large Series show head and tail with ellipsis:
+
+```go
+// Series with 100 elements
+fmt.Println(largeSeries)
+```
+
+Output:
+```
+Series: 'values' (Float64)
+length: 100
+╭─────┬──────────╮
+│   0 │   0.0000 │
+│   1 │   2.5000 │
+│   2 │   5.0000 │
+│   3 │   7.5000 │
+│   4 │  10.0000 │
+│   … │        … │
+│  95 │ 237.5000 │
+│  96 │ 240.0000 │
+│  97 │ 242.5000 │
+│  98 │ 245.0000 │
+│  99 │ 247.5000 │
+╰─────┴──────────╯
+```
+
+### Custom Series Display
+
+```go
+cfg := galleon.DefaultDisplayConfig()
+cfg.FloatPrecision = 2
+cfg.TableStyle = "ascii"
+
+fmt.Println(s.StringWithConfig(cfg))
+```
+
+Output:
+```
+Series: 'prices' (Float64)
+length: 5
++-----+----------+
+|   0 |    10.50 |
+|   1 |    20.30 |
+|   2 |    15.70 |
+|   3 |     8.20 |
+|   4 |    25.10 |
++-----+----------+
 ```
 
 ## Configuration Options

@@ -1,6 +1,7 @@
 package galleon
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -235,5 +236,88 @@ func TestEmptyDataFrameString(t *testing.T) {
 	s := df.String()
 	if s != "DataFrame(empty)" {
 		t.Errorf("expected 'DataFrame(empty)', got %s", s)
+	}
+}
+
+func TestSeriesStringSmall(t *testing.T) {
+	s := NewSeriesInt64("numbers", []int64{1, 2, 3, 4, 5})
+	str := s.String()
+
+	// Should contain series name and type
+	if !strings.Contains(str, "numbers") {
+		t.Error("expected series name in output")
+	}
+	if !strings.Contains(str, "Int64") {
+		t.Error("expected dtype in output")
+	}
+	if !strings.Contains(str, "length: 5") {
+		t.Error("expected length in output")
+	}
+
+	// Should contain all values
+	for i := 1; i <= 5; i++ {
+		if !strings.Contains(str, fmt.Sprintf("%d", i)) {
+			t.Errorf("expected value %d in output", i)
+		}
+	}
+}
+
+func TestSeriesStringLarge(t *testing.T) {
+	// Create large series
+	data := make([]float64, 100)
+	for i := range data {
+		data[i] = float64(i) * 1.5
+	}
+	s := NewSeriesFloat64("values", data)
+
+	// Set to show 10 rows
+	original := GetDisplayConfig()
+	defer SetDisplayConfig(original)
+	SetMaxDisplayRows(10)
+
+	str := s.String()
+
+	// Should show length
+	if !strings.Contains(str, "length: 100") {
+		t.Error("expected length: 100 in output")
+	}
+
+	// Should show ellipsis
+	if !strings.Contains(str, "…") {
+		t.Error("expected ellipsis for truncated rows")
+	}
+
+	// Should show first value (index 0)
+	if !strings.Contains(str, "0.0000") {
+		t.Error("expected first value in output")
+	}
+}
+
+func TestSeriesStringWithConfig(t *testing.T) {
+	s := NewSeriesFloat64("pi", []float64{3.14159265358979})
+
+	// Test with 2 decimal precision
+	cfg := DefaultDisplayConfig()
+	cfg.FloatPrecision = 2
+	str := s.StringWithConfig(cfg)
+
+	if !strings.Contains(str, "3.14") {
+		t.Error("expected 2 decimal precision")
+	}
+
+	// Test with ASCII style
+	cfg.TableStyle = "ascii"
+	str = s.StringWithConfig(cfg)
+	if !strings.Contains(str, "+") {
+		t.Error("expected ASCII style characters")
+	}
+}
+
+func TestEmptySeriesString(t *testing.T) {
+	s := NewSeriesInt64("empty", []int64{})
+	str := s.String()
+
+	if !strings.Contains(str, "length: 0") {
+		t.Error("expected length: 0 for empty series")
 	}
 }

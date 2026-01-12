@@ -1235,9 +1235,9 @@ func TestSeries_String_Empty(t *testing.T) {
 	if str == "" {
 		t.Error("String() for empty series returned empty string")
 	}
-	// Should contain len=0
-	if !containsSubstring(str, "len=0") {
-		t.Errorf("String() for empty series should indicate len=0, got: %s", str)
+	// Should contain length: 0
+	if !containsSubstring(str, "length: 0") {
+		t.Errorf("String() for empty series should indicate length: 0, got: %s", str)
 	}
 }
 
@@ -1253,9 +1253,9 @@ func TestSeries_String_LargeArray(t *testing.T) {
 	if str == "" {
 		t.Error("String() for large series returned empty string")
 	}
-	// Should contain "..."
-	if !containsSubstring(str, "...") {
-		t.Errorf("String() for large series should truncate with ..., got: %s", str)
+	// Should contain "…" (Unicode ellipsis) for truncation
+	if !containsSubstring(str, "…") {
+		t.Errorf("String() for large series should truncate with …, got: %s", str)
 	}
 }
 
@@ -1267,8 +1267,8 @@ func TestSeries_String_LargeArray_Int64(t *testing.T) {
 	s := NewSeriesInt64("large", data)
 	str := s.String()
 
-	if !containsSubstring(str, "...") {
-		t.Errorf("String() for large Int64 series should truncate with ..., got: %s", str)
+	if !containsSubstring(str, "…") {
+		t.Errorf("String() for large Int64 series should truncate with …, got: %s", str)
 	}
 }
 
@@ -1280,8 +1280,8 @@ func TestSeries_String_LargeArray_Int32(t *testing.T) {
 	s := NewSeriesInt32("large", data)
 	str := s.String()
 
-	if !containsSubstring(str, "...") {
-		t.Errorf("String() for large Int32 series should truncate with ..., got: %s", str)
+	if !containsSubstring(str, "…") {
+		t.Errorf("String() for large Int32 series should truncate with …, got: %s", str)
 	}
 }
 
@@ -1293,8 +1293,8 @@ func TestSeries_String_LargeArray_Float32(t *testing.T) {
 	s := NewSeriesFloat32("large", data)
 	str := s.String()
 
-	if !containsSubstring(str, "...") {
-		t.Errorf("String() for large Float32 series should truncate with ..., got: %s", str)
+	if !containsSubstring(str, "…") {
+		t.Errorf("String() for large Float32 series should truncate with …, got: %s", str)
 	}
 }
 
@@ -1306,8 +1306,8 @@ func TestSeries_String_LargeArray_Bool(t *testing.T) {
 	s := NewSeriesBool("large", data)
 	str := s.String()
 
-	if !containsSubstring(str, "...") {
-		t.Errorf("String() for large Bool series should truncate with ..., got: %s", str)
+	if !containsSubstring(str, "…") {
+		t.Errorf("String() for large Bool series should truncate with …, got: %s", str)
 	}
 }
 
@@ -1319,8 +1319,8 @@ func TestSeries_String_LargeArray_String(t *testing.T) {
 	s := NewSeriesString("large", data)
 	str := s.String()
 
-	if !containsSubstring(str, "...") {
-		t.Errorf("String() for large String series should truncate with ..., got: %s", str)
+	if !containsSubstring(str, "…") {
+		t.Errorf("String() for large String series should truncate with …, got: %s", str)
 	}
 }
 

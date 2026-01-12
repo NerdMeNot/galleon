@@ -386,3 +386,98 @@ func filterPositive(indices []int) []int {
 	}
 	return result
 }
+
+// SeriesStringWithConfig formats the Series using the provided configuration.
+func SeriesStringWithConfig(s *Series, cfg DisplayConfig) string {
+	if s.Len() == 0 {
+		return fmt.Sprintf("Series: '%s' (%s)\nlength: 0\n[]", s.Name(), s.DType())
+	}
+
+	chars, ok := tableStyles[cfg.TableStyle]
+	if !ok {
+		chars = tableStyles["rounded"]
+	}
+
+	var sb strings.Builder
+
+	// Header
+	sb.WriteString(fmt.Sprintf("Series: '%s' (%s)\n", s.Name(), s.DType()))
+	sb.WriteString(fmt.Sprintf("length: %d\n", s.Len()))
+
+	// Determine which rows to show
+	showAllRows := s.Len() <= cfg.MaxRows
+	var rowIndices []int
+	if showAllRows {
+		rowIndices = make([]int, s.Len())
+		for i := range rowIndices {
+			rowIndices[i] = i
+		}
+	} else {
+		headRows := cfg.MaxRows / 2
+		tailRows := cfg.MaxRows - headRows
+		rowIndices = make([]int, 0, cfg.MaxRows+1)
+		for i := 0; i < headRows; i++ {
+			rowIndices = append(rowIndices, i)
+		}
+		rowIndices = append(rowIndices, -1) // marker for "..."
+		for i := s.Len() - tailRows; i < s.Len(); i++ {
+			rowIndices = append(rowIndices, i)
+		}
+	}
+
+	// Calculate column widths
+	indexWidth := len(fmt.Sprintf("%d", s.Len()-1))
+	if indexWidth < 3 {
+		indexWidth = 3
+	}
+
+	valueWidth := cfg.MinColWidth
+	for _, idx := range rowIndices {
+		if idx >= 0 {
+			valStr := formatDisplayValue(s.Get(idx), cfg)
+			if len(valStr) > valueWidth {
+				valueWidth = len(valStr)
+			}
+		}
+	}
+	if valueWidth > cfg.MaxColWidth {
+		valueWidth = cfg.MaxColWidth
+	}
+
+	// Top border
+	sb.WriteString(chars.topLeft)
+	sb.WriteString(strings.Repeat(chars.horizontal, indexWidth+2))
+	sb.WriteString(chars.topT)
+	sb.WriteString(strings.Repeat(chars.horizontal, valueWidth+2))
+	sb.WriteString(chars.topRight)
+	sb.WriteString("\n")
+
+	// Data rows
+	for _, idx := range rowIndices {
+		sb.WriteString(chars.vertical)
+		if idx == -1 {
+			sb.WriteString(fmt.Sprintf(" %*s ", indexWidth, "…"))
+			sb.WriteString(chars.vertical)
+			sb.WriteString(fmt.Sprintf(" %*s ", valueWidth, "…"))
+		} else {
+			sb.WriteString(fmt.Sprintf(" %*d ", indexWidth, idx))
+			sb.WriteString(chars.vertical)
+			valStr := formatDisplayValue(s.Get(idx), cfg)
+			if len(valStr) > valueWidth {
+				valStr = valStr[:valueWidth-3] + "..."
+			}
+			sb.WriteString(fmt.Sprintf(" %*s ", valueWidth, valStr))
+		}
+		sb.WriteString(chars.vertical)
+		sb.WriteString("\n")
+	}
+
+	// Bottom border
+	sb.WriteString(chars.bottomLeft)
+	sb.WriteString(strings.Repeat(chars.horizontal, indexWidth+2))
+	sb.WriteString(chars.bottomT)
+	sb.WriteString(strings.Repeat(chars.horizontal, valueWidth+2))
+	sb.WriteString(chars.bottomRight)
+
+	return sb.String()
+}

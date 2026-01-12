@@ -1024,62 +1024,15 @@ func (s *Series) Mul(scalar float64) *Series {
 // ============================================================================
 
 // String returns a string representation of the series
+// String returns a string representation of the Series using global display settings.
+// Use StringWithConfig for custom display options.
 func (s *Series) String() string {
-	if s.length == 0 {
-		return fmt.Sprintf("Series('%s', dtype=%s, len=0)", s.name, s.dtype)
-	}
+	return s.StringWithConfig(GetDisplayConfig())
+}
 
-	// Show first few and last few elements
-	maxShow := 5
-	var preview string
-
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		if s.length <= maxShow*2 {
-			preview = fmt.Sprintf("%v", data)
-		} else {
-			preview = fmt.Sprintf("%v ... %v", data[:maxShow], data[s.length-maxShow:])
-		}
-	case Float32:
-		data := s.Float32()
-		if s.length <= maxShow*2 {
-			preview = fmt.Sprintf("%v", data)
-		} else {
-			preview = fmt.Sprintf("%v ... %v", data[:maxShow], data[s.length-maxShow:])
-		}
-	case Int64:
-		data := s.Int64()
-		if s.length <= maxShow*2 {
-			preview = fmt.Sprintf("%v", data)
-		} else {
-			preview = fmt.Sprintf("%v ... %v", data[:maxShow], data[s.length-maxShow:])
-		}
-	case Int32:
-		data := s.Int32()
-		if s.length <= maxShow*2 {
-			preview = fmt.Sprintf("%v", data)
-		} else {
-			preview = fmt.Sprintf("%v ... %v", data[:maxShow], data[s.length-maxShow:])
-		}
-	case Bool:
-		data := s.Bool()
-		if s.length <= maxShow*2 {
-			preview = fmt.Sprintf("%v", data)
-		} else {
-			preview = fmt.Sprintf("%v ... %v", data[:maxShow], data[s.length-maxShow:])
-		}
-	case String:
-		if s.length <= maxShow*2 {
-			preview = fmt.Sprintf("%v", s.strData)
-		} else {
-			preview = fmt.Sprintf("%v ... %v", s.strData[:maxShow], s.strData[s.length-maxShow:])
-		}
-	default:
-		preview = "..."
-	}
-
-	return fmt.Sprintf("Series('%s', dtype=%s, len=%d)\n%s", s.name, s.dtype, s.length, preview)
+// StringWithConfig formats the Series using the provided configuration.
+func (s *Series) StringWithConfig(cfg DisplayConfig) string {
+	return SeriesStringWithConfig(s, cfg)
 }
 
 // Head returns a new series with the first n elements
