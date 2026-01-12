@@ -68,6 +68,116 @@ func main() {
 }
 ```
 
+## Feature Showcase
+
+### Window Functions & Time Series
+
+```go
+// Calculate moving averages and price changes
+result, _ := df.Lazy().
+    Sort(galleon.Col("date"), true).
+    // Price changes
+    WithColumn("price_change", galleon.Col("close").Diff()).
+    WithColumn("pct_return", galleon.Col("close").PctChange()).
+    // Moving averages
+    WithColumn("ma20", galleon.Col("close").RollingMean(20, 15)).
+    WithColumn("ma50", galleon.Col("close").RollingMean(50, 40)).
+    // Cumulative metrics
+    WithColumn("running_max", galleon.Col("close").CumMax()).
+    WithColumn("running_total", galleon.Col("volume").CumSum()).
+    Collect()
+```
+
+### String Operations
+
+```go
+// Clean and process text data
+result, _ := df.Lazy().
+    // Normalize text
+    WithColumn("email_clean", galleon.Col("email").Str().Lower().Str().Trim()).
+    // Filter by pattern
+    Filter(galleon.Col("filename").Str().EndsWith(".csv")).
+    // Search text
+    WithColumn("has_error", galleon.Col("log").Str().Contains("ERROR")).
+    // Transform
+    WithColumn("uppercase_name", galleon.Col("name").Str().Upper()).
+    Collect()
+```
+
+### Pivot & Melt (Reshape)
+
+```go
+// Long to wide format
+wide, _ := df.Lazy().
+    Pivot(galleon.PivotOptions{
+        Index:  "date",
+        Column: "metric",
+        Values: "value",
+        AggFn:  galleon.AggTypeSum,
+    }).
+    Collect()
+
+// Wide to long format
+long, _ := wide.Lazy().
+    Melt(galleon.MeltOptions{
+        IDVars:    []string{"date"},
+        ValueVars: []string{"sales", "cost"},
+        VarName:   "metric",
+        ValueName: "amount",
+    }).
+    Collect()
+```
+
+### Advanced Aggregations
+
+```go
+// Statistical analysis by group
+stats, _ := df.Lazy().
+    GroupBy(galleon.Col("category")).
+    Agg(
+        galleon.Col("value").Count().Alias("n"),
+        galleon.Col("value").Mean().Alias("mean"),
+        galleon.Col("value").Median().Alias("median"),
+        galleon.Col("value").Std().Alias("std_dev"),
+        galleon.Col("value").Skewness().Alias("skewness"),
+        galleon.Col("value").Kurtosis().Alias("kurtosis"),
+        galleon.Col("value").Quantile(0.95).Alias("p95"),
+    ).
+    Collect()
+```
+
+### User-Defined Functions
+
+```go
+// Apply custom transformations
+result, _ := df.Lazy().
+    Apply("price", func(s *galleon.Series) (*galleon.Series, error) {
+        data := s.Float64()
+        result := make([]float64, len(data))
+        for i, v := range data {
+            // Custom business logic
+            result[i] = math.Log(v) * 100
+        }
+        return galleon.NewSeriesFloat64("log_price", result), nil
+    }).
+    Collect()
+```
+
+### Caching for Performance
+
+```go
+// Cache expensive intermediate results
+cached := df.Lazy().
+    Filter(galleon.Col("date").Gte(galleon.Lit("2024-01-01"))).
+    GroupBy(galleon.Col("product")).
+    Agg(galleon.Col("sales").Sum().Alias("total_sales")).
+    Cache()  // Materialize once
+
+// Reuse cached result multiple times
+topProducts, _ := cached.Sort(galleon.Col("total_sales"), false).Head(10).Collect()
+avgSales, _ := cached.Select(galleon.Col("total_sales").Mean()).Collect()
+```
+
 ## Performance
 
 Galleon achieves significant speedups over pure Go implementations:
@@ -142,28 +252,44 @@ galleon/
 ## Supported Operations
 
 ### Aggregations
-- `Sum`, `Min`, `Max`, `Mean`, `Count`, `Std`, `Var`
+- **Basic**: `Sum`, `Min`, `Max`, `Mean`, `Count`, `Std`, `Var`
+- **Statistical**: `Median`, `Quantile`, `Skewness`, `Kurtosis`, `Correlation`
+- **Multi-column**: `SumHorizontal`, `MinHorizontal`, `MaxHorizontal`
 
-### Element-wise
-- `Add`, `Sub`, `Mul`, `Div` (scalar and vector)
-- `Gt`, `Lt`, `Eq`, `Gte`, `Lte` (comparisons)
+### Element-wise Operations
+- **Arithmetic**: `Add`, `Sub`, `Mul`, `Div` (scalar and vector)
+- **Comparisons**: `Gt`, `Lt`, `Eq`, `Neq`, `Gte`, `Lte`
+- **Null handling**: `IsNull`, `IsNotNull`, `FillNull`, `Coalesce`
 
-### DataFrame
-- `Select`, `Drop`, `Filter`, `Sort`
-- `GroupBy`, `Agg`
-- `Join`, `LeftJoin`, `RightJoin`
-- `WithColumn`, `Rename`
-- `Head`, `Tail`, `Slice`
+### String Operations
+- **Transformations**: `Upper`, `Lower`, `Trim`, `Replace`
+- **Predicates**: `Contains`, `StartsWith`, `EndsWith`
+- **Metrics**: `Len`
 
-### I/O
-- `ReadCSV`, `WriteCSV`
-- `ReadJSON`, `WriteJSON`
-- `ReadParquet`
+### Window Functions
+- **Shift**: `Lag`, `Lead`, `Diff`, `DiffN`, `PctChange`
+- **Cumulative**: `CumSum`, `CumMin`, `CumMax`
+- **Rolling**: `RollingSum`, `RollingMean`, `RollingMin`, `RollingMax`, `RollingStd`
+- **Ranking**: `RowNumber`, `Rank`, `DenseRank`
+
+### DataFrame Operations
+- **Selection**: `Select`, `Drop`, `Filter`, `Sort`, `Head`, `Tail`, `Slice`
+- **Transformation**: `WithColumn`, `Rename`, `Cast`, `Distinct`
+- **Aggregation**: `GroupBy`, `Agg`
+- **Joining**: `Join`, `LeftJoin`, `RightJoin`, `InnerJoin`
+- **Reshaping**: `Pivot`, `Melt`
+- **UDF**: `Apply` (user-defined functions)
+
+### I/O Formats
+- **CSV**: `ReadCSV`, `WriteCSV`, `ScanCSV`
+- **JSON**: `ReadJSON`, `WriteJSON`
+- **Parquet**: `ReadParquet`, `WriteParquet`, `ScanParquet`
 
 ### Lazy Evaluation
-- `ScanCSV`, `ScanParquet`
-- Query optimization
-- Deferred execution with `Collect()`
+- **Scanning**: `ScanCSV`, `ScanParquet`, `ScanJSON`
+- **Optimization**: Predicate pushdown, projection pruning
+- **Caching**: `Cache()` for intermediate result materialization
+- **Execution**: Deferred with `Collect()` or `Fetch(n)`
 
 ## License
 

@@ -52,6 +52,31 @@ Creates a Bool series.
 func NewSeriesBool(name string, data []bool) *Series
 ```
 
+### NewSeries (Generic)
+
+Creates a series with automatic type inference.
+
+```go
+func NewSeries(name string, data interface{}) (*Series, error)
+```
+
+**Supported types:**
+- `[]float64` → Float64 series
+- `[]float32` → Float32 series
+- `[]int64` → Int64 series
+- `[]int32` → Int32 series
+- `[]int` → Int64 series (converted)
+- `[]bool` → Bool series
+- `[]string` → String series
+
+**Example:**
+```go
+// Type inferred automatically
+s1, _ := galleon.NewSeries("values", []float64{1.0, 2.0, 3.0})
+s2, _ := galleon.NewSeries("names", []string{"Alice", "Bob"})
+s3, _ := galleon.NewSeries("flags", []bool{true, false, true})
+```
+
 ## Properties
 
 ### Name
@@ -311,6 +336,42 @@ Returns boolean mask where values <= threshold.
 
 ```go
 func (s *Series) Lte(value float64) []bool
+```
+
+### Neq
+
+Returns boolean mask where values != value.
+
+```go
+func (s *Series) Neq(value interface{}) []bool
+```
+
+### EqString
+
+String equality comparison (for String series).
+
+```go
+func (s *Series) EqString(value string) []bool
+```
+
+**Example:**
+```go
+names := galleon.NewSeriesString("names", []string{"Alice", "Bob", "Alice"})
+mask := names.EqString("Alice")  // [true, false, true]
+```
+
+### NeqString
+
+String inequality comparison (for String series).
+
+```go
+func (s *Series) NeqString(value string) []bool
+```
+
+**Example:**
+```go
+status := galleon.NewSeriesString("status", []string{"active", "inactive", "active"})
+mask := status.NeqString("active")  // [false, true, false]
 ```
 
 ## Sorting

@@ -107,6 +107,64 @@ lazy := df.Lazy().
     )
 ```
 
+### Pivot
+
+```go
+lazy := df.Lazy().
+    Pivot(galleon.PivotOptions{
+        Index:  "date",
+        Column: "metric",
+        Values: "value",
+        AggFn:  galleon.AggTypeSum,
+    })
+```
+
+### Melt
+
+```go
+lazy := df.Lazy().
+    Melt(galleon.MeltOptions{
+        IDVars:    []string{"id"},
+        ValueVars: []string{"col1", "col2"},
+        VarName:   "variable",
+        ValueName: "value",
+    })
+```
+
+### Cache
+
+Materialize intermediate results for reuse:
+
+```go
+// Cache expensive computation
+cached := df.Lazy().
+    Filter(galleon.Col("value").Gt(galleon.Lit(100))).
+    GroupBy(galleon.Col("category")).
+    Agg(galleon.Col("value").Sum().Alias("total")).
+    Cache()
+
+// Reuse cached result multiple times
+result1, _ := cached.Filter(galleon.Col("total").Gt(galleon.Lit(1000))).Collect()
+result2, _ := cached.Sort(galleon.Col("total"), false).Head(10).Collect()
+```
+
+### Apply (UDF)
+
+Apply custom functions to columns:
+
+```go
+// Apply user-defined function
+lazy := df.Lazy().
+    Apply("price", func(s *galleon.Series) (*galleon.Series, error) {
+        data := s.Float64()
+        result := make([]float64, len(data))
+        for i, v := range data {
+            result[i] = v * 1.1  // 10% markup
+        }
+        return galleon.NewSeriesFloat64(s.Name(), result), nil
+    })
+```
+
 ## Collecting Results
 
 ### Collect
@@ -382,6 +440,134 @@ df, _ := galleon.ReadCSV("huge.csv", opts)  // Loads entire file
 result := df.Filter(Col("x").Gt(Lit(0)))
 ```
 
+## Advanced Features
+
+### Caching Intermediate Results
+
+When you need to reuse an expensive computation multiple times, use `Cache()` to materialize the result:
+
+```go
+// Expensive aggregation that we'll reuse
+expensive := df.Lazy().
+    Filter(galleon.Col("date").Gte(galleon.Lit("2024-01-01"))).
+    GroupBy(galleon.Col("product"), galleon.Col("region")).
+    Agg(
+        galleon.Col("sales").Sum().Alias("total_sales"),
+        galleon.Col("quantity").Sum().Alias("total_units"),
+    ).
+    Cache()  // Materialize and cache this result
+
+// Use cached result for multiple analyses
+topProducts, _ := expensive.
+    Sort(galleon.Col("total_sales"), false).
+    Head(10).
+    Collect()
+
+regionalStats, _ := expensive.
+    GroupBy(galleon.Col("region")).
+    Agg(
+        galleon.Col("total_sales").Sum().Alias("region_sales"),
+    ).
+    Collect()
+
+// Cache is automatically reused - expensive query runs only once
+```
+
+#### When to Use Cache
+
+**Use Cache when:**
+- You reuse the same intermediate result multiple times
+- The computation is expensive (large aggregations, complex joins)
+- The result fits comfortably in memory
+
+**Skip Cache when:**
+- You use the result only once
+- The result is very large (might cause OOM)
+- The computation is cheap (simple filters)
+
+#### Clearing Cache
+
+```go
+// Clear all cached results
+galleon.ClearCache()
+```
+
+### User-Defined Functions (UDF)
+
+Apply custom transformations using Go functions:
+
+```go
+// Simple UDF: 10% markup
+result, _ := df.Lazy().
+    Apply("price", func(s *galleon.Series) (*galleon.Series, error) {
+        data := s.Float64()
+        result := make([]float64, len(data))
+        for i, v := range data {
+            result[i] = v * 1.1
+        }
+        return galleon.NewSeriesFloat64(s.Name(), result), nil
+    }).
+    Collect()
+```
+
+#### Complex UDF Example
+
+```go
+// Custom scoring function
+result, _ := df.Lazy().
+    Apply("features", func(s *galleon.Series) (*galleon.Series, error) {
+        data := s.Float64()
+        scores := make([]float64, len(data))
+
+        for i, v := range data {
+            // Custom business logic
+            if v > 100 {
+                scores[i] = math.Log(v) * 10
+            } else {
+                scores[i] = v * 0.5
+            }
+        }
+
+        return galleon.NewSeriesFloat64("score", scores), nil
+    }).
+    Collect()
+```
+
+#### UDF Best Practices
+
+1. **Keep UDFs simple**: Complex logic should be broken into multiple steps
+2. **Handle errors**: Always return proper errors for invalid data
+3. **Consider performance**: UDFs are slower than built-in operations
+4. **Type safety**: Validate input types in your UDF
+
+```go
+// Good UDF structure
+func customTransform(s *galleon.Series) (*galleon.Series, error) {
+    // Validate input type
+    if s.DType() != galleon.Float64 {
+        return nil, fmt.Errorf("expected Float64, got %v", s.DType())
+    }
+
+    // Get data
+    data := s.Float64()
+    result := make([]float64, len(data))
+
+    // Apply transformation
+    for i, v := range data {
+        if math.IsNaN(v) {
+            result[i] = 0.0  // Handle nulls
+            continue
+        }
+        result[i] = yourLogic(v)
+    }
+
+    return galleon.NewSeriesFloat64(s.Name(), result), nil
+}
+
+// Use it
+df.Lazy().Apply("column", customTransform).Collect()
+```
+
 ## LazyFrame API Reference
 
 ### Creation
@@ -403,6 +589,10 @@ func (lf *LazyFrame) Sort(expr Expr, descending bool) *LazyFrame
 func (lf *LazyFrame) Limit(n int) *LazyFrame
 func (lf *LazyFrame) GroupBy(exprs ...Expr) *LazyGroupBy
 func (lf *LazyFrame) Join(other *LazyFrame, opts ...JoinOption) *LazyFrame
+func (lf *LazyFrame) Pivot(opts PivotOptions) *LazyFrame
+func (lf *LazyFrame) Melt(opts MeltOptions) *LazyFrame
+func (lf *LazyFrame) Cache() *LazyFrame
+func (lf *LazyFrame) Apply(column string, fn func(*Series) (*Series, error)) *LazyFrame
 ```
 
 ### Execution
@@ -411,4 +601,10 @@ func (lf *LazyFrame) Join(other *LazyFrame, opts ...JoinOption) *LazyFrame
 func (lf *LazyFrame) Collect() (*DataFrame, error)
 func (lf *LazyFrame) Fetch(n int) (*DataFrame, error)
 func (lf *LazyFrame) Explain() string
+```
+
+### Utility
+
+```go
+func ClearCache()
 ```
