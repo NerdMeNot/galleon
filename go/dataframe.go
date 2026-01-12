@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
-	"strings"
 	"sync"
 )
 
@@ -766,106 +765,8 @@ func (df *DataFrame) Describe() map[string]map[string]float64 {
 	return result
 }
 
-// String returns a string representation of the DataFrame
+// String returns a string representation of the DataFrame using global display settings.
+// Use StringWithConfig for custom display options.
 func (df *DataFrame) String() string {
-	if df.height == 0 || len(df.columns) == 0 {
-		return "DataFrame(empty)"
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("DataFrame: %d rows × %d columns\n", df.height, len(df.columns)))
-
-	// Column headers
-	sb.WriteString("┌")
-	for i := range df.columns {
-		if i > 0 {
-			sb.WriteString("┬")
-		}
-		sb.WriteString("──────────────")
-	}
-	sb.WriteString("┐\n│")
-
-	for i, col := range df.columns {
-		if i > 0 {
-			sb.WriteString("│")
-		}
-		name := col.Name()
-		if len(name) > 12 {
-			name = name[:12]
-		}
-		sb.WriteString(fmt.Sprintf(" %-12s ", name))
-	}
-	sb.WriteString("│\n│")
-
-	// Data types
-	for i, col := range df.columns {
-		if i > 0 {
-			sb.WriteString("│")
-		}
-		dtype := col.DType().String()
-		if len(dtype) > 12 {
-			dtype = dtype[:12]
-		}
-		sb.WriteString(fmt.Sprintf(" %-12s ", dtype))
-	}
-	sb.WriteString("│\n├")
-
-	for i := range df.columns {
-		if i > 0 {
-			sb.WriteString("┼")
-		}
-		sb.WriteString("──────────────")
-	}
-	sb.WriteString("┤\n")
-
-	// Show first few rows
-	maxRows := 5
-	showRows := df.height
-	if showRows > maxRows {
-		showRows = maxRows
-	}
-
-	for row := 0; row < showRows; row++ {
-		sb.WriteString("│")
-		for i, col := range df.columns {
-			if i > 0 {
-				sb.WriteString("│")
-			}
-			val := col.Get(row)
-			var valStr string
-			switch v := val.(type) {
-			case float64:
-				valStr = fmt.Sprintf("%.4f", v)
-			default:
-				valStr = fmt.Sprintf("%v", v)
-			}
-			if len(valStr) > 12 {
-				valStr = valStr[:12]
-			}
-			sb.WriteString(fmt.Sprintf(" %12s ", valStr))
-		}
-		sb.WriteString("│\n")
-	}
-
-	if df.height > maxRows {
-		sb.WriteString("│")
-		for i := range df.columns {
-			if i > 0 {
-				sb.WriteString("│")
-			}
-			sb.WriteString("      ...     ")
-		}
-		sb.WriteString("│\n")
-	}
-
-	sb.WriteString("└")
-	for i := range df.columns {
-		if i > 0 {
-			sb.WriteString("┴")
-		}
-		sb.WriteString("──────────────")
-	}
-	sb.WriteString("┘")
-
-	return sb.String()
+	return df.StringWithConfig(GetDisplayConfig())
 }

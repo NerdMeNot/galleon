@@ -376,9 +376,14 @@ func TestDataFrameString(t *testing.T) {
 		t.Error("String() should return non-empty string")
 	}
 
-	// Check it contains key info
-	if !contains(str, "3 rows") || !contains(str, "2 columns") {
-		t.Errorf("String() = %s, should contain dimensions", str)
+	// Check it contains shape info (format: "shape: (3, 2)")
+	if !contains(str, "shape: (3, 2)") {
+		t.Errorf("String() = %s, should contain shape", str)
+	}
+
+	// Check it contains column names
+	if !contains(str, "price") || !contains(str, "qty") {
+		t.Errorf("String() = %s, should contain column names", str)
 	}
 }
 
