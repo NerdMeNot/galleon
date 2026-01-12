@@ -433,15 +433,16 @@ result, _ := df.Lazy().
 ### GroupBy with Nested Types
 
 ```go
-// Group by struct field
+// Group by struct field - extract field first, then group by column name
 result, _ := df.Lazy().
-    GroupBy(galleon.Col("user_info").Field("city")).
+    WithColumn("city", galleon.Col("user_info").Field("city")).
+    GroupBy("city").
     Agg(galleon.Col("amount").Sum().Alias("total")).
     Collect()
 
 // Aggregate lists
 result, _ := df.Lazy().
-    GroupBy(galleon.Col("category")).
+    GroupBy("category").
     Agg(
         galleon.Col("tags").List().Len().Mean().Alias("avg_tags"),
         galleon.Col("scores").List().Mean().Mean().Alias("avg_of_avgs"),

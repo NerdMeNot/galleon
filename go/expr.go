@@ -1320,13 +1320,23 @@ func (e *ColExpr) CumMax() *CumMaxExpr {
 }
 
 // RollingSum computes the rolling sum over a window.
-// Example: Col("value").RollingSum(7) - 7-period rolling sum
-func (e *ColExpr) RollingSum(windowSize int) *RollingSumExpr {
-	return &RollingSumExpr{Input: e, WindowSize: windowSize, MinPeriods: 1}
+// Example: Col("value").RollingSum(7) - 7-period rolling sum with minPeriods=1
+// Example: Col("value").RollingSum(7, 3) - 7-period rolling sum with minPeriods=3
+func (e *ColExpr) RollingSum(windowSize int, minPeriods ...int) *RollingSumExpr {
+	mp := 1
+	if len(minPeriods) > 0 {
+		mp = minPeriods[0]
+	}
+	return &RollingSumExpr{Input: e, WindowSize: windowSize, MinPeriods: mp}
 }
 
 // RollingMean computes the rolling mean over a window.
-// Example: Col("price").RollingMean(20) - 20-period moving average
-func (e *ColExpr) RollingMean(windowSize int) *RollingMeanExpr {
-	return &RollingMeanExpr{Input: e, WindowSize: windowSize, MinPeriods: 1}
+// Example: Col("price").RollingMean(20) - 20-period moving average with minPeriods=1
+// Example: Col("price").RollingMean(20, 15) - 20-period moving average with minPeriods=15
+func (e *ColExpr) RollingMean(windowSize int, minPeriods ...int) *RollingMeanExpr {
+	mp := 1
+	if len(minPeriods) > 0 {
+		mp = minPeriods[0]
+	}
+	return &RollingMeanExpr{Input: e, WindowSize: windowSize, MinPeriods: mp}
 }

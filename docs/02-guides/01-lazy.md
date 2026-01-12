@@ -19,7 +19,7 @@ result := sorted.Head(10)                          // Executes now
 // Operations are planned but not executed
 lazy := df.Lazy().
     Filter(Col("value").Gt(Lit(100))).  // Planned
-    Sort(Col("value"), true).            // Planned
+    Sort("value", true).            // Planned
     Limit(10)                            // Planned
 
 // Execute the entire plan at once
@@ -76,7 +76,7 @@ lazy := df.Lazy().
 
 ```go
 lazy := df.Lazy().
-    Sort(galleon.Col("value"), false)  // Descending
+    Sort("value", false)  // Descending
 ```
 
 ### Limit
@@ -90,7 +90,7 @@ lazy := df.Lazy().
 
 ```go
 lazy := df.Lazy().
-    GroupBy(galleon.Col("category")).
+    GroupBy("category")).
     Agg(
         galleon.Col("value").Sum().Alias("total"),
         galleon.Col("value").Mean().Alias("average"),
@@ -139,13 +139,13 @@ Materialize intermediate results for reuse:
 // Cache expensive computation
 cached := df.Lazy().
     Filter(galleon.Col("value").Gt(galleon.Lit(100))).
-    GroupBy(galleon.Col("category")).
+    GroupBy("category")).
     Agg(galleon.Col("value").Sum().Alias("total")).
     Cache()
 
 // Reuse cached result multiple times
 result1, _ := cached.Filter(galleon.Col("total").Gt(galleon.Lit(1000))).Collect()
-result2, _ := cached.Sort(galleon.Col("total"), false).Head(10).Collect()
+result2, _ := cached.Sort("total", false).Head(10).Collect()
 ```
 
 ### Apply (UDF)
@@ -230,7 +230,7 @@ Limits propagate through operations where possible:
 ```go
 // Limit pushed through sort for early termination
 result, _ := df.Lazy().
-    Sort(Col("value"), false).
+    Sort("value", false).
     Limit(10).
     Collect()
 // Uses partial sort algorithm for top-k
@@ -243,7 +243,7 @@ result, _ := df.Lazy().
 ```go
 lazy := df.Lazy().
     Filter(Col("value").Gt(Lit(100))).
-    GroupBy(Col("category")).
+    GroupBy("category")).
     Agg(Col("value").Sum().Alias("total"))
 
 // Print the execution plan
@@ -274,7 +274,7 @@ The optimizer applies transformations:
 // Process 100GB file with 1GB memory
 result, _ := galleon.ScanCSV("huge_file.csv").
     Filter(Col("date").Gte(Lit("2024-01-01"))).
-    GroupBy(Col("category")).
+    GroupBy("category")).
     Agg(Col("amount").Sum().Alias("total")).
     Collect()
 
@@ -304,13 +304,13 @@ func etlPipeline(inputPath, outputPath string) error {
         // Transform
         WithColumn("normalized", Col("value").Div(Col("max_value"))).
         // Aggregate
-        GroupBy(Col("category")).
+        GroupBy("category")).
         Agg(
             Col("normalized").Mean().Alias("avg_normalized"),
             Col("id").Count().Alias("count"),
         ).
         // Sort results
-        Sort(Col("avg_normalized"), false).
+        Sort("avg_normalized", false).
         Collect()
 
     if err != nil {
@@ -332,7 +332,7 @@ for _, date := range dates {
     path := fmt.Sprintf("data/%s.csv", date)
     result, _ := galleon.ScanCSV(path).
         Filter(Col("status").Eq(Lit("complete"))).
-        GroupBy(Col("product")).
+        GroupBy("product")).
         Agg(Col("sales").Sum().Alias("daily_sales")).
         WithColumn("date", Lit(date)).
         Collect()
@@ -360,7 +360,7 @@ result, _ := galleon.ScanParquet("sales.parquet").
     // Filter recent data
     Filter(Col("date").Gte(Lit("2024-01-01"))).
     // Aggregate
-    GroupBy(Col("region_name"), Col("category")).
+    GroupBy("region_name", "category").
     Agg(
         Col("revenue").Sum().Alias("total_revenue"),
         Col("quantity").Sum().Alias("total_units"),
@@ -371,7 +371,7 @@ result, _ := galleon.ScanParquet("sales.parquet").
         Col("total_revenue").Div(Col("order_count")),
     ).
     // Sort and limit
-    Sort(Col("total_revenue"), false).
+    Sort("total_revenue", false).
     Limit(50).
     Collect()
 ```
@@ -402,12 +402,12 @@ if err != nil {
 // Good: Filter before expensive operations
 lazy := df.Lazy().
     Filter(Col("active").Eq(Lit(true))).
-    GroupBy(Col("category")).
+    GroupBy("category")).
     Agg(Col("value").Sum())
 
 // Less efficient: Filter after
 lazy := df.Lazy().
-    GroupBy(Col("category")).
+    GroupBy("category")).
     Agg(Col("value").Sum()).
     Filter(Col("sum").Gt(Lit(0)))
 ```
@@ -418,12 +418,12 @@ lazy := df.Lazy().
 // Good: Select early
 lazy := df.Lazy().
     Select(Col("id"), Col("value")).
-    GroupBy(Col("id")).
+    GroupBy("id")).
     Agg(Col("value").Sum())
 
 // Less efficient: Carry all columns
 lazy := df.Lazy().
-    GroupBy(Col("id")).
+    GroupBy("id")).
     Agg(Col("value").Sum())
 ```
 
@@ -450,7 +450,7 @@ When you need to reuse an expensive computation multiple times, use `Cache()` to
 // Expensive aggregation that we'll reuse
 expensive := df.Lazy().
     Filter(galleon.Col("date").Gte(galleon.Lit("2024-01-01"))).
-    GroupBy(galleon.Col("product"), galleon.Col("region")).
+    GroupBy("product", "region").
     Agg(
         galleon.Col("sales").Sum().Alias("total_sales"),
         galleon.Col("quantity").Sum().Alias("total_units"),
@@ -459,12 +459,12 @@ expensive := df.Lazy().
 
 // Use cached result for multiple analyses
 topProducts, _ := expensive.
-    Sort(galleon.Col("total_sales"), false).
+    Sort("total_sales", false).
     Head(10).
     Collect()
 
 regionalStats, _ := expensive.
-    GroupBy(galleon.Col("region")).
+    GroupBy("region")).
     Agg(
         galleon.Col("total_sales").Sum().Alias("region_sales"),
     ).

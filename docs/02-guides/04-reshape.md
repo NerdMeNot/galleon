@@ -176,7 +176,7 @@ result, _ := df.Lazy().
         ValueName: "sales",
     }).
     // Sort by time
-    Sort(galleon.Col("month"), true).
+    Sort("month", true).
     Collect()
 ```
 
@@ -210,7 +210,7 @@ result, _ := df.Lazy().
         ValueName: "response",
     }).
     // Calculate response distributions
-    GroupBy(galleon.Col("question")).
+    GroupBy("question")).
     Agg(
         galleon.Col("response").Mean().Alias("avg_score"),
         galleon.Col("response").Std().Alias("std_dev"),
@@ -228,7 +228,7 @@ Pivot aggregated data for reporting:
 
 result, _ := df.Lazy().
     // Aggregate to monthly level
-    GroupBy(galleon.Col("month"), galleon.Col("category")).
+    GroupBy("month", "category").
     Agg(
         galleon.Col("sales").Sum().Alias("total_sales"),
     ).

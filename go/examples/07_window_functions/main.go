@@ -91,9 +91,9 @@ func main() {
 	fmt.Println("-------------------------")
 
 	result4, err := df.Lazy().
-		WithColumn("ma3", galleon.Col("close").RollingMean(3)).
-		WithColumn("ma5", galleon.Col("close").RollingMean(5)).
-		WithColumn("rolling_vol_3d", galleon.Col("volume").RollingSum(3)).
+		WithColumn("ma3", galleon.Col("close").RollingMean(3, 1)).       // 3-period MA, require at least 1 value
+		WithColumn("ma5", galleon.Col("close").RollingMean(5, 3)).       // 5-period MA, require at least 3 values
+		WithColumn("rolling_vol_3d", galleon.Col("volume").RollingSum(3, 1)). // 3-day rolling volume
 		Collect()
 	if err != nil {
 		panic(err)

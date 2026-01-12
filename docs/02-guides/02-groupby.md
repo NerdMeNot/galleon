@@ -141,12 +141,12 @@ For large datasets, use lazy evaluation for optimized execution:
 ```go
 result, err := df.Lazy().
     Filter(galleon.Col("date").Gte(galleon.Lit("2024-01-01"))).
-    GroupBy(galleon.Col("category")).
+    GroupBy("category")).
     Agg(
         galleon.Col("sales").Sum().Alias("total_sales"),
         galleon.Col("quantity").Mean().Alias("avg_quantity"),
     ).
-    Sort(galleon.Col("total_sales"), false).
+    Sort("total_sales", false).
     Limit(100).
     Collect()
 ```

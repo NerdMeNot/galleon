@@ -239,7 +239,7 @@ result, _ := df.Lazy().
 ```go
 // Comprehensive time series features
 result, _ := df.Lazy().
-    Sort(galleon.Col("date"), true).
+    Sort("date", true).
     // Price changes
     WithColumn("price_change", galleon.Col("close").Diff()).
     WithColumn("price_pct_change", galleon.Col("close").PctChange()).
@@ -266,7 +266,7 @@ result, _ := df.Lazy().
 ```go
 // Sales performance metrics
 result, _ := df.Lazy().
-    Sort(galleon.Col("date"), true).
+    Sort("date", true).
     // Running totals
     WithColumn("ytd_sales", galleon.Col("daily_sales").CumSum()).
     // Moving averages
@@ -292,7 +292,7 @@ result, _ := df.Lazy().
 ```go
 // Customer engagement metrics
 result, _ := df.Lazy().
-    Sort(galleon.Col("user_id"), galleon.Col("timestamp"), true).
+    Sort("user_id", galleon.Col("timestamp"), true).
     // Days since last purchase
     WithColumn("days_since_last",
         galleon.Col("timestamp").Diff(),
@@ -339,7 +339,7 @@ result, _ := df.Lazy().
 ```go
 // Technical indicators for trading
 result, _ := df.Lazy().
-    Sort(galleon.Col("date"), true).
+    Sort("date", true).
     // Exponential Moving Averages (approximation using SMA)
     WithColumn("ema12", galleon.Col("close").RollingMean(12, 8)).
     WithColumn("ema26", galleon.Col("close").RollingMean(26, 18)).
@@ -385,7 +385,7 @@ Window functions work sequentially, so sorting is important:
 ```go
 // Always sort before applying window functions
 df.Lazy().
-    Sort(galleon.Col("date"), true).  // Ascending order
+    Sort("date", true).  // Ascending order
     WithColumn("rolling_avg", galleon.Col("value").RollingMean(7, 1)).
     Collect()
 ```
@@ -440,7 +440,7 @@ FROM trades
 
 ```go
 df.Lazy().
-    Sort(galleon.Col("date"), true).
+    Sort("date", true).
     WithColumn("prev_close", galleon.Col("close").Lag(1, 0.0)).
     WithColumn("running_total", galleon.Col("sales").CumSum()).
     WithColumn("ma7", galleon.Col("price").RollingMean(7, 1)).
@@ -454,7 +454,7 @@ df.Lazy().
 ```go
 // Always sort by the dimension you're windowing over
 df.Lazy().
-    Sort(galleon.Col("timestamp"), true).  // Essential for time-based windows
+    Sort("timestamp", true).  // Essential for time-based windows
     WithColumn("rolling_sum", galleon.Col("value").RollingSum(7, 1)).
     Collect()
 ```
@@ -478,7 +478,7 @@ df.Lazy().
 ```go
 // Filter after window calculations to keep all context
 df.Lazy().
-    Sort(galleon.Col("date"), true).
+    Sort("date", true).
     WithColumn("ma50", galleon.Col("close").RollingMean(50, 40)).
     // Filter AFTER calculating MA (needs full history)
     Filter(galleon.Col("date").Gte(galleon.Lit("2024-01-01"))).

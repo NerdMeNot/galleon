@@ -141,7 +141,7 @@ df, _ := galleon.FromRecords(records)
 
 // Time series analysis
 df.Lazy().
-    Sort(Col("date"), true).
+    Sort("date", true).
     WithColumn("ma20", Col("close").RollingMean(20, 15)).
     WithColumn("return", Col("close").PctChange()).
     Collect()
@@ -160,9 +160,9 @@ df.Lazy().
     Collect()
 
 // Cached aggregation
-cached := df.Lazy().GroupBy(Col("key")).Agg(Col("val").Sum()).Cache()
+cached := df.Lazy().GroupBy("key").Agg(Col("val").Sum()).Cache()
 result1, _ := cached.Filter(Col("sum").Gt(Lit(100))).Collect()
-result2, _ := cached.Sort(Col("sum"), false).Collect()
+result2, _ := cached.Sort("sum", false).Collect()
 
 // Custom UDF
 df.Lazy().

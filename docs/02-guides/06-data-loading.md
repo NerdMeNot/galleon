@@ -456,7 +456,7 @@ func processAPIResponse(response []byte) (*galleon.DataFrame, error) {
 
     // Analyze
     stats, _ := df.Lazy().
-        GroupBy(galleon.Col("category")).
+        GroupBy("category").
         Agg(
             galleon.Col("value").Sum().Alias("total"),
             galleon.Col("value").Count().Alias("count"),

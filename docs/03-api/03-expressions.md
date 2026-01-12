@@ -693,12 +693,12 @@ df.GroupBy("category").Agg(
 result, _ := df.Lazy().
     Filter(Col("date").Gte(Lit("2024-01-01"))).
     WithColumn("revenue", Col("price").Mul(Col("qty"))).
-    GroupBy(Col("product")).
+    GroupBy("product")).
     Agg(
         Col("revenue").Sum().Alias("total_revenue"),
         Col("qty").Sum().Alias("total_units"),
     ).
-    Sort(Col("total_revenue"), false).
+    Sort("total_revenue", false).
     Limit(10).
     Collect()
 ```
@@ -766,7 +766,7 @@ result, _ := df.Lazy().
 
 ```go
 stats, _ := df.Lazy().
-    GroupBy(Col("category")).
+    GroupBy("category")).
     Agg(
         Col("value").Count().Alias("n"),
         Col("value").Mean().Alias("mean"),
@@ -787,7 +787,7 @@ stats, _ := df.Lazy().
 ```go
 result, _ := df.Lazy().
     // Sort by date
-    Sort(Col("date"), true).
+    Sort("date", true).
     // Calculate returns
     WithColumn("return", Col("close").PctChange()).
     // Calculate volatility (20-day rolling std)
@@ -828,7 +828,7 @@ quality, _ := df.Lazy().
 ```go
 cohorts, _ := df.Lazy().
     // Calculate user tenure
-    Sort(Col("user_id"), Col("date"), true).
+    Sort("user_id", Col("date"), true).
     WithColumn("first_purchase",
         Col("date").Over().PartitionBy("user_id").First(),
     ).
@@ -836,7 +836,7 @@ cohorts, _ := df.Lazy().
         Col("date").Sub(Col("first_purchase")),
     ).
     // Group by cohort and tenure
-    GroupBy(Col("first_purchase"), Col("days_since_first")).
+    GroupBy("first_purchase", "days_since_first").
     Agg(
         Col("user_id").NUnique().Alias("active_users"),
         Col("amount").Sum().Alias("total_revenue"),
