@@ -1,3 +1,20 @@
+//! Element-wise Arithmetic Operations
+//!
+//! SIMD-accelerated arithmetic operations on arrays.
+//! Includes both scalar-array and array-array operations.
+//!
+//! Scalar operations (in-place):
+//! - addScalar: array[i] += scalar
+//! - mulScalar: array[i] *= scalar
+//!
+//! Array operations (out-of-place):
+//! - addArrays: out[i] = a[i] + b[i]
+//! - subArrays: out[i] = a[i] - b[i]
+//! - mulArrays: out[i] = a[i] * b[i]
+//! - divArrays: out[i] = a[i] / b[i]
+//!
+//! All functions are generic over numeric types (f64, f32, i64, i32, etc.)
+
 const std = @import("std");
 const core = @import("core.zig");
 
@@ -5,7 +22,7 @@ const VECTOR_WIDTH = core.VECTOR_WIDTH;
 const CHUNK_SIZE = core.CHUNK_SIZE;
 
 // ============================================================================
-// Float Scalar Operations
+// Scalar Operations (in-place)
 // ============================================================================
 
 /// Add a scalar to all elements in place using SIMD with loop unrolling

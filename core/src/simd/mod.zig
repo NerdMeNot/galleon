@@ -143,7 +143,8 @@ pub const hashInt64Columns = hashing.hashInt64Columns;
 pub const rapidHash64 = hashing.rapidHash64;
 pub const fastIntHash = hashing.fastIntHash;
 
-// Re-export gather functions
+// Re-export gather functions (generic and type-specific wrappers)
+pub const gatherGeneric = gather.gather; // Generic gather for any numeric type
 pub const gatherF64 = gather.gatherF64;
 pub const gatherI64 = gather.gatherI64;
 pub const gatherI32 = gather.gatherI32;

@@ -1,3 +1,18 @@
+//! Vertical Aggregation Operations
+//!
+//! SIMD-accelerated aggregation functions that reduce arrays to scalar values.
+//! All functions use multi-accumulator patterns for instruction-level parallelism.
+//!
+//! Supported aggregations:
+//! - sum: Sum all elements
+//! - min: Minimum value
+//! - max: Maximum value
+//! - mean: Arithmetic mean
+//! - variance: Sample variance (n-1 denominator)
+//! - stdDev: Standard deviation
+//!
+//! All functions are generic over numeric types (f64, f32, i64, i32, etc.)
+
 const std = @import("std");
 const core = @import("core.zig");
 
@@ -5,7 +20,7 @@ const VECTOR_WIDTH = core.VECTOR_WIDTH;
 const CHUNK_SIZE = core.CHUNK_SIZE;
 
 // ============================================================================
-// Float Aggregations
+// Aggregation Functions
 // ============================================================================
 
 /// Sum all elements in a slice using SIMD with loop unrolling

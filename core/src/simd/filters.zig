@@ -1,3 +1,26 @@
+//! Filter and Mask Operations
+//!
+//! SIMD-accelerated filtering operations for selecting array elements.
+//!
+//! Output formats:
+//! - Indices: filterGreaterThan returns u32 indices of matching elements
+//! - Bool mask: filterMaskGreaterThan outputs []bool
+//! - U8 mask: filterMaskU8GreaterThan outputs []u8 (0/1 values, more efficient for SIMD)
+//!
+//! Type variants:
+//! - filterGreaterThan: Generic for all numeric types (f64, f32, i64, i32)
+//! - filterGreaterThanInt: Alias for integer types (same implementation, clearer CGO naming)
+//! - filterMaskU8GreaterThan: Generic for floats
+//! - filterMaskU8GreaterThanInt: Alias for integers
+//!
+//! Note: The "Int" suffix functions exist for clearer CGO export naming,
+//! but internally use the same generic implementation.
+//!
+//! Mask utilities:
+//! - countMaskTrue: Count non-zero elements in u8 mask
+//! - indicesFromMask: Extract indices where mask[i] != 0
+//! - countTrue: Count true values in bool slice
+
 const std = @import("std");
 const core = @import("core.zig");
 
@@ -5,7 +28,7 @@ const VECTOR_WIDTH = core.VECTOR_WIDTH;
 const CHUNK_SIZE = core.CHUNK_SIZE;
 
 // ============================================================================
-// Mask Operations
+// Mask Utilities
 // ============================================================================
 
 /// Count the number of true (non-zero) values in a u8 mask
