@@ -22,6 +22,11 @@ const (
 
 	// Null type
 	Null
+
+	// Nested types
+	Struct // Struct with named fields
+	List   // Variable-length list of elements
+	Array  // Fixed-length array of elements
 )
 
 // String returns the string representation of the DType
@@ -49,6 +54,12 @@ func (d DType) String() string {
 		return "Duration"
 	case Null:
 		return "Null"
+	case Struct:
+		return "Struct"
+	case List:
+		return "List"
+	case Array:
+		return "Array"
 	default:
 		return fmt.Sprintf("Unknown(%d)", d)
 	}
@@ -89,6 +100,16 @@ func (d DType) IsSigned() bool {
 	}
 }
 
+// IsNested returns true if the dtype is a nested type (Struct, List, or Array)
+func (d DType) IsNested() bool {
+	switch d {
+	case Struct, List, Array:
+		return true
+	default:
+		return false
+	}
+}
+
 // Size returns the size in bytes of the dtype
 func (d DType) Size() int {
 	switch d {
@@ -98,13 +119,114 @@ func (d DType) Size() int {
 		return 4
 	case Bool:
 		return 1
-	case String:
+	case String, List, Struct, Array:
 		return -1 // Variable size
 	case Null:
 		return 0
 	default:
 		return 0
 	}
+}
+
+// ============================================================================
+// Nested Type Metadata
+// ============================================================================
+
+// StructField represents a field in a Struct type
+type StructField struct {
+	Name  string
+	DType DType
+	// For nested structs/lists, this holds the inner type info
+	Inner interface{} // *StructType or *ListType
+}
+
+// StructType describes the structure of a Struct dtype
+type StructType struct {
+	Fields []StructField
+}
+
+// NewStructType creates a new StructType from field definitions
+func NewStructType(fields []StructField) *StructType {
+	return &StructType{
+		Fields: append([]StructField{}, fields...),
+	}
+}
+
+// GetField returns a field by name
+func (s *StructType) GetField(name string) (*StructField, bool) {
+	for i := range s.Fields {
+		if s.Fields[i].Name == name {
+			return &s.Fields[i], true
+		}
+	}
+	return nil, false
+}
+
+// GetFieldIndex returns the index of a field by name
+func (s *StructType) GetFieldIndex(name string) (int, bool) {
+	for i := range s.Fields {
+		if s.Fields[i].Name == name {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+// NumFields returns the number of fields
+func (s *StructType) NumFields() int {
+	return len(s.Fields)
+}
+
+// String returns a string representation of the struct type
+func (s *StructType) String() string {
+	result := "Struct{"
+	for i, f := range s.Fields {
+		if i > 0 {
+			result += ", "
+		}
+		result += fmt.Sprintf("%s: %s", f.Name, f.DType)
+	}
+	result += "}"
+	return result
+}
+
+// ListType describes the element type of a List dtype
+type ListType struct {
+	ElementType DType
+	// For nested lists/structs, this holds the inner type info
+	Inner interface{} // *StructType or *ListType
+}
+
+// NewListType creates a new ListType
+func NewListType(elemType DType) *ListType {
+	return &ListType{ElementType: elemType}
+}
+
+// NewListTypeNested creates a ListType with nested type info
+func NewListTypeNested(elemType DType, inner interface{}) *ListType {
+	return &ListType{ElementType: elemType, Inner: inner}
+}
+
+// String returns a string representation of the list type
+func (l *ListType) String() string {
+	return fmt.Sprintf("List[%s]", l.ElementType)
+}
+
+// ArrayType describes a fixed-size array
+type ArrayType struct {
+	ElementType DType
+	Size        int
+	Inner       interface{} // For nested types
+}
+
+// NewArrayType creates a new ArrayType
+func NewArrayType(elemType DType, size int) *ArrayType {
+	return &ArrayType{ElementType: elemType, Size: size}
+}
+
+// String returns a string representation of the array type
+func (a *ArrayType) String() string {
+	return fmt.Sprintf("Array[%s; %d]", a.ElementType, a.Size)
 }
 
 // Schema represents the schema of a DataFrame

@@ -11,6 +11,10 @@ pub const core = mod.core;
 pub const aggregations = mod.aggregations;
 pub const arithmetic = mod.arithmetic;
 pub const comparisons = mod.comparisons;
+pub const conditionals = mod.conditionals;
+pub const statistics = mod.statistics;
+pub const window = mod.window;
+pub const fold = mod.fold;
 pub const filters = mod.filters;
 pub const hashing = mod.hashing;
 pub const gather = mod.gather;
@@ -58,6 +62,66 @@ pub const cmpLt = mod.cmpLt;
 pub const cmpLe = mod.cmpLe;
 pub const cmpEq = mod.cmpEq;
 pub const cmpNe = mod.cmpNe;
+
+// Re-export conditional functions
+pub const selectF64 = mod.selectF64;
+pub const selectI64 = mod.selectI64;
+pub const selectScalarF64 = mod.selectScalarF64;
+pub const isNullF64 = mod.isNullF64;
+pub const isNotNullF64 = mod.isNotNullF64;
+pub const fillNullF64 = mod.fillNullF64;
+pub const fillNullForwardF64 = mod.fillNullForwardF64;
+pub const fillNullBackwardF64 = mod.fillNullBackwardF64;
+pub const coalesceF64 = mod.coalesceF64;
+pub const coalesce2F64 = mod.coalesce2F64;
+pub const countNullF64 = mod.countNullF64;
+pub const countNotNullF64 = mod.countNotNullF64;
+
+// Re-export statistics functions
+pub const median = mod.median;
+pub const quantile = mod.quantile;
+pub const skewness = mod.skewness;
+pub const kurtosis = mod.kurtosis;
+pub const correlation = mod.correlation;
+pub const modeInt = mod.modeInt;
+
+// Re-export window functions
+pub const lag = mod.lag;
+pub const lead = mod.lead;
+pub const rowNumber = mod.rowNumber;
+pub const rowNumberPartitioned = mod.rowNumberPartitioned;
+pub const rank = mod.rank;
+pub const denseRank = mod.denseRank;
+pub const cumSum = mod.cumSum;
+pub const cumSumPartitioned = mod.cumSumPartitioned;
+pub const cumMin = mod.cumMin;
+pub const cumMax = mod.cumMax;
+pub const rollingSum = mod.rollingSum;
+pub const rollingMean = mod.rollingMean;
+pub const rollingMin = mod.rollingMin;
+pub const rollingMax = mod.rollingMax;
+pub const rollingStd = mod.rollingStd;
+pub const diff = mod.diff;
+pub const diffN = mod.diffN;
+pub const pctChange = mod.pctChange;
+
+// Re-export fold/horizontal aggregation functions
+pub const sumHorizontal2 = mod.sumHorizontal2;
+pub const sumHorizontal3 = mod.sumHorizontal3;
+pub const sumHorizontalN = mod.sumHorizontalN;
+pub const minHorizontal2 = mod.minHorizontal2;
+pub const minHorizontal3 = mod.minHorizontal3;
+pub const maxHorizontal2 = mod.maxHorizontal2;
+pub const maxHorizontal3 = mod.maxHorizontal3;
+pub const minHorizontalN = mod.minHorizontalN;
+pub const maxHorizontalN = mod.maxHorizontalN;
+pub const meanHorizontalN = mod.meanHorizontalN;
+pub const anyHorizontal2 = mod.anyHorizontal2;
+pub const allHorizontal2 = mod.allHorizontal2;
+pub const productHorizontal2 = mod.productHorizontal2;
+pub const productHorizontal3 = mod.productHorizontal3;
+pub const countNonNullHorizontal2 = mod.countNonNullHorizontal2;
+pub const countNonNullHorizontal3 = mod.countNonNullHorizontal3;
 
 // Re-export filter functions
 pub const countMaskTrue = mod.countMaskTrue;

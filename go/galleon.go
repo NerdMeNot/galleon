@@ -1948,3 +1948,743 @@ func LeftJoinI64(leftKeys []int64, rightKeys []int64) (leftIndices, rightIndices
 	return leftIndices, rightIndices
 }
 
+// ============================================================================
+// Conditional Operations (SIMD)
+// ============================================================================
+
+// SelectF64 performs element-wise selection: out[i] = mask[i] ? then[i] : else[i]
+func SelectF64(mask []byte, thenVal, elseVal, out []float64) {
+	n := len(mask)
+	if n == 0 || len(thenVal) < n || len(elseVal) < n || len(out) < n {
+		return
+	}
+	C.galleon_select_f64(
+		(*C.uint8_t)(unsafe.Pointer(&mask[0])),
+		(*C.double)(unsafe.Pointer(&thenVal[0])),
+		(*C.double)(unsafe.Pointer(&elseVal[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// SelectI64 performs element-wise selection: out[i] = mask[i] ? then[i] : else[i]
+func SelectI64(mask []byte, thenVal, elseVal, out []int64) {
+	n := len(mask)
+	if n == 0 || len(thenVal) < n || len(elseVal) < n || len(out) < n {
+		return
+	}
+	C.galleon_select_i64(
+		(*C.uint8_t)(unsafe.Pointer(&mask[0])),
+		(*C.int64_t)(unsafe.Pointer(&thenVal[0])),
+		(*C.int64_t)(unsafe.Pointer(&elseVal[0])),
+		(*C.int64_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// SelectScalarF64 performs selection with scalar else: out[i] = mask[i] ? then[i] : elseScalar
+func SelectScalarF64(mask []byte, thenVal []float64, elseScalar float64, out []float64) {
+	n := len(mask)
+	if n == 0 || len(thenVal) < n || len(out) < n {
+		return
+	}
+	C.galleon_select_scalar_f64(
+		(*C.uint8_t)(unsafe.Pointer(&mask[0])),
+		(*C.double)(unsafe.Pointer(&thenVal[0])),
+		C.double(elseScalar),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// IsNullF64 checks for NaN values: out[i] = 1 if data[i] is NaN, else 0
+func IsNullF64(data []float64, out []byte) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_is_null_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.uint8_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// IsNotNullF64 checks for non-NaN values: out[i] = 1 if data[i] is not NaN, else 0
+func IsNotNullF64(data []float64, out []byte) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_is_not_null_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.uint8_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// FillNullF64 replaces NaN values: out[i] = fillValue if data[i] is NaN, else data[i]
+func FillNullF64(data []float64, fillValue float64, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_fill_null_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.double(fillValue),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// FillNullForwardF64 performs forward fill: replaces NaN with previous non-NaN value
+func FillNullForwardF64(data, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_fill_null_forward_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// FillNullBackwardF64 performs backward fill: replaces NaN with next non-NaN value
+func FillNullBackwardF64(data, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_fill_null_backward_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// Coalesce2F64 returns first non-NaN: out[i] = a[i] if not NaN, else b[i]
+func Coalesce2F64(a, b, out []float64) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(out) < n {
+		return
+	}
+	C.galleon_coalesce2_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// CountNullF64 counts the number of NaN values in the array
+func CountNullF64(data []float64) int {
+	if len(data) == 0 {
+		return 0
+	}
+	return int(C.galleon_count_null_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+	))
+}
+
+// CountNotNullF64 counts the number of non-NaN values in the array
+func CountNotNullF64(data []float64) int {
+	if len(data) == 0 {
+		return 0
+	}
+	return int(C.galleon_count_not_null_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+	))
+}
+
+// ============================================================================
+// Advanced Statistics Operations (SIMD)
+// ============================================================================
+
+// MedianF64 computes the median of a float64 slice using SIMD-accelerated quickselect.
+// Returns (median, valid) where valid is false if the slice is empty.
+func MedianF64(data []float64) (float64, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+	var valid C.bool
+	result := float64(C.galleon_median_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		&valid,
+	))
+	return result, bool(valid)
+}
+
+// QuantileF64 computes the q-th quantile of a float64 slice.
+// q should be in [0, 1] where 0.5 is the median.
+// Returns (quantile, valid) where valid is false if the slice is empty or q is invalid.
+func QuantileF64(data []float64, q float64) (float64, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+	var valid C.bool
+	result := float64(C.galleon_quantile_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		C.double(q),
+		&valid,
+	))
+	return result, bool(valid)
+}
+
+// SkewnessF64 computes the skewness (3rd standardized moment) of a float64 slice.
+// Positive skew indicates right tail, negative indicates left tail.
+// Returns (skewness, valid) where valid is false if n < 3.
+func SkewnessF64(data []float64) (float64, bool) {
+	if len(data) < 3 {
+		return 0, false
+	}
+	var valid C.bool
+	result := float64(C.galleon_skewness_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		&valid,
+	))
+	return result, bool(valid)
+}
+
+// KurtosisF64 computes the excess kurtosis (4th standardized moment - 3) of a float64 slice.
+// Excess kurtosis = 0 for normal distribution. Positive = heavy tails, negative = light tails.
+// Returns (kurtosis, valid) where valid is false if n < 4.
+func KurtosisF64(data []float64) (float64, bool) {
+	if len(data) < 4 {
+		return 0, false
+	}
+	var valid C.bool
+	result := float64(C.galleon_kurtosis_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		&valid,
+	))
+	return result, bool(valid)
+}
+
+// CorrelationF64 computes the Pearson correlation coefficient between two float64 slices.
+// Returns (correlation, valid) where valid is false if lengths differ, n < 2, or zero variance.
+func CorrelationF64(x, y []float64) (float64, bool) {
+	if len(x) < 2 || len(x) != len(y) {
+		return 0, false
+	}
+	var valid C.bool
+	result := float64(C.galleon_correlation_f64(
+		(*C.double)(unsafe.Pointer(&x[0])),
+		(*C.double)(unsafe.Pointer(&y[0])),
+		C.size_t(len(x)),
+		&valid,
+	))
+	return result, bool(valid)
+}
+
+// VarianceF64 computes the sample variance of a float64 slice using SIMD.
+// Uses n-1 denominator (Bessel's correction).
+// Returns (variance, valid) where valid is false if n < 2.
+func VarianceF64(data []float64) (float64, bool) {
+	if len(data) < 2 {
+		return 0, false
+	}
+	var valid C.bool
+	result := float64(C.galleon_variance_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		&valid,
+	))
+	return result, bool(valid)
+}
+
+// StdDevF64 computes the sample standard deviation of a float64 slice using SIMD.
+// Returns (stddev, valid) where valid is false if n < 2.
+func StdDevF64(data []float64) (float64, bool) {
+	if len(data) < 2 {
+		return 0, false
+	}
+	var valid C.bool
+	result := float64(C.galleon_stddev_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		&valid,
+	))
+	return result, bool(valid)
+}
+
+// ============================================================================
+// Window Operations (SIMD)
+// ============================================================================
+
+// LagF64 shifts values forward: out[i] = data[i-offset] (or default for first `offset` positions)
+func LagF64(data []float64, offset int, defaultVal float64, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_lag_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(n),
+		C.size_t(offset),
+		C.double(defaultVal),
+		(*C.double)(unsafe.Pointer(&out[0])),
+	)
+}
+
+// LeadF64 shifts values backward: out[i] = data[i+offset] (or default for last `offset` positions)
+func LeadF64(data []float64, offset int, defaultVal float64, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_lead_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(n),
+		C.size_t(offset),
+		C.double(defaultVal),
+		(*C.double)(unsafe.Pointer(&out[0])),
+	)
+}
+
+// LagI64 shifts int64 values forward
+func LagI64(data []int64, offset int, defaultVal int64, out []int64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_lag_i64(
+		(*C.int64_t)(unsafe.Pointer(&data[0])),
+		C.size_t(n),
+		C.size_t(offset),
+		C.int64_t(defaultVal),
+		(*C.int64_t)(unsafe.Pointer(&out[0])),
+	)
+}
+
+// LeadI64 shifts int64 values backward
+func LeadI64(data []int64, offset int, defaultVal int64, out []int64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_lead_i64(
+		(*C.int64_t)(unsafe.Pointer(&data[0])),
+		C.size_t(n),
+		C.size_t(offset),
+		C.int64_t(defaultVal),
+		(*C.int64_t)(unsafe.Pointer(&out[0])),
+	)
+}
+
+// RowNumber generates sequential row numbers (1-indexed)
+func RowNumber(out []uint32) {
+	if len(out) == 0 {
+		return
+	}
+	C.galleon_row_number(
+		(*C.uint32_t)(unsafe.Pointer(&out[0])),
+		C.size_t(len(out)),
+	)
+}
+
+// RowNumberPartitioned generates row numbers within each partition
+func RowNumberPartitioned(partitionIDs []uint32, out []uint32) {
+	n := len(partitionIDs)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_row_number_partitioned(
+		(*C.uint32_t)(unsafe.Pointer(&partitionIDs[0])),
+		(*C.uint32_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// RankF64 computes rank with gaps for ties (data must be sorted)
+func RankF64(data []float64, out []uint32) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_rank_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.uint32_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// DenseRankF64 computes rank without gaps for ties (data must be sorted)
+func DenseRankF64(data []float64, out []uint32) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_dense_rank_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.uint32_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// CumSumF64 computes cumulative sum
+func CumSumF64(data []float64, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_cumsum_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// CumSumI64 computes cumulative sum for int64
+func CumSumI64(data []int64, out []int64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_cumsum_i64(
+		(*C.int64_t)(unsafe.Pointer(&data[0])),
+		(*C.int64_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// CumSumPartitionedF64 computes cumulative sum within each partition
+func CumSumPartitionedF64(data []float64, partitionIDs []uint32, out []float64) {
+	n := len(data)
+	if n == 0 || len(partitionIDs) < n || len(out) < n {
+		return
+	}
+	C.galleon_cumsum_partitioned_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.uint32_t)(unsafe.Pointer(&partitionIDs[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// CumMinF64 computes cumulative minimum
+func CumMinF64(data []float64, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_cummin_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// CumMaxF64 computes cumulative maximum
+func CumMaxF64(data []float64, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_cummax_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// RollingSumF64 computes rolling sum with specified window size
+func RollingSumF64(data []float64, windowSize, minPeriods int, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n || windowSize <= 0 {
+		return
+	}
+	C.galleon_rolling_sum_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(n),
+		C.size_t(windowSize),
+		C.size_t(minPeriods),
+		(*C.double)(unsafe.Pointer(&out[0])),
+	)
+}
+
+// RollingMeanF64 computes rolling mean with specified window size
+func RollingMeanF64(data []float64, windowSize, minPeriods int, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n || windowSize <= 0 {
+		return
+	}
+	C.galleon_rolling_mean_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(n),
+		C.size_t(windowSize),
+		C.size_t(minPeriods),
+		(*C.double)(unsafe.Pointer(&out[0])),
+	)
+}
+
+// RollingMinF64 computes rolling minimum with specified window size
+func RollingMinF64(data []float64, windowSize, minPeriods int, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n || windowSize <= 0 {
+		return
+	}
+	C.galleon_rolling_min_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(n),
+		C.size_t(windowSize),
+		C.size_t(minPeriods),
+		(*C.double)(unsafe.Pointer(&out[0])),
+	)
+}
+
+// RollingMaxF64 computes rolling maximum with specified window size
+func RollingMaxF64(data []float64, windowSize, minPeriods int, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n || windowSize <= 0 {
+		return
+	}
+	C.galleon_rolling_max_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(n),
+		C.size_t(windowSize),
+		C.size_t(minPeriods),
+		(*C.double)(unsafe.Pointer(&out[0])),
+	)
+}
+
+// RollingStdF64 computes rolling standard deviation with specified window size
+func RollingStdF64(data []float64, windowSize, minPeriods int, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n || windowSize <= 0 {
+		return
+	}
+	C.galleon_rolling_std_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(n),
+		C.size_t(windowSize),
+		C.size_t(minPeriods),
+		(*C.double)(unsafe.Pointer(&out[0])),
+	)
+}
+
+// DiffF64 computes first difference (data[i] - data[i-1])
+func DiffF64(data []float64, defaultVal float64, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_diff_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+		C.double(defaultVal),
+	)
+}
+
+// DiffNF64 computes nth difference (data[i] - data[i-n])
+func DiffNF64(data []float64, periods int, defaultVal float64, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n || periods <= 0 {
+		return
+	}
+	C.galleon_diff_n_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+		C.size_t(periods),
+		C.double(defaultVal),
+	)
+}
+
+// PctChangeF64 computes percent change ((data[i] - data[i-1]) / data[i-1])
+func PctChangeF64(data []float64, out []float64) {
+	n := len(data)
+	if n == 0 || len(out) < n {
+		return
+	}
+	C.galleon_pct_change_f64(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// ============================================================================
+// Fold/Horizontal Aggregation Operations
+// ============================================================================
+
+// SumHorizontal2F64 computes row-wise sum of two columns: out[i] = a[i] + b[i]
+func SumHorizontal2F64(a, b []float64, out []float64) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(out) < n {
+		return
+	}
+	C.galleon_sum_horizontal2_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// SumHorizontal3F64 computes row-wise sum of three columns: out[i] = a[i] + b[i] + c[i]
+func SumHorizontal3F64(a, b, c []float64, out []float64) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(c) < n || len(out) < n {
+		return
+	}
+	C.galleon_sum_horizontal3_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&c[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// MinHorizontal2F64 computes row-wise minimum of two columns: out[i] = min(a[i], b[i])
+func MinHorizontal2F64(a, b []float64, out []float64) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(out) < n {
+		return
+	}
+	C.galleon_min_horizontal2_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// MinHorizontal3F64 computes row-wise minimum of three columns: out[i] = min(a[i], b[i], c[i])
+func MinHorizontal3F64(a, b, c []float64, out []float64) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(c) < n || len(out) < n {
+		return
+	}
+	C.galleon_min_horizontal3_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&c[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// MaxHorizontal2F64 computes row-wise maximum of two columns: out[i] = max(a[i], b[i])
+func MaxHorizontal2F64(a, b []float64, out []float64) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(out) < n {
+		return
+	}
+	C.galleon_max_horizontal2_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// MaxHorizontal3F64 computes row-wise maximum of three columns: out[i] = max(a[i], b[i], c[i])
+func MaxHorizontal3F64(a, b, c []float64, out []float64) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(c) < n || len(out) < n {
+		return
+	}
+	C.galleon_max_horizontal3_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&c[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// ProductHorizontal2F64 computes row-wise product of two columns: out[i] = a[i] * b[i]
+func ProductHorizontal2F64(a, b []float64, out []float64) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(out) < n {
+		return
+	}
+	C.galleon_product_horizontal2_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// ProductHorizontal3F64 computes row-wise product of three columns: out[i] = a[i] * b[i] * c[i]
+func ProductHorizontal3F64(a, b, c []float64, out []float64) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(c) < n || len(out) < n {
+		return
+	}
+	C.galleon_product_horizontal3_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&c[0])),
+		(*C.double)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// AnyHorizontal2 computes row-wise OR of two boolean columns: out[i] = a[i] || b[i]
+func AnyHorizontal2(a, b []uint8, out []uint8) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(out) < n {
+		return
+	}
+	C.galleon_any_horizontal2(
+		(*C.uint8_t)(unsafe.Pointer(&a[0])),
+		(*C.uint8_t)(unsafe.Pointer(&b[0])),
+		(*C.uint8_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// AllHorizontal2 computes row-wise AND of two boolean columns: out[i] = a[i] && b[i]
+func AllHorizontal2(a, b []uint8, out []uint8) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(out) < n {
+		return
+	}
+	C.galleon_all_horizontal2(
+		(*C.uint8_t)(unsafe.Pointer(&a[0])),
+		(*C.uint8_t)(unsafe.Pointer(&b[0])),
+		(*C.uint8_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// CountNonNullHorizontal2F64 counts non-NaN values across two columns per row
+func CountNonNullHorizontal2F64(a, b []float64, out []uint32) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(out) < n {
+		return
+	}
+	C.galleon_count_non_null_horizontal2_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.uint32_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+
+// CountNonNullHorizontal3F64 counts non-NaN values across three columns per row
+func CountNonNullHorizontal3F64(a, b, c []float64, out []uint32) {
+	n := len(a)
+	if n == 0 || len(b) < n || len(c) < n || len(out) < n {
+		return
+	}
+	C.galleon_count_non_null_horizontal3_f64(
+		(*C.double)(unsafe.Pointer(&a[0])),
+		(*C.double)(unsafe.Pointer(&b[0])),
+		(*C.double)(unsafe.Pointer(&c[0])),
+		(*C.uint32_t)(unsafe.Pointer(&out[0])),
+		C.size_t(n),
+	)
+}
+

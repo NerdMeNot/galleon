@@ -191,6 +191,260 @@ export fn galleon_cmp_ne_i64(a: [*]const i64, b: [*]const i64, out: [*]u8, len: 
     simd.cmpNe(i64, a[0..len], b[0..len], out[0..len]);
 }
 
+// --- Conditional Operations ---
+
+export fn galleon_select_f64(mask: [*]const u8, then_val: [*]const f64, else_val: [*]const f64, out: [*]f64, len: usize) void {
+    simd.selectF64(mask[0..len], then_val[0..len], else_val[0..len], out[0..len]);
+}
+
+export fn galleon_select_i64(mask: [*]const u8, then_val: [*]const i64, else_val: [*]const i64, out: [*]i64, len: usize) void {
+    simd.selectI64(mask[0..len], then_val[0..len], else_val[0..len], out[0..len]);
+}
+
+export fn galleon_select_scalar_f64(mask: [*]const u8, then_val: [*]const f64, else_scalar: f64, out: [*]f64, len: usize) void {
+    simd.selectScalarF64(mask[0..len], then_val[0..len], else_scalar, out[0..len]);
+}
+
+export fn galleon_is_null_f64(data: [*]const f64, out: [*]u8, len: usize) void {
+    simd.isNullF64(data[0..len], out[0..len]);
+}
+
+export fn galleon_is_not_null_f64(data: [*]const f64, out: [*]u8, len: usize) void {
+    simd.isNotNullF64(data[0..len], out[0..len]);
+}
+
+export fn galleon_fill_null_f64(data: [*]const f64, fill_value: f64, out: [*]f64, len: usize) void {
+    simd.fillNullF64(data[0..len], fill_value, out[0..len]);
+}
+
+export fn galleon_fill_null_forward_f64(data: [*]const f64, out: [*]f64, len: usize) void {
+    simd.fillNullForwardF64(data[0..len], out[0..len]);
+}
+
+export fn galleon_fill_null_backward_f64(data: [*]const f64, out: [*]f64, len: usize) void {
+    simd.fillNullBackwardF64(data[0..len], out[0..len]);
+}
+
+export fn galleon_coalesce2_f64(a: [*]const f64, b: [*]const f64, out: [*]f64, len: usize) void {
+    simd.coalesce2F64(a[0..len], b[0..len], out[0..len]);
+}
+
+export fn galleon_count_null_f64(data: [*]const f64, len: usize) usize {
+    return simd.countNullF64(data[0..len]);
+}
+
+export fn galleon_count_not_null_f64(data: [*]const f64, len: usize) usize {
+    return simd.countNotNullF64(data[0..len]);
+}
+
+// --- Statistics Operations ---
+
+export fn galleon_median_f64(data: [*]const f64, len: usize, out_valid: *bool) f64 {
+    if (simd.median(f64, data[0..len], std.heap.c_allocator)) |result| {
+        out_valid.* = true;
+        return result;
+    } else {
+        out_valid.* = false;
+        return 0.0;
+    }
+}
+
+export fn galleon_quantile_f64(data: [*]const f64, len: usize, q: f64, out_valid: *bool) f64 {
+    if (simd.quantile(f64, data[0..len], q, std.heap.c_allocator)) |result| {
+        out_valid.* = true;
+        return result;
+    } else {
+        out_valid.* = false;
+        return 0.0;
+    }
+}
+
+export fn galleon_skewness_f64(data: [*]const f64, len: usize, out_valid: *bool) f64 {
+    if (simd.skewness(f64, data[0..len])) |result| {
+        out_valid.* = true;
+        return result;
+    } else {
+        out_valid.* = false;
+        return 0.0;
+    }
+}
+
+export fn galleon_kurtosis_f64(data: [*]const f64, len: usize, out_valid: *bool) f64 {
+    if (simd.kurtosis(f64, data[0..len])) |result| {
+        out_valid.* = true;
+        return result;
+    } else {
+        out_valid.* = false;
+        return 0.0;
+    }
+}
+
+export fn galleon_correlation_f64(x: [*]const f64, y: [*]const f64, len: usize, out_valid: *bool) f64 {
+    if (simd.correlation(f64, x[0..len], y[0..len])) |result| {
+        out_valid.* = true;
+        return result;
+    } else {
+        out_valid.* = false;
+        return 0.0;
+    }
+}
+
+export fn galleon_variance_f64(data: [*]const f64, len: usize, out_valid: *bool) f64 {
+    if (simd.variance(f64, data[0..len])) |result| {
+        out_valid.* = true;
+        return result;
+    } else {
+        out_valid.* = false;
+        return 0.0;
+    }
+}
+
+export fn galleon_stddev_f64(data: [*]const f64, len: usize, out_valid: *bool) f64 {
+    if (simd.stdDev(f64, data[0..len])) |result| {
+        out_valid.* = true;
+        return result;
+    } else {
+        out_valid.* = false;
+        return 0.0;
+    }
+}
+
+// --- Window Operations ---
+
+export fn galleon_lag_f64(data: [*]const f64, len: usize, offset: usize, default: f64, out: [*]f64) void {
+    simd.lag(f64, data[0..len], offset, default, out[0..len]);
+}
+
+export fn galleon_lead_f64(data: [*]const f64, len: usize, offset: usize, default: f64, out: [*]f64) void {
+    simd.lead(f64, data[0..len], offset, default, out[0..len]);
+}
+
+export fn galleon_lag_i64(data: [*]const i64, len: usize, offset: usize, default: i64, out: [*]i64) void {
+    simd.lag(i64, data[0..len], offset, default, out[0..len]);
+}
+
+export fn galleon_lead_i64(data: [*]const i64, len: usize, offset: usize, default: i64, out: [*]i64) void {
+    simd.lead(i64, data[0..len], offset, default, out[0..len]);
+}
+
+export fn galleon_row_number(out: [*]u32, len: usize) void {
+    simd.rowNumber(out[0..len]);
+}
+
+export fn galleon_row_number_partitioned(partition_ids: [*]const u32, out: [*]u32, len: usize) void {
+    simd.rowNumberPartitioned(partition_ids[0..len], out[0..len]);
+}
+
+export fn galleon_rank_f64(data: [*]const f64, out: [*]u32, len: usize) void {
+    simd.rank(f64, data[0..len], out[0..len]);
+}
+
+export fn galleon_dense_rank_f64(data: [*]const f64, out: [*]u32, len: usize) void {
+    simd.denseRank(f64, data[0..len], out[0..len]);
+}
+
+export fn galleon_cumsum_f64(data: [*]const f64, out: [*]f64, len: usize) void {
+    simd.cumSum(f64, data[0..len], out[0..len]);
+}
+
+export fn galleon_cumsum_i64(data: [*]const i64, out: [*]i64, len: usize) void {
+    simd.cumSum(i64, data[0..len], out[0..len]);
+}
+
+export fn galleon_cumsum_partitioned_f64(data: [*]const f64, partition_ids: [*]const u32, out: [*]f64, len: usize) void {
+    simd.cumSumPartitioned(f64, data[0..len], partition_ids[0..len], out[0..len]);
+}
+
+export fn galleon_cummin_f64(data: [*]const f64, out: [*]f64, len: usize) void {
+    simd.cumMin(f64, data[0..len], out[0..len]);
+}
+
+export fn galleon_cummax_f64(data: [*]const f64, out: [*]f64, len: usize) void {
+    simd.cumMax(f64, data[0..len], out[0..len]);
+}
+
+export fn galleon_rolling_sum_f64(data: [*]const f64, len: usize, window_size: usize, min_periods: usize, out: [*]f64) void {
+    simd.rollingSum(f64, data[0..len], window_size, min_periods, out[0..len]);
+}
+
+export fn galleon_rolling_mean_f64(data: [*]const f64, len: usize, window_size: usize, min_periods: usize, out: [*]f64) void {
+    simd.rollingMean(f64, data[0..len], window_size, min_periods, out[0..len]);
+}
+
+export fn galleon_rolling_min_f64(data: [*]const f64, len: usize, window_size: usize, min_periods: usize, out: [*]f64) void {
+    simd.rollingMin(f64, data[0..len], window_size, min_periods, out[0..len], std.heap.c_allocator);
+}
+
+export fn galleon_rolling_max_f64(data: [*]const f64, len: usize, window_size: usize, min_periods: usize, out: [*]f64) void {
+    simd.rollingMax(f64, data[0..len], window_size, min_periods, out[0..len], std.heap.c_allocator);
+}
+
+export fn galleon_rolling_std_f64(data: [*]const f64, len: usize, window_size: usize, min_periods: usize, out: [*]f64) void {
+    simd.rollingStd(f64, data[0..len], window_size, min_periods, out[0..len]);
+}
+
+export fn galleon_diff_f64(data: [*]const f64, out: [*]f64, len: usize, default: f64) void {
+    simd.diff(f64, data[0..len], default, out[0..len]);
+}
+
+export fn galleon_diff_n_f64(data: [*]const f64, out: [*]f64, len: usize, n: usize, default: f64) void {
+    simd.diffN(f64, data[0..len], n, default, out[0..len]);
+}
+
+export fn galleon_pct_change_f64(data: [*]const f64, out: [*]f64, len: usize) void {
+    simd.pctChange(f64, data[0..len], out[0..len]);
+}
+
+// --- Fold/Horizontal Aggregation Operations ---
+
+export fn galleon_sum_horizontal2_f64(a: [*]const f64, b: [*]const f64, out: [*]f64, len: usize) void {
+    simd.sumHorizontal2(f64, a[0..len], b[0..len], out[0..len]);
+}
+
+export fn galleon_sum_horizontal3_f64(a: [*]const f64, b: [*]const f64, c: [*]const f64, out: [*]f64, len: usize) void {
+    simd.sumHorizontal3(f64, a[0..len], b[0..len], c[0..len], out[0..len]);
+}
+
+export fn galleon_min_horizontal2_f64(a: [*]const f64, b: [*]const f64, out: [*]f64, len: usize) void {
+    simd.minHorizontal2(f64, a[0..len], b[0..len], out[0..len]);
+}
+
+export fn galleon_min_horizontal3_f64(a: [*]const f64, b: [*]const f64, c: [*]const f64, out: [*]f64, len: usize) void {
+    simd.minHorizontal3(f64, a[0..len], b[0..len], c[0..len], out[0..len]);
+}
+
+export fn galleon_max_horizontal2_f64(a: [*]const f64, b: [*]const f64, out: [*]f64, len: usize) void {
+    simd.maxHorizontal2(f64, a[0..len], b[0..len], out[0..len]);
+}
+
+export fn galleon_max_horizontal3_f64(a: [*]const f64, b: [*]const f64, c: [*]const f64, out: [*]f64, len: usize) void {
+    simd.maxHorizontal3(f64, a[0..len], b[0..len], c[0..len], out[0..len]);
+}
+
+export fn galleon_product_horizontal2_f64(a: [*]const f64, b: [*]const f64, out: [*]f64, len: usize) void {
+    simd.productHorizontal2(f64, a[0..len], b[0..len], out[0..len]);
+}
+
+export fn galleon_product_horizontal3_f64(a: [*]const f64, b: [*]const f64, c: [*]const f64, out: [*]f64, len: usize) void {
+    simd.productHorizontal3(f64, a[0..len], b[0..len], c[0..len], out[0..len]);
+}
+
+export fn galleon_any_horizontal2(a: [*]const u8, b: [*]const u8, out: [*]u8, len: usize) void {
+    simd.anyHorizontal2(a[0..len], b[0..len], out[0..len]);
+}
+
+export fn galleon_all_horizontal2(a: [*]const u8, b: [*]const u8, out: [*]u8, len: usize) void {
+    simd.allHorizontal2(a[0..len], b[0..len], out[0..len]);
+}
+
+export fn galleon_count_non_null_horizontal2_f64(a: [*]const f64, b: [*]const f64, out: [*]u32, len: usize) void {
+    simd.countNonNullHorizontal2(a[0..len], b[0..len], out[0..len]);
+}
+
+export fn galleon_count_non_null_horizontal3_f64(a: [*]const f64, b: [*]const f64, c: [*]const f64, out: [*]u32, len: usize) void {
+    simd.countNonNullHorizontal3(a[0..len], b[0..len], c[0..len], out[0..len]);
+}
+
 // --- Filter Operations ---
 
 export fn galleon_filter_gt_f64(
