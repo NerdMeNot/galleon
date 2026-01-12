@@ -2,6 +2,8 @@ package galleon
 
 import (
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -46,6 +48,324 @@ func NewDataFrame(columns ...*Series) (*DataFrame, error) {
 		schema:  schema,
 		height:  height,
 	}, nil
+}
+
+// FromRecords creates a DataFrame from a slice of maps.
+// Each map represents a row, with keys as column names.
+// All maps should have the same keys for best results.
+// Type inference: int/int64 -> Int64, float64 -> Float64, string -> String, bool -> Bool
+func FromRecords(records []map[string]interface{}) (*DataFrame, error) {
+	if len(records) == 0 {
+		return NewDataFrame()
+	}
+
+	// Collect all unique column names from all records
+	colSet := make(map[string]bool)
+	for _, record := range records {
+		for key := range record {
+			colSet[key] = true
+		}
+	}
+
+	// Sort column names for deterministic ordering
+	colNames := make([]string, 0, len(colSet))
+	for name := range colSet {
+		colNames = append(colNames, name)
+	}
+	sort.Strings(colNames)
+
+	// Infer types from first non-nil value in each column
+	colTypes := make(map[string]DType)
+	for _, name := range colNames {
+		for _, record := range records {
+			if val, ok := record[name]; ok && val != nil {
+				colTypes[name] = inferTypeFromValue(val)
+				break
+			}
+		}
+		// Default to String if all nil
+		if _, ok := colTypes[name]; !ok {
+			colTypes[name] = String
+		}
+	}
+
+	// Build columns
+	numRows := len(records)
+	columns := make([]*Series, len(colNames))
+
+	for i, name := range colNames {
+		dtype := colTypes[name]
+		switch dtype {
+		case Float64:
+			data := make([]float64, numRows)
+			for j, record := range records {
+				if val, ok := record[name]; ok && val != nil {
+					data[j] = convertToFloat64(val)
+				}
+			}
+			columns[i] = NewSeriesFloat64(name, data)
+		case Int64:
+			data := make([]int64, numRows)
+			for j, record := range records {
+				if val, ok := record[name]; ok && val != nil {
+					data[j] = convertToInt64(val)
+				}
+			}
+			columns[i] = NewSeriesInt64(name, data)
+		case Bool:
+			data := make([]bool, numRows)
+			for j, record := range records {
+				if val, ok := record[name]; ok && val != nil {
+					data[j] = convertToBool(val)
+				}
+			}
+			columns[i] = NewSeriesBool(name, data)
+		default: // String
+			data := make([]string, numRows)
+			for j, record := range records {
+				if val, ok := record[name]; ok && val != nil {
+					data[j] = convertToString(val)
+				}
+			}
+			columns[i] = NewSeriesString(name, data)
+		}
+	}
+
+	return NewDataFrame(columns...)
+}
+
+// FromStructs creates a DataFrame from a slice of structs.
+// Uses reflection to extract field names and values.
+// Exported fields become columns, field names become column names.
+// Supports struct tags: `galleon:"column_name"` to override column names.
+func FromStructs(structs interface{}) (*DataFrame, error) {
+	v := reflect.ValueOf(structs)
+	if v.Kind() != reflect.Slice {
+		return nil, fmt.Errorf("FromStructs requires a slice, got %s", v.Kind())
+	}
+
+	if v.Len() == 0 {
+		return NewDataFrame()
+	}
+
+	// Get the element type
+	elemType := v.Type().Elem()
+	if elemType.Kind() == reflect.Ptr {
+		elemType = elemType.Elem()
+	}
+	if elemType.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("FromStructs requires a slice of structs, got slice of %s", elemType.Kind())
+	}
+
+	// Extract field info
+	type fieldInfo struct {
+		name    string // column name
+		index   int    // struct field index
+		kind    reflect.Kind
+		dtype   DType
+	}
+
+	var fields []fieldInfo
+	for i := 0; i < elemType.NumField(); i++ {
+		field := elemType.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+
+		// Get column name from tag or field name
+		colName := field.Name
+		if tag := field.Tag.Get("galleon"); tag != "" {
+			if tag == "-" {
+				continue // Skip this field
+			}
+			colName = tag
+		}
+
+		dtype := reflectKindToDType(field.Type.Kind())
+		fields = append(fields, fieldInfo{
+			name:  colName,
+			index: i,
+			kind:  field.Type.Kind(),
+			dtype: dtype,
+		})
+	}
+
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no exported fields found in struct")
+	}
+
+	// Build columns
+	numRows := v.Len()
+	columns := make([]*Series, len(fields))
+
+	for i, f := range fields {
+		switch f.dtype {
+		case Float64:
+			data := make([]float64, numRows)
+			for j := 0; j < numRows; j++ {
+				elem := v.Index(j)
+				if elem.Kind() == reflect.Ptr {
+					elem = elem.Elem()
+				}
+				data[j] = elem.Field(f.index).Float()
+			}
+			columns[i] = NewSeriesFloat64(f.name, data)
+		case Float32:
+			data := make([]float32, numRows)
+			for j := 0; j < numRows; j++ {
+				elem := v.Index(j)
+				if elem.Kind() == reflect.Ptr {
+					elem = elem.Elem()
+				}
+				data[j] = float32(elem.Field(f.index).Float())
+			}
+			columns[i] = NewSeriesFloat32(f.name, data)
+		case Int64:
+			data := make([]int64, numRows)
+			for j := 0; j < numRows; j++ {
+				elem := v.Index(j)
+				if elem.Kind() == reflect.Ptr {
+					elem = elem.Elem()
+				}
+				data[j] = elem.Field(f.index).Int()
+			}
+			columns[i] = NewSeriesInt64(f.name, data)
+		case Int32:
+			data := make([]int32, numRows)
+			for j := 0; j < numRows; j++ {
+				elem := v.Index(j)
+				if elem.Kind() == reflect.Ptr {
+					elem = elem.Elem()
+				}
+				data[j] = int32(elem.Field(f.index).Int())
+			}
+			columns[i] = NewSeriesInt32(f.name, data)
+		case UInt64:
+			data := make([]int64, numRows) // Store as int64
+			for j := 0; j < numRows; j++ {
+				elem := v.Index(j)
+				if elem.Kind() == reflect.Ptr {
+					elem = elem.Elem()
+				}
+				data[j] = int64(elem.Field(f.index).Uint())
+			}
+			columns[i] = NewSeriesInt64(f.name, data)
+		case UInt32:
+			data := make([]int32, numRows) // Store as int32
+			for j := 0; j < numRows; j++ {
+				elem := v.Index(j)
+				if elem.Kind() == reflect.Ptr {
+					elem = elem.Elem()
+				}
+				data[j] = int32(elem.Field(f.index).Uint())
+			}
+			columns[i] = NewSeriesInt32(f.name, data)
+		case Bool:
+			data := make([]bool, numRows)
+			for j := 0; j < numRows; j++ {
+				elem := v.Index(j)
+				if elem.Kind() == reflect.Ptr {
+					elem = elem.Elem()
+				}
+				data[j] = elem.Field(f.index).Bool()
+			}
+			columns[i] = NewSeriesBool(f.name, data)
+		default: // String
+			data := make([]string, numRows)
+			for j := 0; j < numRows; j++ {
+				elem := v.Index(j)
+				if elem.Kind() == reflect.Ptr {
+					elem = elem.Elem()
+				}
+				data[j] = elem.Field(f.index).String()
+			}
+			columns[i] = NewSeriesString(f.name, data)
+		}
+	}
+
+	return NewDataFrame(columns...)
+}
+
+// Helper functions for type inference and conversion (FromRecords/FromStructs)
+
+func inferTypeFromValue(val interface{}) DType {
+	switch val.(type) {
+	case float64, float32:
+		return Float64
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return Int64
+	case bool:
+		return Bool
+	default:
+		return String
+	}
+}
+
+func convertToFloat64(val interface{}) float64 {
+	switch v := val.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case int32:
+		return float64(v)
+	default:
+		return 0
+	}
+}
+
+func convertToInt64(val interface{}) int64 {
+	switch v := val.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case int32:
+		return int64(v)
+	case float64:
+		return int64(v)
+	default:
+		return 0
+	}
+}
+
+func convertToBool(val interface{}) bool {
+	if b, ok := val.(bool); ok {
+		return b
+	}
+	return false
+}
+
+func convertToString(val interface{}) string {
+	if s, ok := val.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", val)
+}
+
+func reflectKindToDType(k reflect.Kind) DType {
+	switch k {
+	case reflect.Float64:
+		return Float64
+	case reflect.Float32:
+		return Float32
+	case reflect.Int64, reflect.Int:
+		return Int64
+	case reflect.Int32, reflect.Int16, reflect.Int8:
+		return Int32
+	case reflect.Uint64, reflect.Uint:
+		return UInt64
+	case reflect.Uint32, reflect.Uint16, reflect.Uint8:
+		return UInt32
+	case reflect.Bool:
+		return Bool
+	default:
+		return String
+	}
 }
 
 // Height returns the number of rows

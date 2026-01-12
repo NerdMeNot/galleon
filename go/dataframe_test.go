@@ -626,3 +626,261 @@ func TestDataFrameFilterByMaskLengthMismatch(t *testing.T) {
 		t.Error("FilterByMask with mismatched length should fail")
 	}
 }
+
+func TestFromRecords(t *testing.T) {
+	records := []map[string]interface{}{
+		{"name": "Alice", "age": 30, "score": 95.5, "active": true},
+		{"name": "Bob", "age": 25, "score": 87.0, "active": false},
+		{"name": "Carol", "age": 35, "score": 92.5, "active": true},
+	}
+
+	df, err := FromRecords(records)
+	if err != nil {
+		t.Fatalf("FromRecords failed: %v", err)
+	}
+
+	if df.Height() != 3 {
+		t.Errorf("Height = %d, want 3", df.Height())
+	}
+
+	if df.Width() != 4 {
+		t.Errorf("Width = %d, want 4", df.Width())
+	}
+
+	// Check name column (string)
+	names := df.ColumnByName("name")
+	if names == nil {
+		t.Fatal("Column 'name' not found")
+	}
+	if names.DType() != String {
+		t.Errorf("name dtype = %v, want String", names.DType())
+	}
+	nameData := names.Strings()
+	if nameData[0] != "Alice" || nameData[1] != "Bob" || nameData[2] != "Carol" {
+		t.Errorf("name data = %v", nameData)
+	}
+
+	// Check age column (int)
+	ages := df.ColumnByName("age")
+	if ages == nil {
+		t.Fatal("Column 'age' not found")
+	}
+	if ages.DType() != Int64 {
+		t.Errorf("age dtype = %v, want Int64", ages.DType())
+	}
+	ageData := ages.Int64()
+	if ageData[0] != 30 || ageData[1] != 25 || ageData[2] != 35 {
+		t.Errorf("age data = %v", ageData)
+	}
+
+	// Check score column (float)
+	scores := df.ColumnByName("score")
+	if scores == nil {
+		t.Fatal("Column 'score' not found")
+	}
+	if scores.DType() != Float64 {
+		t.Errorf("score dtype = %v, want Float64", scores.DType())
+	}
+	scoreData := scores.Float64()
+	if scoreData[0] != 95.5 || scoreData[1] != 87.0 || scoreData[2] != 92.5 {
+		t.Errorf("score data = %v", scoreData)
+	}
+
+	// Check active column (bool)
+	active := df.ColumnByName("active")
+	if active == nil {
+		t.Fatal("Column 'active' not found")
+	}
+	if active.DType() != Bool {
+		t.Errorf("active dtype = %v, want Bool", active.DType())
+	}
+	activeData := active.Bool()
+	if !activeData[0] || activeData[1] || !activeData[2] {
+		t.Errorf("active data = %v", activeData)
+	}
+}
+
+func TestFromRecordsEmpty(t *testing.T) {
+	records := []map[string]interface{}{}
+
+	df, err := FromRecords(records)
+	if err != nil {
+		t.Fatalf("FromRecords failed: %v", err)
+	}
+
+	if df.Height() != 0 {
+		t.Errorf("Height = %d, want 0", df.Height())
+	}
+}
+
+func TestFromRecordsMissingValues(t *testing.T) {
+	// Some records have missing keys
+	records := []map[string]interface{}{
+		{"name": "Alice", "age": 30},
+		{"name": "Bob"},
+		{"name": "Carol", "age": 35},
+	}
+
+	df, err := FromRecords(records)
+	if err != nil {
+		t.Fatalf("FromRecords failed: %v", err)
+	}
+
+	if df.Height() != 3 {
+		t.Errorf("Height = %d, want 3", df.Height())
+	}
+
+	// Age column should have zero values for missing
+	ages := df.ColumnByName("age")
+	ageData := ages.Int64()
+	if ageData[0] != 30 || ageData[1] != 0 || ageData[2] != 35 {
+		t.Errorf("age data = %v, expected [30, 0, 35]", ageData)
+	}
+}
+
+func TestFromStructs(t *testing.T) {
+	type Person struct {
+		Name   string
+		Age    int64
+		Score  float64
+		Active bool
+	}
+
+	people := []Person{
+		{"Alice", 30, 95.5, true},
+		{"Bob", 25, 87.0, false},
+		{"Carol", 35, 92.5, true},
+	}
+
+	df, err := FromStructs(people)
+	if err != nil {
+		t.Fatalf("FromStructs failed: %v", err)
+	}
+
+	if df.Height() != 3 {
+		t.Errorf("Height = %d, want 3", df.Height())
+	}
+
+	if df.Width() != 4 {
+		t.Errorf("Width = %d, want 4", df.Width())
+	}
+
+	// Check Name column
+	names := df.ColumnByName("Name")
+	if names == nil {
+		t.Fatal("Column 'Name' not found")
+	}
+	nameData := names.Strings()
+	if nameData[0] != "Alice" || nameData[1] != "Bob" || nameData[2] != "Carol" {
+		t.Errorf("Name data = %v", nameData)
+	}
+
+	// Check Age column
+	ages := df.ColumnByName("Age")
+	if ages == nil {
+		t.Fatal("Column 'Age' not found")
+	}
+	ageData := ages.Int64()
+	if ageData[0] != 30 || ageData[1] != 25 || ageData[2] != 35 {
+		t.Errorf("Age data = %v", ageData)
+	}
+}
+
+func TestFromStructsWithTags(t *testing.T) {
+	type Person struct {
+		Name    string  `galleon:"full_name"`
+		Age     int64   `galleon:"years"`
+		Secret  string  `galleon:"-"` // Should be skipped
+		Score   float64
+		private int // unexported, should be skipped
+	}
+
+	people := []Person{
+		{Name: "Alice", Age: 30, Secret: "shhh", Score: 95.5},
+		{Name: "Bob", Age: 25, Secret: "quiet", Score: 87.0},
+	}
+
+	df, err := FromStructs(people)
+	if err != nil {
+		t.Fatalf("FromStructs failed: %v", err)
+	}
+
+	// Should have 3 columns (full_name, years, Score) - Secret and private skipped
+	if df.Width() != 3 {
+		t.Errorf("Width = %d, want 3 (full_name, years, Score)", df.Width())
+	}
+
+	// Check that tagged names are used
+	fullName := df.ColumnByName("full_name")
+	if fullName == nil {
+		t.Error("Column 'full_name' not found (should use tag)")
+	}
+
+	years := df.ColumnByName("years")
+	if years == nil {
+		t.Error("Column 'years' not found (should use tag)")
+	}
+
+	// Secret should be skipped
+	secret := df.ColumnByName("Secret")
+	if secret != nil {
+		t.Error("Column 'Secret' should have been skipped (tag='-')")
+	}
+}
+
+func TestFromStructsPointers(t *testing.T) {
+	type Person struct {
+		Name string
+		Age  int64
+	}
+
+	people := []*Person{
+		{"Alice", 30},
+		{"Bob", 25},
+	}
+
+	df, err := FromStructs(people)
+	if err != nil {
+		t.Fatalf("FromStructs with pointers failed: %v", err)
+	}
+
+	if df.Height() != 2 {
+		t.Errorf("Height = %d, want 2", df.Height())
+	}
+
+	names := df.ColumnByName("Name").Strings()
+	if names[0] != "Alice" || names[1] != "Bob" {
+		t.Errorf("Name data = %v", names)
+	}
+}
+
+func TestFromStructsEmpty(t *testing.T) {
+	type Person struct {
+		Name string
+	}
+
+	people := []Person{}
+
+	df, err := FromStructs(people)
+	if err != nil {
+		t.Fatalf("FromStructs failed: %v", err)
+	}
+
+	if df.Height() != 0 {
+		t.Errorf("Height = %d, want 0", df.Height())
+	}
+}
+
+func TestFromStructsNotSlice(t *testing.T) {
+	_, err := FromStructs("not a slice")
+	if err == nil {
+		t.Error("FromStructs with non-slice should fail")
+	}
+}
+
+func TestFromStructsNotStruct(t *testing.T) {
+	_, err := FromStructs([]int{1, 2, 3})
+	if err == nil {
+		t.Error("FromStructs with slice of non-struct should fail")
+	}
+}
