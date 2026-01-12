@@ -15,7 +15,10 @@ docs/
 │   ├── 02-groupby.md
 │   ├── 03-joins.md
 │   ├── 04-reshape.md        # Pivot and Melt operations
-│   └── 05-window-functions.md  # Window functions and time series
+│   ├── 05-window-functions.md  # Window functions and time series
+│   ├── 06-data-loading.md   # Loading from structs and files
+│   ├── 07-nested-types.md   # Struct, List, Array series
+│   └── 08-display-configuration.md  # Display formatting options
 ├── 03-api/                  # API reference
 │   ├── 01-dataframe.md
 │   ├── 02-series.md
@@ -53,6 +56,7 @@ docs/
 - [Window Functions](02-guides/05-window-functions.md) - Time series and rolling calculations
 - [Data Loading](02-guides/06-data-loading.md) - Loading from structs, maps, and files
 - [Nested Data Types](02-guides/07-nested-types.md) - Struct, List, and Array series
+- [Display Configuration](02-guides/08-display-configuration.md) - DataFrame printing and formatting
 
 ## Reference
 
@@ -71,6 +75,7 @@ docs/
 | [Reshape](02-guides/04-reshape.md) | Pivot and Melt operations |
 | [Data Loading](02-guides/06-data-loading.md) | FromStructs, FromRecords, file I/O |
 | [Nested Types](02-guides/07-nested-types.md) | Struct, List, Array series |
+| [Display Config](02-guides/08-display-configuration.md) | Table styles, truncation, formatting |
 | [I/O](03-api/04-io.md) | CSV, JSON, Parquet |
 | [Performance](04-reference/02-performance.md) | Optimization tips |
 

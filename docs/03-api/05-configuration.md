@@ -206,3 +206,150 @@ ThreadConfig galleon_get_thread_config();
 ```
 
 These functions directly configure the Zig SIMD backend's thread pool behavior.
+
+## Display Configuration
+
+Control how DataFrames are formatted when printed.
+
+### DisplayConfig
+
+Configuration structure for DataFrame display:
+
+```go
+type DisplayConfig struct {
+    MaxRows        int    // Max rows to display (default: 10)
+    MaxCols        int    // Max columns to display (default: 10)
+    MaxColWidth    int    // Max width per column (default: 25)
+    MinColWidth    int    // Min width per column (default: 8)
+    FloatPrecision int    // Decimal places for floats (default: 4)
+    ShowDTypes     bool   // Show data types row (default: true)
+    ShowShape      bool   // Show shape header (default: true)
+    TableStyle     string // Border style (default: "rounded")
+}
+```
+
+### DefaultDisplayConfig
+
+Returns the default display configuration.
+
+```go
+func DefaultDisplayConfig() DisplayConfig
+```
+
+### GetDisplayConfig
+
+Returns the current global display configuration.
+
+```go
+func GetDisplayConfig() DisplayConfig
+```
+
+### SetDisplayConfig
+
+Sets the global display configuration.
+
+```go
+func SetDisplayConfig(cfg DisplayConfig)
+```
+
+### SetMaxDisplayRows
+
+Sets maximum rows to display (split between head and tail).
+
+```go
+func SetMaxDisplayRows(n int)
+```
+
+**Example:**
+```go
+galleon.SetMaxDisplayRows(20)  // Show 10 head + 10 tail rows
+```
+
+### SetMaxDisplayCols
+
+Sets maximum columns to display (split between first and last).
+
+```go
+func SetMaxDisplayCols(n int)
+```
+
+**Example:**
+```go
+galleon.SetMaxDisplayCols(8)  // Show 4 first + 4 last columns
+```
+
+### SetFloatPrecision
+
+Sets decimal places for floating point display.
+
+```go
+func SetFloatPrecision(n int)
+```
+
+**Example:**
+```go
+galleon.SetFloatPrecision(2)  // Display as 3.14 instead of 3.1416
+```
+
+### SetTableStyle
+
+Sets the table border style.
+
+```go
+func SetTableStyle(style string)
+```
+
+**Available styles:**
+- `"rounded"` - Rounded corners: ╭╮╰╯ (default)
+- `"sharp"` - Sharp corners: ┌┐└┘
+- `"ascii"` - ASCII characters: +-|
+- `"minimal"` - Minimal borders
+
+**Example:**
+```go
+galleon.SetTableStyle("ascii")  // For non-Unicode terminals
+```
+
+### DataFrame.StringWithConfig
+
+Format DataFrame with custom configuration.
+
+```go
+func (df *DataFrame) StringWithConfig(cfg DisplayConfig) string
+```
+
+**Example:**
+```go
+cfg := galleon.DefaultDisplayConfig()
+cfg.FloatPrecision = 2
+cfg.TableStyle = "minimal"
+fmt.Println(df.StringWithConfig(cfg))
+```
+
+## Display Configuration Best Practices
+
+### For Log Files
+
+```go
+galleon.SetTableStyle("ascii")  // Ensure compatibility
+galleon.SetMaxDisplayRows(10)   // Keep logs concise
+```
+
+### For Wide DataFrames
+
+```go
+galleon.SetMaxDisplayCols(6)    // Prevent horizontal scrolling
+galleon.SetMaxColWidth(15)      // Narrow columns
+```
+
+### For Financial Data
+
+```go
+galleon.SetFloatPrecision(2)    // Currency display
+```
+
+### For Scientific Data
+
+```go
+galleon.SetFloatPrecision(8)    // Higher precision
+```
