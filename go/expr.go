@@ -45,6 +45,31 @@ const (
 	exprListMin       // Min of list elements
 	exprListMax       // Max of list elements
 	exprExplode       // Explode list into rows
+	// String expression types
+	exprStrUpper    // Convert to uppercase
+	exprStrLower    // Convert to lowercase
+	exprStrLen      // String length
+	exprStrContains // Check if contains substring
+	exprStrStartsWith
+	exprStrEndsWith
+	exprStrReplace
+	exprStrTrim
+	exprStrSplit
+	// Window expression types
+	exprLag
+	exprLead
+	exprRowNumber
+	exprRank
+	exprDenseRank
+	exprCumSum
+	exprCumMin
+	exprCumMax
+	exprDiff
+	exprPctChange
+	exprRollingSum
+	exprRollingMean
+	exprRollingMin
+	exprRollingMax
 )
 
 // ============================================================================
@@ -92,11 +117,21 @@ func (e *ColExpr) Max() *AggExpr   { return &AggExpr{Input: e, AggType: AggTypeM
 func (e *ColExpr) Count() *AggExpr { return &AggExpr{Input: e, AggType: AggTypeCount} }
 func (e *ColExpr) First() *AggExpr { return &AggExpr{Input: e, AggType: AggTypeFirst} }
 func (e *ColExpr) Last() *AggExpr  { return &AggExpr{Input: e, AggType: AggTypeLast} }
-func (e *ColExpr) Std() *AggExpr      { return &AggExpr{Input: e, AggType: AggTypeStd} }
-func (e *ColExpr) Var() *AggExpr      { return &AggExpr{Input: e, AggType: AggTypeVar} }
-func (e *ColExpr) Median() *AggExpr   { return &AggExpr{Input: e, AggType: AggTypeMedian} }
-func (e *ColExpr) Skew() *AggExpr     { return &AggExpr{Input: e, AggType: AggTypeSkewness} }
-func (e *ColExpr) Kurt() *AggExpr     { return &AggExpr{Input: e, AggType: AggTypeKurtosis} }
+func (e *ColExpr) Std() *AggExpr    { return &AggExpr{Input: e, AggType: AggTypeStd} }
+func (e *ColExpr) Var() *AggExpr    { return &AggExpr{Input: e, AggType: AggTypeVar} }
+func (e *ColExpr) Median() *AggExpr { return &AggExpr{Input: e, AggType: AggTypeMedian} }
+
+// Skewness returns the skewness aggregation expression.
+func (e *ColExpr) Skewness() *AggExpr { return &AggExpr{Input: e, AggType: AggTypeSkewness} }
+
+// Kurtosis returns the kurtosis aggregation expression.
+func (e *ColExpr) Kurtosis() *AggExpr { return &AggExpr{Input: e, AggType: AggTypeKurtosis} }
+
+// Skew is deprecated. Use Skewness() instead.
+func (e *ColExpr) Skew() *AggExpr { return e.Skewness() }
+
+// Kurt is deprecated. Use Kurtosis() instead.
+func (e *ColExpr) Kurt() *AggExpr { return e.Kurtosis() }
 func (e *ColExpr) Quantile(q float64) *QuantileExpr {
 	return &QuantileExpr{Input: e, Q: q}
 }
@@ -885,4 +920,413 @@ func (l *ListNamespace) Max() *ListMaxExpr {
 // Explode expands the list into separate rows
 func (e *ColExpr) Explode() *ExplodeExpr {
 	return &ExplodeExpr{Input: e}
+}
+
+// ============================================================================
+// String Expressions
+// ============================================================================
+
+// StrUpperExpr converts strings to uppercase
+type StrUpperExpr struct {
+	Input Expr
+}
+
+func (e *StrUpperExpr) String() string     { return fmt.Sprintf("%s.str.upper()", e.Input) }
+func (e *StrUpperExpr) Clone() Expr        { return &StrUpperExpr{Input: e.Input.Clone()} }
+func (e *StrUpperExpr) columns() []string  { return e.Input.columns() }
+func (e *StrUpperExpr) exprType() exprKind { return exprStrUpper }
+
+func (e *StrUpperExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// StrLowerExpr converts strings to lowercase
+type StrLowerExpr struct {
+	Input Expr
+}
+
+func (e *StrLowerExpr) String() string     { return fmt.Sprintf("%s.str.lower()", e.Input) }
+func (e *StrLowerExpr) Clone() Expr        { return &StrLowerExpr{Input: e.Input.Clone()} }
+func (e *StrLowerExpr) columns() []string  { return e.Input.columns() }
+func (e *StrLowerExpr) exprType() exprKind { return exprStrLower }
+
+func (e *StrLowerExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// StrLenExpr gets the length of each string
+type StrLenExpr struct {
+	Input Expr
+}
+
+func (e *StrLenExpr) String() string     { return fmt.Sprintf("%s.str.len()", e.Input) }
+func (e *StrLenExpr) Clone() Expr        { return &StrLenExpr{Input: e.Input.Clone()} }
+func (e *StrLenExpr) columns() []string  { return e.Input.columns() }
+func (e *StrLenExpr) exprType() exprKind { return exprStrLen }
+
+func (e *StrLenExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// StrContainsExpr checks if strings contain a substring
+type StrContainsExpr struct {
+	Input     Expr
+	Substring string
+}
+
+func (e *StrContainsExpr) String() string {
+	return fmt.Sprintf("%s.str.contains(%q)", e.Input, e.Substring)
+}
+func (e *StrContainsExpr) Clone() Expr {
+	return &StrContainsExpr{Input: e.Input.Clone(), Substring: e.Substring}
+}
+func (e *StrContainsExpr) columns() []string  { return e.Input.columns() }
+func (e *StrContainsExpr) exprType() exprKind { return exprStrContains }
+
+func (e *StrContainsExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// StrStartsWithExpr checks if strings start with a prefix
+type StrStartsWithExpr struct {
+	Input  Expr
+	Prefix string
+}
+
+func (e *StrStartsWithExpr) String() string {
+	return fmt.Sprintf("%s.str.starts_with(%q)", e.Input, e.Prefix)
+}
+func (e *StrStartsWithExpr) Clone() Expr {
+	return &StrStartsWithExpr{Input: e.Input.Clone(), Prefix: e.Prefix}
+}
+func (e *StrStartsWithExpr) columns() []string  { return e.Input.columns() }
+func (e *StrStartsWithExpr) exprType() exprKind { return exprStrStartsWith }
+
+func (e *StrStartsWithExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// StrEndsWithExpr checks if strings end with a suffix
+type StrEndsWithExpr struct {
+	Input  Expr
+	Suffix string
+}
+
+func (e *StrEndsWithExpr) String() string {
+	return fmt.Sprintf("%s.str.ends_with(%q)", e.Input, e.Suffix)
+}
+func (e *StrEndsWithExpr) Clone() Expr {
+	return &StrEndsWithExpr{Input: e.Input.Clone(), Suffix: e.Suffix}
+}
+func (e *StrEndsWithExpr) columns() []string  { return e.Input.columns() }
+func (e *StrEndsWithExpr) exprType() exprKind { return exprStrEndsWith }
+
+func (e *StrEndsWithExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// StrReplaceExpr replaces occurrences of a pattern in strings
+type StrReplaceExpr struct {
+	Input   Expr
+	Pattern string
+	Replace string
+}
+
+func (e *StrReplaceExpr) String() string {
+	return fmt.Sprintf("%s.str.replace(%q, %q)", e.Input, e.Pattern, e.Replace)
+}
+func (e *StrReplaceExpr) Clone() Expr {
+	return &StrReplaceExpr{Input: e.Input.Clone(), Pattern: e.Pattern, Replace: e.Replace}
+}
+func (e *StrReplaceExpr) columns() []string  { return e.Input.columns() }
+func (e *StrReplaceExpr) exprType() exprKind { return exprStrReplace }
+
+func (e *StrReplaceExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// StrTrimExpr trims whitespace from strings
+type StrTrimExpr struct {
+	Input Expr
+}
+
+func (e *StrTrimExpr) String() string     { return fmt.Sprintf("%s.str.trim()", e.Input) }
+func (e *StrTrimExpr) Clone() Expr        { return &StrTrimExpr{Input: e.Input.Clone()} }
+func (e *StrTrimExpr) columns() []string  { return e.Input.columns() }
+func (e *StrTrimExpr) exprType() exprKind { return exprStrTrim }
+
+func (e *StrTrimExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// StringNamespace provides string operations on a column
+type StringNamespace struct {
+	col *ColExpr
+}
+
+// Str returns a namespace for string operations on a column.
+// Example: Col("name").Str().Upper()
+func (e *ColExpr) Str() *StringNamespace {
+	return &StringNamespace{col: e}
+}
+
+// Upper converts strings to uppercase
+func (s *StringNamespace) Upper() *StrUpperExpr {
+	return &StrUpperExpr{Input: s.col}
+}
+
+// Lower converts strings to lowercase
+func (s *StringNamespace) Lower() *StrLowerExpr {
+	return &StrLowerExpr{Input: s.col}
+}
+
+// Len returns the length of each string
+func (s *StringNamespace) Len() *StrLenExpr {
+	return &StrLenExpr{Input: s.col}
+}
+
+// Contains checks if strings contain the given substring
+func (s *StringNamespace) Contains(substring string) *StrContainsExpr {
+	return &StrContainsExpr{Input: s.col, Substring: substring}
+}
+
+// StartsWith checks if strings start with the given prefix
+func (s *StringNamespace) StartsWith(prefix string) *StrStartsWithExpr {
+	return &StrStartsWithExpr{Input: s.col, Prefix: prefix}
+}
+
+// EndsWith checks if strings end with the given suffix
+func (s *StringNamespace) EndsWith(suffix string) *StrEndsWithExpr {
+	return &StrEndsWithExpr{Input: s.col, Suffix: suffix}
+}
+
+// Replace replaces occurrences of pattern with replacement
+func (s *StringNamespace) Replace(pattern, replacement string) *StrReplaceExpr {
+	return &StrReplaceExpr{Input: s.col, Pattern: pattern, Replace: replacement}
+}
+
+// Trim removes leading and trailing whitespace
+func (s *StringNamespace) Trim() *StrTrimExpr {
+	return &StrTrimExpr{Input: s.col}
+}
+
+// ============================================================================
+// Window Expressions
+// ============================================================================
+
+// LagExpr shifts values forward by offset positions
+type LagExpr struct {
+	Input   Expr
+	Offset  int
+	Default interface{} // Default value for positions without data
+}
+
+func (e *LagExpr) String() string {
+	return fmt.Sprintf("%s.lag(%d)", e.Input, e.Offset)
+}
+func (e *LagExpr) Clone() Expr {
+	return &LagExpr{Input: e.Input.Clone(), Offset: e.Offset, Default: e.Default}
+}
+func (e *LagExpr) columns() []string  { return e.Input.columns() }
+func (e *LagExpr) exprType() exprKind { return exprLag }
+
+func (e *LagExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// LeadExpr shifts values backward by offset positions
+type LeadExpr struct {
+	Input   Expr
+	Offset  int
+	Default interface{}
+}
+
+func (e *LeadExpr) String() string {
+	return fmt.Sprintf("%s.lead(%d)", e.Input, e.Offset)
+}
+func (e *LeadExpr) Clone() Expr {
+	return &LeadExpr{Input: e.Input.Clone(), Offset: e.Offset, Default: e.Default}
+}
+func (e *LeadExpr) columns() []string  { return e.Input.columns() }
+func (e *LeadExpr) exprType() exprKind { return exprLead }
+
+func (e *LeadExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// DiffExpr computes difference from previous value
+type DiffExpr struct {
+	Input  Expr
+	Offset int // Number of rows to look back (default 1)
+}
+
+func (e *DiffExpr) String() string {
+	return fmt.Sprintf("%s.diff(%d)", e.Input, e.Offset)
+}
+func (e *DiffExpr) Clone() Expr {
+	return &DiffExpr{Input: e.Input.Clone(), Offset: e.Offset}
+}
+func (e *DiffExpr) columns() []string  { return e.Input.columns() }
+func (e *DiffExpr) exprType() exprKind { return exprDiff }
+
+func (e *DiffExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// PctChangeExpr computes percentage change from previous value
+type PctChangeExpr struct {
+	Input  Expr
+	Offset int
+}
+
+func (e *PctChangeExpr) String() string {
+	return fmt.Sprintf("%s.pct_change(%d)", e.Input, e.Offset)
+}
+func (e *PctChangeExpr) Clone() Expr {
+	return &PctChangeExpr{Input: e.Input.Clone(), Offset: e.Offset}
+}
+func (e *PctChangeExpr) columns() []string  { return e.Input.columns() }
+func (e *PctChangeExpr) exprType() exprKind { return exprPctChange }
+
+func (e *PctChangeExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// CumSumExpr computes cumulative sum
+type CumSumExpr struct {
+	Input Expr
+}
+
+func (e *CumSumExpr) String() string     { return fmt.Sprintf("%s.cum_sum()", e.Input) }
+func (e *CumSumExpr) Clone() Expr        { return &CumSumExpr{Input: e.Input.Clone()} }
+func (e *CumSumExpr) columns() []string  { return e.Input.columns() }
+func (e *CumSumExpr) exprType() exprKind { return exprCumSum }
+
+func (e *CumSumExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// CumMinExpr computes cumulative minimum
+type CumMinExpr struct {
+	Input Expr
+}
+
+func (e *CumMinExpr) String() string     { return fmt.Sprintf("%s.cum_min()", e.Input) }
+func (e *CumMinExpr) Clone() Expr        { return &CumMinExpr{Input: e.Input.Clone()} }
+func (e *CumMinExpr) columns() []string  { return e.Input.columns() }
+func (e *CumMinExpr) exprType() exprKind { return exprCumMin }
+
+func (e *CumMinExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// CumMaxExpr computes cumulative maximum
+type CumMaxExpr struct {
+	Input Expr
+}
+
+func (e *CumMaxExpr) String() string     { return fmt.Sprintf("%s.cum_max()", e.Input) }
+func (e *CumMaxExpr) Clone() Expr        { return &CumMaxExpr{Input: e.Input.Clone()} }
+func (e *CumMaxExpr) columns() []string  { return e.Input.columns() }
+func (e *CumMaxExpr) exprType() exprKind { return exprCumMax }
+
+func (e *CumMaxExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// RollingSumExpr computes rolling sum over a window
+type RollingSumExpr struct {
+	Input      Expr
+	WindowSize int
+	MinPeriods int
+}
+
+func (e *RollingSumExpr) String() string {
+	return fmt.Sprintf("%s.rolling_sum(%d)", e.Input, e.WindowSize)
+}
+func (e *RollingSumExpr) Clone() Expr {
+	return &RollingSumExpr{Input: e.Input.Clone(), WindowSize: e.WindowSize, MinPeriods: e.MinPeriods}
+}
+func (e *RollingSumExpr) columns() []string  { return e.Input.columns() }
+func (e *RollingSumExpr) exprType() exprKind { return exprRollingSum }
+
+func (e *RollingSumExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// RollingMeanExpr computes rolling mean over a window
+type RollingMeanExpr struct {
+	Input      Expr
+	WindowSize int
+	MinPeriods int
+}
+
+func (e *RollingMeanExpr) String() string {
+	return fmt.Sprintf("%s.rolling_mean(%d)", e.Input, e.WindowSize)
+}
+func (e *RollingMeanExpr) Clone() Expr {
+	return &RollingMeanExpr{Input: e.Input.Clone(), WindowSize: e.WindowSize, MinPeriods: e.MinPeriods}
+}
+func (e *RollingMeanExpr) columns() []string  { return e.Input.columns() }
+func (e *RollingMeanExpr) exprType() exprKind { return exprRollingMean }
+
+func (e *RollingMeanExpr) Alias(name string) *AliasExpr {
+	return &AliasExpr{Inner: e, AliasName: name}
+}
+
+// Window function methods on ColExpr
+
+// Lag returns the value offset rows before the current row.
+// Example: Col("price").Lag(1, 0.0) - previous day's price
+func (e *ColExpr) Lag(offset int, defaultVal interface{}) *LagExpr {
+	return &LagExpr{Input: e, Offset: offset, Default: defaultVal}
+}
+
+// Lead returns the value offset rows after the current row.
+// Example: Col("price").Lead(1, 0.0) - next day's price
+func (e *ColExpr) Lead(offset int, defaultVal interface{}) *LeadExpr {
+	return &LeadExpr{Input: e, Offset: offset, Default: defaultVal}
+}
+
+// Diff computes the difference from the previous value.
+// Example: Col("price").Diff() - daily price change
+func (e *ColExpr) Diff() *DiffExpr {
+	return &DiffExpr{Input: e, Offset: 1}
+}
+
+// DiffN computes the difference from N rows ago.
+func (e *ColExpr) DiffN(offset int) *DiffExpr {
+	return &DiffExpr{Input: e, Offset: offset}
+}
+
+// PctChange computes the percentage change from the previous value.
+func (e *ColExpr) PctChange() *PctChangeExpr {
+	return &PctChangeExpr{Input: e, Offset: 1}
+}
+
+// CumSum computes the cumulative sum.
+func (e *ColExpr) CumSum() *CumSumExpr {
+	return &CumSumExpr{Input: e}
+}
+
+// CumMin computes the cumulative minimum.
+func (e *ColExpr) CumMin() *CumMinExpr {
+	return &CumMinExpr{Input: e}
+}
+
+// CumMax computes the cumulative maximum.
+func (e *ColExpr) CumMax() *CumMaxExpr {
+	return &CumMaxExpr{Input: e}
+}
+
+// RollingSum computes the rolling sum over a window.
+// Example: Col("value").RollingSum(7) - 7-period rolling sum
+func (e *ColExpr) RollingSum(windowSize int) *RollingSumExpr {
+	return &RollingSumExpr{Input: e, WindowSize: windowSize, MinPeriods: 1}
+}
+
+// RollingMean computes the rolling mean over a window.
+// Example: Col("price").RollingMean(20) - 20-period moving average
+func (e *ColExpr) RollingMean(windowSize int) *RollingMeanExpr {
+	return &RollingMeanExpr{Input: e, WindowSize: windowSize, MinPeriods: 1}
 }

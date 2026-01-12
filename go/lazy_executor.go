@@ -54,6 +54,18 @@ func executePlan(plan *LogicalPlan) (*DataFrame, error) {
 	case PlanDistinct:
 		return executeDistinct(plan)
 
+	case PlanPivot:
+		return executePivot(plan)
+
+	case PlanMelt:
+		return executeMelt(plan)
+
+	case PlanCache:
+		return executeCache(plan)
+
+	case PlanApply:
+		return executeApply(plan)
+
 	default:
 		return nil, fmt.Errorf("unknown plan operation: %v", plan.Op)
 	}
@@ -329,6 +341,334 @@ func executeDistinct(plan *LogicalPlan) (*DataFrame, error) {
 
 	gb := df.GroupBy(cols...)
 	return gb.First(cols[0])
+}
+
+// ============================================================================
+// Pivot
+// ============================================================================
+
+func executePivot(plan *LogicalPlan) (*DataFrame, error) {
+	df, err := executePlan(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the columns
+	indexCol := df.ColumnByName(plan.PivotIndex)
+	if indexCol == nil {
+		return nil, fmt.Errorf("pivot index column '%s' not found", plan.PivotIndex)
+	}
+
+	pivotCol := df.ColumnByName(plan.PivotColumn)
+	if pivotCol == nil {
+		return nil, fmt.Errorf("pivot column '%s' not found", plan.PivotColumn)
+	}
+
+	valuesCol := df.ColumnByName(plan.PivotValues)
+	if valuesCol == nil {
+		return nil, fmt.Errorf("pivot values column '%s' not found", plan.PivotValues)
+	}
+
+	// Get unique values in the pivot column to create new column names
+	uniquePivotValues := make(map[string]bool)
+	pivotStrings := make([]string, pivotCol.Len())
+	for i := 0; i < pivotCol.Len(); i++ {
+		s := fmt.Sprintf("%v", pivotCol.Get(i))
+		pivotStrings[i] = s
+		uniquePivotValues[s] = true
+	}
+
+	// Sort unique values for consistent column order
+	sortedPivotVals := make([]string, 0, len(uniquePivotValues))
+	for v := range uniquePivotValues {
+		sortedPivotVals = append(sortedPivotVals, v)
+	}
+
+	// Get unique index values and their mapping
+	uniqueIndices := make(map[string]int)
+	indexStrings := make([]string, indexCol.Len())
+	for i := 0; i < indexCol.Len(); i++ {
+		s := fmt.Sprintf("%v", indexCol.Get(i))
+		indexStrings[i] = s
+		if _, exists := uniqueIndices[s]; !exists {
+			uniqueIndices[s] = len(uniqueIndices)
+		}
+	}
+
+	// Create output columns
+	numRows := len(uniqueIndices)
+	numCols := len(sortedPivotVals)
+
+	// Initialize result data - one column per unique pivot value
+	resultData := make([][]float64, numCols)
+	resultCounts := make([][]int, numCols) // For aggregation
+	for i := range resultData {
+		resultData[i] = make([]float64, numRows)
+		resultCounts[i] = make([]int, numRows)
+	}
+
+	// Build index column for result
+	indexData := make([]string, numRows)
+	for s, idx := range uniqueIndices {
+		indexData[idx] = s
+	}
+
+	// Create column name to index mapping
+	pivotColIdx := make(map[string]int)
+	for i, v := range sortedPivotVals {
+		pivotColIdx[v] = i
+	}
+
+	// Populate the pivot table
+	for i := 0; i < df.Height(); i++ {
+		rowIdx := uniqueIndices[indexStrings[i]]
+		colIdx := pivotColIdx[pivotStrings[i]]
+
+		var val float64
+		switch valuesCol.DType() {
+		case Float64:
+			val = valuesCol.Float64()[i]
+		case Int64:
+			val = float64(valuesCol.Int64()[i])
+		case Int32:
+			val = float64(valuesCol.Int32()[i])
+		case Float32:
+			val = float64(valuesCol.Float32()[i])
+		default:
+			val = 0
+		}
+
+		// Apply aggregation
+		switch plan.PivotAggFn {
+		case AggTypeSum:
+			resultData[colIdx][rowIdx] += val
+		case AggTypeMean:
+			resultData[colIdx][rowIdx] += val
+			resultCounts[colIdx][rowIdx]++
+		case AggTypeMin:
+			if resultCounts[colIdx][rowIdx] == 0 || val < resultData[colIdx][rowIdx] {
+				resultData[colIdx][rowIdx] = val
+			}
+			resultCounts[colIdx][rowIdx]++
+		case AggTypeMax:
+			if resultCounts[colIdx][rowIdx] == 0 || val > resultData[colIdx][rowIdx] {
+				resultData[colIdx][rowIdx] = val
+			}
+			resultCounts[colIdx][rowIdx]++
+		case AggTypeFirst:
+			if resultCounts[colIdx][rowIdx] == 0 {
+				resultData[colIdx][rowIdx] = val
+			}
+			resultCounts[colIdx][rowIdx]++
+		case AggTypeLast:
+			resultData[colIdx][rowIdx] = val
+			resultCounts[colIdx][rowIdx]++
+		case AggTypeCount:
+			resultData[colIdx][rowIdx]++
+		default:
+			// Default to first
+			if resultCounts[colIdx][rowIdx] == 0 {
+				resultData[colIdx][rowIdx] = val
+			}
+			resultCounts[colIdx][rowIdx]++
+		}
+	}
+
+	// Finalize mean aggregation
+	if plan.PivotAggFn == AggTypeMean {
+		for col := range resultData {
+			for row := range resultData[col] {
+				if resultCounts[col][row] > 0 {
+					resultData[col][row] /= float64(resultCounts[col][row])
+				}
+			}
+		}
+	}
+
+	// Build result DataFrame
+	columns := make([]*Series, 1+numCols)
+	columns[0] = NewSeriesString(plan.PivotIndex, indexData)
+	for i, pivotVal := range sortedPivotVals {
+		columns[i+1] = NewSeriesFloat64(pivotVal, resultData[i])
+	}
+
+	return NewDataFrame(columns...)
+}
+
+// ============================================================================
+// Melt
+// ============================================================================
+
+func executeMelt(plan *LogicalPlan) (*DataFrame, error) {
+	df, err := executePlan(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	// Determine value vars if not specified
+	valueVars := plan.MeltValueVars
+	if len(valueVars) == 0 {
+		// Use all columns except ID vars
+		idSet := make(map[string]bool)
+		for _, id := range plan.MeltIDVars {
+			idSet[id] = true
+		}
+		for _, col := range df.Columns() {
+			if !idSet[col] {
+				valueVars = append(valueVars, col)
+			}
+		}
+	}
+
+	if len(valueVars) == 0 {
+		return nil, fmt.Errorf("no columns to melt")
+	}
+
+	// Calculate result size
+	numRows := df.Height() * len(valueVars)
+
+	// Create ID columns for result (repeated for each value var)
+	idColumns := make([]*Series, len(plan.MeltIDVars))
+	for i, idVar := range plan.MeltIDVars {
+		srcCol := df.ColumnByName(idVar)
+		if srcCol == nil {
+			return nil, fmt.Errorf("id column '%s' not found", idVar)
+		}
+
+		// Repeat each ID value for each value var
+		switch srcCol.DType() {
+		case String:
+			data := make([]string, numRows)
+			srcData := srcCol.Strings()
+			for j := 0; j < len(valueVars); j++ {
+				for k, v := range srcData {
+					data[j*df.Height()+k] = v
+				}
+			}
+			idColumns[i] = NewSeriesString(idVar, data)
+		case Float64:
+			data := make([]float64, numRows)
+			srcData := srcCol.Float64()
+			for j := 0; j < len(valueVars); j++ {
+				for k, v := range srcData {
+					data[j*df.Height()+k] = v
+				}
+			}
+			idColumns[i] = NewSeriesFloat64(idVar, data)
+		case Int64:
+			data := make([]int64, numRows)
+			srcData := srcCol.Int64()
+			for j := 0; j < len(valueVars); j++ {
+				for k, v := range srcData {
+					data[j*df.Height()+k] = v
+				}
+			}
+			idColumns[i] = NewSeriesInt64(idVar, data)
+		default:
+			// Generic handling via string conversion
+			data := make([]string, numRows)
+			for j := 0; j < len(valueVars); j++ {
+				for k := 0; k < srcCol.Len(); k++ {
+					data[j*df.Height()+k] = fmt.Sprintf("%v", srcCol.Get(k))
+				}
+			}
+			idColumns[i] = NewSeriesString(idVar, data)
+		}
+	}
+
+	// Create variable column
+	varData := make([]string, numRows)
+	for i, varName := range valueVars {
+		for j := 0; j < df.Height(); j++ {
+			varData[i*df.Height()+j] = varName
+		}
+	}
+	varColumn := NewSeriesString(plan.MeltVarName, varData)
+
+	// Create value column
+	valueData := make([]float64, numRows)
+	for i, varName := range valueVars {
+		srcCol := df.ColumnByName(varName)
+		if srcCol == nil {
+			return nil, fmt.Errorf("value column '%s' not found", varName)
+		}
+		srcData := toFloat64Slice(srcCol)
+		for j, v := range srcData {
+			valueData[i*df.Height()+j] = v
+		}
+	}
+	valueColumn := NewSeriesFloat64(plan.MeltValueName, valueData)
+
+	// Build result DataFrame
+	columns := make([]*Series, len(idColumns)+2)
+	copy(columns, idColumns)
+	columns[len(idColumns)] = varColumn
+	columns[len(idColumns)+1] = valueColumn
+
+	return NewDataFrame(columns...)
+}
+
+// ============================================================================
+// Cache
+// ============================================================================
+
+// Global cache for cached intermediate results
+var planCache = make(map[*LogicalPlan]*DataFrame)
+
+func executeCache(plan *LogicalPlan) (*DataFrame, error) {
+	// Check if already cached
+	if cached, ok := planCache[plan.Input]; ok {
+		return cached, nil
+	}
+
+	// Execute input and cache result
+	df, err := executePlan(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	planCache[plan.Input] = df
+	return df, nil
+}
+
+// ClearCache clears the plan cache
+func ClearCache() {
+	planCache = make(map[*LogicalPlan]*DataFrame)
+}
+
+// ============================================================================
+// Apply (UDF)
+// ============================================================================
+
+func executeApply(plan *LogicalPlan) (*DataFrame, error) {
+	df, err := executePlan(plan.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	if plan.ApplyFunc == nil {
+		return nil, fmt.Errorf("apply function is nil")
+	}
+
+	// If column name is empty, this is a full DataFrame apply (currently not supported)
+	if plan.ApplyCol == "" {
+		return nil, fmt.Errorf("full DataFrame apply not yet supported; use Apply with a column name")
+	}
+
+	// Get the column to apply the function to
+	col := df.ColumnByName(plan.ApplyCol)
+	if col == nil {
+		return nil, fmt.Errorf("column '%s' not found", plan.ApplyCol)
+	}
+
+	// Apply the function
+	resultCol, err := plan.ApplyFunc(col)
+	if err != nil {
+		return nil, fmt.Errorf("apply function error: %w", err)
+	}
+
+	// Replace the column in the DataFrame
+	return df.WithColumnSeries(resultCol.Rename(plan.ApplyCol))
 }
 
 // ============================================================================

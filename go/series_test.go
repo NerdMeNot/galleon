@@ -1516,6 +1516,164 @@ func TestSeries_CountTrue_WrongType(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Comparison Method Tests
+// ============================================================================
+
+func TestSeries_Lt(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{1.0, 5.0, 2.0, 8.0, 3.0})
+	indices := s.Lt(4.0)
+
+	// Values < 4: 1.0(idx 0), 2.0(idx 2), 3.0(idx 4)
+	if len(indices) != 3 {
+		t.Fatalf("Lt(4.0) returned %d indices, want 3", len(indices))
+	}
+
+	data := s.Float64()
+	for _, idx := range indices {
+		if data[idx] >= 4.0 {
+			t.Errorf("Lt returned index %d with value %f >= 4.0", idx, data[idx])
+		}
+	}
+}
+
+func TestSeries_Lt_Int64(t *testing.T) {
+	s := NewSeriesInt64("test", []int64{1, 5, 2, 8, 3})
+	indices := s.Lt(4.0)
+	if len(indices) != 3 {
+		t.Errorf("Lt(4.0) returned %d indices, want 3", len(indices))
+	}
+}
+
+func TestSeries_Lte(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{1.0, 4.0, 2.0, 8.0, 4.0})
+	indices := s.Lte(4.0)
+
+	// Values <= 4: 1.0(idx 0), 4.0(idx 1), 2.0(idx 2), 4.0(idx 4)
+	if len(indices) != 4 {
+		t.Fatalf("Lte(4.0) returned %d indices, want 4", len(indices))
+	}
+
+	data := s.Float64()
+	for _, idx := range indices {
+		if data[idx] > 4.0 {
+			t.Errorf("Lte returned index %d with value %f > 4.0", idx, data[idx])
+		}
+	}
+}
+
+func TestSeries_Gte(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{1.0, 4.0, 2.0, 8.0, 4.0})
+	indices := s.Gte(4.0)
+
+	// Values >= 4: 4.0(idx 1), 8.0(idx 3), 4.0(idx 4)
+	if len(indices) != 3 {
+		t.Fatalf("Gte(4.0) returned %d indices, want 3", len(indices))
+	}
+
+	data := s.Float64()
+	for _, idx := range indices {
+		if data[idx] < 4.0 {
+			t.Errorf("Gte returned index %d with value %f < 4.0", idx, data[idx])
+		}
+	}
+}
+
+func TestSeries_Eq(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{1.0, 4.0, 2.0, 4.0, 3.0})
+	indices := s.Eq(4.0)
+
+	// Values == 4: 4.0(idx 1), 4.0(idx 3)
+	if len(indices) != 2 {
+		t.Fatalf("Eq(4.0) returned %d indices, want 2", len(indices))
+	}
+
+	data := s.Float64()
+	for _, idx := range indices {
+		if data[idx] != 4.0 {
+			t.Errorf("Eq returned index %d with value %f != 4.0", idx, data[idx])
+		}
+	}
+}
+
+func TestSeries_Eq_Int64(t *testing.T) {
+	s := NewSeriesInt64("test", []int64{1, 4, 2, 4, 3})
+	indices := s.Eq(4.0)
+	if len(indices) != 2 {
+		t.Errorf("Eq(4.0) returned %d indices, want 2", len(indices))
+	}
+}
+
+func TestSeries_Neq(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{1.0, 4.0, 2.0, 4.0, 3.0})
+	indices := s.Neq(4.0)
+
+	// Values != 4: 1.0(idx 0), 2.0(idx 2), 3.0(idx 4)
+	if len(indices) != 3 {
+		t.Fatalf("Neq(4.0) returned %d indices, want 3", len(indices))
+	}
+
+	data := s.Float64()
+	for _, idx := range indices {
+		if data[idx] == 4.0 {
+			t.Errorf("Neq returned index %d with value %f == 4.0", idx, data[idx])
+		}
+	}
+}
+
+func TestSeries_EqString(t *testing.T) {
+	s := NewSeriesString("test", []string{"a", "b", "a", "c", "a"})
+	indices := s.EqString("a")
+
+	if len(indices) != 3 {
+		t.Fatalf("EqString('a') returned %d indices, want 3", len(indices))
+	}
+
+	data := s.Strings()
+	for _, idx := range indices {
+		if data[idx] != "a" {
+			t.Errorf("EqString returned index %d with value %s != 'a'", idx, data[idx])
+		}
+	}
+}
+
+func TestSeries_NeqString(t *testing.T) {
+	s := NewSeriesString("test", []string{"a", "b", "a", "c", "a"})
+	indices := s.NeqString("a")
+
+	if len(indices) != 2 {
+		t.Fatalf("NeqString('a') returned %d indices, want 2", len(indices))
+	}
+
+	data := s.Strings()
+	for _, idx := range indices {
+		if data[idx] == "a" {
+			t.Errorf("NeqString returned index %d with value 'a'", idx)
+		}
+	}
+}
+
+func TestSeries_Lt_Empty(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{})
+	if s.Lt(5.0) != nil {
+		t.Error("Lt on empty should return nil")
+	}
+}
+
+func TestSeries_Eq_Empty(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{})
+	if s.Eq(5.0) != nil {
+		t.Error("Eq on empty should return nil")
+	}
+}
+
+func TestSeries_EqString_WrongType(t *testing.T) {
+	s := NewSeriesFloat64("test", []float64{1.0, 2.0})
+	if s.EqString("a") != nil {
+		t.Error("EqString on Float64 should return nil")
+	}
+}
+
 // Helper function for substring check
 func containsSubstring(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstring(s, substr))

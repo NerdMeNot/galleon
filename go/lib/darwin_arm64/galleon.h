@@ -313,6 +313,122 @@ void galleon_cmp_ne_f64(const double* a, const double* b, uint8_t* out, size_t l
 size_t galleon_count_mask_true(const uint8_t* mask, size_t len);
 size_t galleon_indices_from_mask(const uint8_t* mask, size_t len, uint32_t* out_indices, size_t max_indices);
 
+// ============================================================================
+// Conditional Operations
+// ============================================================================
+
+// Select (when/then/otherwise)
+void galleon_select_f64(const uint8_t* mask, const double* then_val,
+                        const double* else_val, double* out, size_t len);
+void galleon_select_i64(const uint8_t* mask, const int64_t* then_val,
+                        const int64_t* else_val, int64_t* out, size_t len);
+void galleon_select_scalar_f64(const uint8_t* mask, const double* then_val,
+                               double else_scalar, double* out, size_t len);
+
+// Null detection (NaN for floats)
+void galleon_is_null_f64(const double* data, uint8_t* out, size_t len);
+void galleon_is_not_null_f64(const double* data, uint8_t* out, size_t len);
+
+// Fill null
+void galleon_fill_null_f64(const double* data, double fill_value, double* out, size_t len);
+void galleon_fill_null_forward_f64(const double* data, double* out, size_t len);
+void galleon_fill_null_backward_f64(const double* data, double* out, size_t len);
+
+// Coalesce
+void galleon_coalesce2_f64(const double* a, const double* b, double* out, size_t len);
+
+// Null counting
+size_t galleon_count_null_f64(const double* data, size_t len);
+size_t galleon_count_not_null_f64(const double* data, size_t len);
+
+// ============================================================================
+// Advanced Statistics Operations
+// ============================================================================
+
+// Median (returns result through pointer, out_valid indicates success)
+double galleon_median_f64(const double* data, size_t len, bool* out_valid);
+
+// Quantile (q should be in [0, 1])
+double galleon_quantile_f64(const double* data, size_t len, double q, bool* out_valid);
+
+// Skewness (3rd standardized moment)
+double galleon_skewness_f64(const double* data, size_t len, bool* out_valid);
+
+// Kurtosis (excess kurtosis, 4th standardized moment - 3)
+double galleon_kurtosis_f64(const double* data, size_t len, bool* out_valid);
+
+// Pearson correlation coefficient between two arrays
+double galleon_correlation_f64(const double* x, const double* y, size_t len, bool* out_valid);
+
+// Variance (sample variance with n-1 denominator)
+double galleon_variance_f64(const double* data, size_t len, bool* out_valid);
+
+// Standard deviation (square root of variance)
+double galleon_stddev_f64(const double* data, size_t len, bool* out_valid);
+
+// ============================================================================
+// Window Operations
+// ============================================================================
+
+// Lag/Lead shift operations
+void galleon_lag_f64(const double* data, size_t len, size_t offset, double default_val, double* out);
+void galleon_lead_f64(const double* data, size_t len, size_t offset, double default_val, double* out);
+void galleon_lag_i64(const int64_t* data, size_t len, size_t offset, int64_t default_val, int64_t* out);
+void galleon_lead_i64(const int64_t* data, size_t len, size_t offset, int64_t default_val, int64_t* out);
+
+// Ranking functions
+void galleon_row_number(uint32_t* out, size_t len);
+void galleon_row_number_partitioned(const uint32_t* partition_ids, uint32_t* out, size_t len);
+void galleon_rank_f64(const double* data, uint32_t* out, size_t len);
+void galleon_dense_rank_f64(const double* data, uint32_t* out, size_t len);
+
+// Cumulative functions
+void galleon_cumsum_f64(const double* data, double* out, size_t len);
+void galleon_cumsum_i64(const int64_t* data, int64_t* out, size_t len);
+void galleon_cumsum_partitioned_f64(const double* data, const uint32_t* partition_ids, double* out, size_t len);
+void galleon_cummin_f64(const double* data, double* out, size_t len);
+void galleon_cummax_f64(const double* data, double* out, size_t len);
+
+// Rolling aggregations
+void galleon_rolling_sum_f64(const double* data, size_t len, size_t window_size, size_t min_periods, double* out);
+void galleon_rolling_mean_f64(const double* data, size_t len, size_t window_size, size_t min_periods, double* out);
+void galleon_rolling_min_f64(const double* data, size_t len, size_t window_size, size_t min_periods, double* out);
+void galleon_rolling_max_f64(const double* data, size_t len, size_t window_size, size_t min_periods, double* out);
+void galleon_rolling_std_f64(const double* data, size_t len, size_t window_size, size_t min_periods, double* out);
+
+// Diff and percent change
+void galleon_diff_f64(const double* data, double* out, size_t len, double default_val);
+void galleon_diff_n_f64(const double* data, double* out, size_t len, size_t n, double default_val);
+void galleon_pct_change_f64(const double* data, double* out, size_t len);
+
+// ============================================================================
+// Fold/Horizontal Aggregation Operations
+// ============================================================================
+
+// Sum across columns (row-wise)
+void galleon_sum_horizontal2_f64(const double* a, const double* b, double* out, size_t len);
+void galleon_sum_horizontal3_f64(const double* a, const double* b, const double* c, double* out, size_t len);
+
+// Min across columns (row-wise)
+void galleon_min_horizontal2_f64(const double* a, const double* b, double* out, size_t len);
+void galleon_min_horizontal3_f64(const double* a, const double* b, const double* c, double* out, size_t len);
+
+// Max across columns (row-wise)
+void galleon_max_horizontal2_f64(const double* a, const double* b, double* out, size_t len);
+void galleon_max_horizontal3_f64(const double* a, const double* b, const double* c, double* out, size_t len);
+
+// Product across columns (row-wise)
+void galleon_product_horizontal2_f64(const double* a, const double* b, double* out, size_t len);
+void galleon_product_horizontal3_f64(const double* a, const double* b, const double* c, double* out, size_t len);
+
+// Boolean horizontal operations
+void galleon_any_horizontal2(const uint8_t* a, const uint8_t* b, uint8_t* out, size_t len);
+void galleon_all_horizontal2(const uint8_t* a, const uint8_t* b, uint8_t* out, size_t len);
+
+// Count non-null values across columns
+void galleon_count_non_null_horizontal2_f64(const double* a, const double* b, uint32_t* out, size_t len);
+void galleon_count_non_null_horizontal3_f64(const double* a, const double* b, const double* c, uint32_t* out, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

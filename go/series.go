@@ -167,6 +167,35 @@ func NewSeriesString(name string, data []string) *Series {
 	}
 }
 
+// NewSeries creates a Series from any supported slice type.
+// This is a convenience constructor that infers the type from the input.
+// Supported types: []float64, []float32, []int64, []int32, []bool, []string
+func NewSeries(name string, data interface{}) (*Series, error) {
+	switch v := data.(type) {
+	case []float64:
+		return NewSeriesFloat64(name, v), nil
+	case []float32:
+		return NewSeriesFloat32(name, v), nil
+	case []int64:
+		return NewSeriesInt64(name, v), nil
+	case []int32:
+		return NewSeriesInt32(name, v), nil
+	case []int:
+		// Convert []int to []int64
+		data64 := make([]int64, len(v))
+		for i, val := range v {
+			data64[i] = int64(val)
+		}
+		return NewSeriesInt64(name, data64), nil
+	case []bool:
+		return NewSeriesBool(name, v), nil
+	case []string:
+		return NewSeriesString(name, v), nil
+	default:
+		return nil, fmt.Errorf("unsupported data type: %T", data)
+	}
+}
+
 // free releases the underlying Zig memory
 func (s *Series) free() {
 	if s.f64Col != nil {
@@ -570,6 +599,311 @@ func (s *Series) GtMask(threshold float64, mask []byte) []byte {
 		return FilterMaskU8GreaterThanF64Into(data, threshold, mask)
 	}
 	return mask
+}
+
+// Lt returns indices where values are less than threshold
+func (s *Series) Lt(threshold float64) []uint32 {
+	if s.length == 0 {
+		return nil
+	}
+
+	var indices []uint32
+	switch s.dtype {
+	case Float64:
+		data := s.Float64()
+		if data == nil {
+			return nil
+		}
+		for i, v := range data {
+			if v < threshold {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Float32:
+		data := s.Float32()
+		if data == nil {
+			return nil
+		}
+		t := float32(threshold)
+		for i, v := range data {
+			if v < t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int64:
+		data := s.Int64()
+		if data == nil {
+			return nil
+		}
+		t := int64(threshold)
+		for i, v := range data {
+			if v < t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int32:
+		data := s.Int32()
+		if data == nil {
+			return nil
+		}
+		t := int32(threshold)
+		for i, v := range data {
+			if v < t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	}
+	return indices
+}
+
+// Lte returns indices where values are less than or equal to threshold
+func (s *Series) Lte(threshold float64) []uint32 {
+	if s.length == 0 {
+		return nil
+	}
+
+	var indices []uint32
+	switch s.dtype {
+	case Float64:
+		data := s.Float64()
+		if data == nil {
+			return nil
+		}
+		for i, v := range data {
+			if v <= threshold {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Float32:
+		data := s.Float32()
+		if data == nil {
+			return nil
+		}
+		t := float32(threshold)
+		for i, v := range data {
+			if v <= t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int64:
+		data := s.Int64()
+		if data == nil {
+			return nil
+		}
+		t := int64(threshold)
+		for i, v := range data {
+			if v <= t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int32:
+		data := s.Int32()
+		if data == nil {
+			return nil
+		}
+		t := int32(threshold)
+		for i, v := range data {
+			if v <= t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	}
+	return indices
+}
+
+// Gte returns indices where values are greater than or equal to threshold
+func (s *Series) Gte(threshold float64) []uint32 {
+	if s.length == 0 {
+		return nil
+	}
+
+	var indices []uint32
+	switch s.dtype {
+	case Float64:
+		data := s.Float64()
+		if data == nil {
+			return nil
+		}
+		for i, v := range data {
+			if v >= threshold {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Float32:
+		data := s.Float32()
+		if data == nil {
+			return nil
+		}
+		t := float32(threshold)
+		for i, v := range data {
+			if v >= t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int64:
+		data := s.Int64()
+		if data == nil {
+			return nil
+		}
+		t := int64(threshold)
+		for i, v := range data {
+			if v >= t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int32:
+		data := s.Int32()
+		if data == nil {
+			return nil
+		}
+		t := int32(threshold)
+		for i, v := range data {
+			if v >= t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	}
+	return indices
+}
+
+// Eq returns indices where values equal the threshold
+func (s *Series) Eq(threshold float64) []uint32 {
+	if s.length == 0 {
+		return nil
+	}
+
+	var indices []uint32
+	switch s.dtype {
+	case Float64:
+		data := s.Float64()
+		if data == nil {
+			return nil
+		}
+		for i, v := range data {
+			if v == threshold {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Float32:
+		data := s.Float32()
+		if data == nil {
+			return nil
+		}
+		t := float32(threshold)
+		for i, v := range data {
+			if v == t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int64:
+		data := s.Int64()
+		if data == nil {
+			return nil
+		}
+		t := int64(threshold)
+		for i, v := range data {
+			if v == t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int32:
+		data := s.Int32()
+		if data == nil {
+			return nil
+		}
+		t := int32(threshold)
+		for i, v := range data {
+			if v == t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	}
+	return indices
+}
+
+// Neq returns indices where values do not equal the threshold
+func (s *Series) Neq(threshold float64) []uint32 {
+	if s.length == 0 {
+		return nil
+	}
+
+	var indices []uint32
+	switch s.dtype {
+	case Float64:
+		data := s.Float64()
+		if data == nil {
+			return nil
+		}
+		for i, v := range data {
+			if v != threshold {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Float32:
+		data := s.Float32()
+		if data == nil {
+			return nil
+		}
+		t := float32(threshold)
+		for i, v := range data {
+			if v != t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int64:
+		data := s.Int64()
+		if data == nil {
+			return nil
+		}
+		t := int64(threshold)
+		for i, v := range data {
+			if v != t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	case Int32:
+		data := s.Int32()
+		if data == nil {
+			return nil
+		}
+		t := int32(threshold)
+		for i, v := range data {
+			if v != t {
+				indices = append(indices, uint32(i))
+			}
+		}
+	}
+	return indices
+}
+
+// EqString returns indices where string values equal the target (for String series)
+func (s *Series) EqString(target string) []uint32 {
+	if s.dtype != String || s.length == 0 {
+		return nil
+	}
+
+	var indices []uint32
+	for i, v := range s.strData {
+		if v == target {
+			indices = append(indices, uint32(i))
+		}
+	}
+	return indices
+}
+
+// NeqString returns indices where string values do not equal the target (for String series)
+func (s *Series) NeqString(target string) []uint32 {
+	if s.dtype != String || s.length == 0 {
+		return nil
+	}
+
+	var indices []uint32
+	for i, v := range s.strData {
+		if v != target {
+			indices = append(indices, uint32(i))
+		}
+	}
+	return indices
 }
 
 // ============================================================================

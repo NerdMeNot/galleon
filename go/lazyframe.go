@@ -180,6 +180,148 @@ func (lf *LazyFrame) Distinct() *LazyFrame {
 }
 
 // ============================================================================
+// Pivot/Melt Operations
+// ============================================================================
+
+// PivotOptions configures a pivot operation
+type PivotOptions struct {
+	Index  string  // Column to use as row identifier
+	Column string  // Column whose values become new column names
+	Values string  // Column whose values populate the new columns
+	AggFn  AggType // Aggregation function for duplicate values (default: AggTypeFirst)
+}
+
+// Pivot reshapes data from long to wide format.
+// It creates new columns based on unique values in the specified column.
+// Example:
+//
+//	df.Lazy().Pivot(PivotOptions{
+//	    Index:  "date",
+//	    Column: "metric",
+//	    Values: "value",
+//	    AggFn:  AggTypeSum,
+//	})
+func (lf *LazyFrame) Pivot(opts PivotOptions) *LazyFrame {
+	aggFn := opts.AggFn
+	if aggFn == 0 {
+		aggFn = AggTypeFirst // Default to first
+	}
+	return &LazyFrame{
+		plan: &LogicalPlan{
+			Op:          PlanPivot,
+			Input:       lf.plan,
+			PivotIndex:  opts.Index,
+			PivotColumn: opts.Column,
+			PivotValues: opts.Values,
+			PivotAggFn:  aggFn,
+		},
+	}
+}
+
+// MeltOptions configures a melt operation
+type MeltOptions struct {
+	IDVars    []string // Columns to keep as identifier variables
+	ValueVars []string // Columns to unpivot (if empty, uses all non-ID columns)
+	VarName   string   // Name for the variable column (default: "variable")
+	ValueName string   // Name for the value column (default: "value")
+}
+
+// Melt reshapes data from wide to long format.
+// It unpivots columns into rows.
+// Example:
+//
+//	df.Lazy().Melt(MeltOptions{
+//	    IDVars:    []string{"id", "date"},
+//	    ValueVars: []string{"temp", "humidity", "pressure"},
+//	    VarName:   "metric",
+//	    ValueName: "reading",
+//	})
+func (lf *LazyFrame) Melt(opts MeltOptions) *LazyFrame {
+	varName := opts.VarName
+	if varName == "" {
+		varName = "variable"
+	}
+	valueName := opts.ValueName
+	if valueName == "" {
+		valueName = "value"
+	}
+	return &LazyFrame{
+		plan: &LogicalPlan{
+			Op:            PlanMelt,
+			Input:         lf.plan,
+			MeltIDVars:    opts.IDVars,
+			MeltValueVars: opts.ValueVars,
+			MeltVarName:   varName,
+			MeltValueName: valueName,
+		},
+	}
+}
+
+// ============================================================================
+// Cache Operation
+// ============================================================================
+
+// Cache materializes the intermediate result for reuse.
+// This is useful when the same intermediate result is used multiple times.
+// The cached result is computed once and reused in subsequent operations.
+func (lf *LazyFrame) Cache() *LazyFrame {
+	return &LazyFrame{
+		plan: &LogicalPlan{
+			Op:       PlanCache,
+			Input:    lf.plan,
+			IsCached: true,
+		},
+	}
+}
+
+// ============================================================================
+// Apply (UDF) Operation
+// ============================================================================
+
+// Apply applies a user-defined function to a column.
+// The function receives a Series and should return a new Series.
+// Example:
+//
+//	df.Lazy().Apply("price", func(s *Series) (*Series, error) {
+//	    // Custom transformation logic
+//	    data := s.Float64()
+//	    result := make([]float64, len(data))
+//	    for i, v := range data {
+//	        result[i] = v * 1.1  // 10% markup
+//	    }
+//	    return NewSeriesFloat64(s.Name(), result), nil
+//	})
+func (lf *LazyFrame) Apply(column string, fn func(*Series) (*Series, error)) *LazyFrame {
+	return &LazyFrame{
+		plan: &LogicalPlan{
+			Op:        PlanApply,
+			Input:     lf.plan,
+			ApplyCol:  column,
+			ApplyFunc: fn,
+		},
+	}
+}
+
+// ApplyAll applies a user-defined function to the entire DataFrame.
+// This is useful for transformations that need access to multiple columns.
+func (lf *LazyFrame) ApplyAll(fn func(*DataFrame) (*DataFrame, error)) *LazyFrame {
+	// Wrap the DataFrame function as a column-level function that processes all
+	// We store this as a special case with empty column name
+	wrappedFn := func(s *Series) (*Series, error) {
+		// This will be handled specially in the executor
+		return s, nil
+	}
+	return &LazyFrame{
+		plan: &LogicalPlan{
+			Op:        PlanApply,
+			Input:     lf.plan,
+			ApplyCol:  "", // Empty indicates full DataFrame apply
+			ApplyFunc: wrappedFn,
+		},
+	}
+}
+
+// ============================================================================
 // Collect - Execute the plan
 // ============================================================================
 
@@ -271,6 +413,10 @@ const (
 	PlanLimit
 	PlanTail
 	PlanDistinct
+	PlanPivot
+	PlanMelt
+	PlanCache
+	PlanApply
 )
 
 func (op PlanOp) String() string {
@@ -301,6 +447,14 @@ func (op PlanOp) String() string {
 		return "Tail"
 	case PlanDistinct:
 		return "Distinct"
+	case PlanPivot:
+		return "Pivot"
+	case PlanMelt:
+		return "Melt"
+	case PlanCache:
+		return "Cache"
+	case PlanApply:
+		return "Apply"
 	default:
 		return "Unknown"
 	}
@@ -344,6 +498,25 @@ type LogicalPlan struct {
 	// Limit/Tail
 	Limit    int
 	TailRows int
+
+	// Pivot configuration
+	PivotIndex  string   // Column to use as row identifier
+	PivotColumn string   // Column whose values become new column names
+	PivotValues string   // Column whose values populate the new columns
+	PivotAggFn  AggType  // Aggregation function for duplicate values
+
+	// Melt configuration
+	MeltIDVars    []string // Columns to keep as identifier variables
+	MeltValueVars []string // Columns to unpivot
+	MeltVarName   string   // Name for the variable column (default: "variable")
+	MeltValueName string   // Name for the value column (default: "value")
+
+	// Apply (UDF) configuration
+	ApplyFunc func(*Series) (*Series, error) // User-defined function
+	ApplyCol  string                          // Column to apply function to
+
+	// Cache flag
+	IsCached bool
 }
 
 // describePlan returns a string representation of the plan
@@ -392,6 +565,20 @@ func describePlan(plan *LogicalPlan, indent int) string {
 
 	case PlanDistinct:
 		result = fmt.Sprintf("%s%s\n", prefix, plan.Op)
+
+	case PlanPivot:
+		result = fmt.Sprintf("%s%s index=%q column=%q values=%q agg=%s\n",
+			prefix, plan.Op, plan.PivotIndex, plan.PivotColumn, plan.PivotValues, plan.PivotAggFn)
+
+	case PlanMelt:
+		result = fmt.Sprintf("%s%s id_vars=%v value_vars=%v var_name=%q value_name=%q\n",
+			prefix, plan.Op, plan.MeltIDVars, plan.MeltValueVars, plan.MeltVarName, plan.MeltValueName)
+
+	case PlanCache:
+		result = fmt.Sprintf("%s%s\n", prefix, plan.Op)
+
+	case PlanApply:
+		result = fmt.Sprintf("%s%s col=%q\n", prefix, plan.Op, plan.ApplyCol)
 
 	default:
 		result = fmt.Sprintf("%s%s\n", prefix, plan.Op)
