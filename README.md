@@ -51,12 +51,28 @@ import (
 )
 
 func main() {
-    // Create a DataFrame
+    // Option 1: Create from Series
     df, _ := galleon.NewDataFrame(
         galleon.NewSeriesInt64("id", []int64{1, 2, 3, 4, 5}),
         galleon.NewSeriesFloat64("value", []float64{10.5, 20.3, 15.7, 8.2, 25.1}),
         galleon.NewSeriesString("category", []string{"A", "B", "A", "B", "A"}),
     )
+
+    // Option 2: Create from structs
+    type Record struct {
+        ID       int64   `galleon:"id"`
+        Value    float64 `galleon:"value"`
+        Category string  `galleon:"category"`
+    }
+    records := []Record{ /* ... */ }
+    df, _ := galleon.FromStructs(records)
+
+    // Option 3: Create from maps
+    mapData := []map[string]interface{}{
+        {"id": 1, "value": 10.5, "category": "A"},
+        {"id": 2, "value": 20.3, "category": "B"},
+    }
+    df, _ := galleon.FromRecords(mapData)
 
     // Filter and aggregate
     result := df.
@@ -69,6 +85,32 @@ func main() {
 ```
 
 ## Feature Showcase
+
+### Data Loading
+
+```go
+// From structs with tags
+type User struct {
+    UserID   int64   `galleon:"user_id"`
+    FullName string  `galleon:"name"`
+    Email    string  `galleon:"email"`
+    Internal string  `galleon:"-"`  // Skip this field
+}
+
+users := []User{
+    {UserID: 1, FullName: "Alice Smith", Email: "alice@example.com"},
+    {UserID: 2, FullName: "Bob Jones", Email: "bob@example.com"},
+}
+df, _ := galleon.FromStructs(users)
+
+// From maps with auto type detection
+records := []map[string]interface{}{
+    {"id": 1, "name": "Alice", "score": 95.5, "active": true},
+    {"id": 2, "name": "Bob", "score": 87.3, "active": false},
+}
+df, _ := galleon.FromRecords(records)
+// Types auto-detected: id=Int64, name=String, score=Float64, active=Bool
+```
 
 ### Window Functions & Time Series
 

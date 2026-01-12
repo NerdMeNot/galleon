@@ -450,6 +450,104 @@ Returns the number of unique values.
 func (s *Series) NUnique() int
 ```
 
+### IsEmpty
+
+Checks if series has zero elements.
+
+```go
+func (s *Series) IsEmpty() bool
+```
+
+**Example:**
+```go
+empty := galleon.NewSeriesInt64("empty", []int64{})
+fmt.Println(empty.IsEmpty())  // true
+```
+
+### Get
+
+Returns value at index as `interface{}`.
+
+```go
+func (s *Series) Get(index int) interface{}
+```
+
+**Example:**
+```go
+s := galleon.NewSeriesFloat64("values", []float64{1.5, 2.5, 3.5})
+value := s.Get(1)  // 2.5 (as interface{})
+```
+
+### GetFloat64
+
+Type-safe getter for Float64 series.
+
+```go
+func (s *Series) GetFloat64(index int) float64
+```
+
+### GetInt64
+
+Type-safe getter for Int64 series.
+
+```go
+func (s *Series) GetInt64(index int) int64
+```
+
+### GetString
+
+Type-safe getter for String series.
+
+```go
+func (s *Series) GetString(index int) string
+```
+
+**Example:**
+```go
+names := galleon.NewSeriesString("names", []string{"Alice", "Bob", "Carol"})
+name := names.GetString(1)  // "Bob"
+```
+
+### CountTrue
+
+For Bool series, counts the number of true values.
+
+```go
+func (s *Series) CountTrue() int
+```
+
+**Example:**
+```go
+flags := galleon.NewSeriesBool("active", []bool{true, false, true, true})
+count := flags.CountTrue()  // 3
+```
+
+### Describe
+
+Returns descriptive statistics for the series.
+
+```go
+func (s *Series) Describe() map[string]float64
+```
+
+Returns a map with keys:
+- `"count"` - Number of non-null values
+- `"mean"` - Arithmetic mean
+- `"std"` - Standard deviation
+- `"min"` - Minimum value
+- `"25%"` - 25th percentile
+- `"50%"` - Median (50th percentile)
+- `"75%"` - 75th percentile
+- `"max"` - Maximum value
+
+**Example:**
+```go
+values := galleon.NewSeriesFloat64("values", []float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+stats := values.Describe()
+fmt.Printf("Mean: %.2f, Median: %.2f, Std: %.2f\n",
+    stats["mean"], stats["50%"], stats["std"])
+```
+
 ## Type Casting
 
 ### AsFloat64

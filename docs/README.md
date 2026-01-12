@@ -51,6 +51,8 @@ docs/
 - [Join Operations](02-guides/03-joins.md) - Join types and best practices
 - [Reshape Operations](02-guides/04-reshape.md) - Pivot and Melt for data reshaping
 - [Window Functions](02-guides/05-window-functions.md) - Time series and rolling calculations
+- [Data Loading](02-guides/06-data-loading.md) - Loading from structs, maps, and files
+- [Nested Data Types](02-guides/07-nested-types.md) - Struct, List, and Array series
 
 ## Reference
 
@@ -67,6 +69,8 @@ docs/
 | [Lazy Evaluation](02-guides/01-lazy.md) | Query optimization, caching, UDFs |
 | [Window Functions](02-guides/05-window-functions.md) | Time series, lag/lead, rolling aggregations |
 | [Reshape](02-guides/04-reshape.md) | Pivot and Melt operations |
+| [Data Loading](02-guides/06-data-loading.md) | FromStructs, FromRecords, file I/O |
+| [Nested Types](02-guides/07-nested-types.md) | Struct, List, Array series |
 | [I/O](03-api/04-io.md) | CSV, JSON, Parquet |
 | [Performance](04-reference/02-performance.md) | Optimization tips |
 
@@ -119,6 +123,22 @@ Galleon provides API parity with Polars and Pandas for common DataFrame operatio
 ### Common Patterns
 
 ```go
+// Load data from structs
+type User struct {
+    ID    int64  `galleon:"user_id"`
+    Name  string `galleon:"name"`
+    Email string `galleon:"email"`
+}
+users := []User{ /* ... */ }
+df, _ := galleon.FromStructs(users)
+
+// Load data from maps
+records := []map[string]interface{}{
+    {"id": 1, "name": "Alice", "score": 95.5},
+    {"id": 2, "name": "Bob", "score": 87.3},
+}
+df, _ := galleon.FromRecords(records)
+
 // Time series analysis
 df.Lazy().
     Sort(Col("date"), true).

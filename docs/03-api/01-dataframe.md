@@ -28,6 +28,87 @@ Creates an empty DataFrame with a specified schema.
 func NewEmptyDataFrame(schema Schema) *DataFrame
 ```
 
+### FromStructs
+
+Creates a DataFrame from a slice of structs using reflection.
+
+```go
+func FromStructs(data interface{}) (*DataFrame, error)
+```
+
+**Supported struct tags:**
+- `galleon:"column_name"` - Rename field in DataFrame
+- `galleon:"-"` - Skip field
+
+**Example:**
+```go
+type User struct {
+    UserID   int64   `galleon:"user_id"`
+    FullName string  `galleon:"name"`
+    Email    string  `galleon:"email"`
+    Internal string  `galleon:"-"`  // Skipped
+}
+
+users := []User{
+    {UserID: 1, FullName: "Alice", Email: "alice@example.com", Internal: "secret"},
+    {UserID: 2, FullName: "Bob", Email: "bob@example.com", Internal: "hidden"},
+}
+
+df, err := galleon.FromStructs(users)
+// DataFrame has columns: user_id, name, email
+```
+
+**Supported field types:**
+- `int`, `int64`, `int32` → Int64/Int32
+- `uint64`, `uint32` → UInt64/UInt32
+- `float64`, `float32` → Float64/Float32
+- `string` → String
+- `bool` → Bool
+- Pointer types (`*int64`, etc.) → same as value type (nil becomes null)
+
+**See also:** [Data Loading Guide](../02-guides/06-data-loading.md#loading-from-structs)
+
+### FromRecords
+
+Creates a DataFrame from a slice of maps with automatic type detection.
+
+```go
+func FromRecords(records []map[string]interface{}) (*DataFrame, error)
+```
+
+**Type detection rules:**
+- First non-nil value determines column type
+- All values must be compatible with detected type
+- Missing keys treated as null
+
+**Example:**
+```go
+records := []map[string]interface{}{
+    {"id": 1, "name": "Alice", "score": 95.5, "active": true},
+    {"id": 2, "name": "Bob", "score": 87.3, "active": false},
+    {"id": 3, "name": "Carol", "score": 91.2, "active": true},
+}
+
+df, err := galleon.FromRecords(records)
+// Auto-detected types:
+//   id: Int64
+//   name: String
+//   score: Float64
+//   active: Bool
+```
+
+**Column order:** Determined by first record
+
+**Supported value types:**
+- `int`, `int64` → Int64
+- `int32` → Int32
+- `float64` → Float64
+- `float32` → Float32
+- `string` → String
+- `bool` → Bool
+
+**See also:** [Data Loading Guide](../02-guides/06-data-loading.md#loading-from-maps)
+
 ## Properties
 
 ### Height
