@@ -52,6 +52,11 @@ echo ""
 echo "--- Core Operations (Reference) ---"
 go test -tags dev -bench='BenchmarkZigSum_1M|BenchmarkZigMin_1M|BenchmarkSort_1M' -benchtime=500ms -timeout=5m 2>/dev/null | grep -E '^Benchmark|^ok'
 
+# Sort and Join benchmarks
+echo ""
+echo "--- Sort and Join Benchmarks ---"
+go test -tags dev -bench='BenchmarkSortJoin_' -benchtime=500ms -timeout=10m 2>/dev/null | grep -E '^Benchmark|^ok'
+
 # Resource consumption benchmarks
 echo ""
 echo "--- Resource Consumption Benchmarks (Memory & Throughput) ---"

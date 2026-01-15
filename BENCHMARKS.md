@@ -32,52 +32,75 @@ This document presents comprehensive benchmarks comparing Galleon with Polars an
 
 | Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
 |-----------|-------------|------------|------------|-------------------|
-| **Sum** | 94 µs | 96 µs | 250 µs | ~Same |
-| **Variance** | 205 µs | 677 µs | 1.8 ms | **3.3x faster** |
-| **Median** | 5.1 ms | 2.6 ms | 10.0 ms | 1.9x slower |
-| **Quantile** | 1.3 ms | 1.3 ms | 12.2 ms | ~Same |
+| **Sum** | 94 µs | 91 µs | 253 µs | ~Same |
+| **Variance** | 207 µs | 692 µs | 2.2 ms | **3.3x faster** |
+| **Median** | 4.9 ms | 2.7 ms | 9.7 ms | 1.8x slower |
+| **Quantile** | 1.3 ms | 1.3 ms | 11.9 ms | ~Same |
 
 ### Window Functions (window=100)
 
 | Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
 |-----------|-------------|------------|------------|-------------------|
-| **Rolling Sum** | 1.5 ms | 9.9 ms | 6.0 ms | **6.6x faster** |
+| **Rolling Sum** | 1.5 ms | 10.1 ms | 6.1 ms | **6.7x faster** |
 | **Rolling Mean** | 1.5 ms | 10.0 ms | 5.1 ms | **6.7x faster** |
-| **Rolling Min** | 10.4 ms | 12.8 ms | 13.8 ms | **1.2x faster** |
-| **Rolling Max** | 10.9 ms | 12.9 ms | 14.3 ms | **1.2x faster** |
-| **Cumulative Sum** | 0.85 ms | 3.5 ms | 1.1 ms | **4.1x faster** |
-| **Diff** | 0.33 ms | 0.35 ms | 0.42 ms | ~Same |
-| **Lag/Shift** | 0.30 ms | 0.13 ms | 0.25 ms | 2.3x slower |
+| **Rolling Min** | 11.2 ms | 13.0 ms | 16.6 ms | **1.2x faster** |
+| **Rolling Max** | 9.2 ms | 13.1 ms | 15.0 ms | **1.4x faster** |
+| **Cumulative Sum** | 0.80 ms | 3.6 ms | 1.2 ms | **4.5x faster** |
+| **Diff** | 0.29 ms | 0.34 ms | 0.40 ms | **1.2x faster** |
+| **Lag/Shift** | 0.22 ms | 0.14 ms | 0.25 ms | 1.6x slower |
 
 ### Horizontal/Fold Operations (3 columns)
 
 | Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
 |-----------|-------------|------------|------------|-------------------|
-| **Sum Horizontal** | 0.36 ms | 1.0 ms | 65.6 ms | **2.8x faster** |
-| **Min Horizontal** | 0.36 ms | 1.6 ms | 73.0 ms | **4.4x faster** |
-| **Max Horizontal** | 0.38 ms | 0.74 ms | 60.0 ms | **1.9x faster** |
+| **Sum Horizontal** | 0.37 ms | 1.5 ms | 72.6 ms | **4.1x faster** |
+| **Min Horizontal** | 0.37 ms | 2.4 ms | 55.8 ms | **6.5x faster** |
+| **Max Horizontal** | 0.36 ms | 0.74 ms | 57.3 ms | **2.1x faster** |
 
-### GroupBy (Categorical, 100 categories)
+### Sort Operations
 
 | Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
 |-----------|-------------|------------|------------|-------------------|
-| **GroupBy Sum** | 2.3 ms | 1.7 ms | 7.0 ms | 1.4x slower |
+| **Sort (float64)** | 21.9 ms | 6.4 ms | 85.3 ms | 3.4x slower |
+| **Sort (int64)** | 90.7 ms | 6.1 ms | 72.6 ms | 14.9x slower |
+| **Argsort (float64)** | 16.8 ms | 20.3 ms | 77.7 ms | **1.2x faster** |
+
+### Join Operations (1M left × 500K right, 100K keys)
+
+| Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
+|-----------|-------------|------------|------------|-------------------|
+| **Inner Join** | 97.4 ms | 33.9 ms | 403.1 ms | 2.9x slower |
+| **Left Join** | 106.5 ms | 31.0 ms | 245.2 ms | 3.4x slower |
+
+### GroupBy Operations (1M rows, 100K groups)
+
+| Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
+|-----------|-------------|------------|------------|-------------------|
+| **GroupBy Sum** | 8.1 ms | 9.0 ms | 23.6 ms | **1.1x faster** |
+| **GroupBy Mean** | - | 9.7 ms | 22.5 ms | - |
+| **GroupBy Multi-Agg** | 9.9 ms | 11.2 ms | 40.3 ms | **1.1x faster** |
+
+### GroupBy (Categorical, 5 categories)
+
+| Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
+|-----------|-------------|------------|------------|-------------------|
+| **GroupBy Sum** | 2.3 ms | 1.9 ms | 6.9 ms | 1.2x slower |
 
 ### Statistics
 
 | Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
 |-----------|-------------|------------|------------|-------------------|
-| **Skewness** | 461 µs | 654 µs | 2.3 ms | **1.4x faster** |
-| **Kurtosis** | 301 µs | 698 µs | 2.2 ms | **2.3x faster** |
-| **Correlation** | 693 µs | N/A | N/A | - |
-| **StdDev** | 207 µs | 665 µs | 1.8 ms | **3.2x faster** |
+| **Skewness** | 435 µs | 846 µs | 2.7 ms | **1.9x faster** |
+| **Kurtosis** | 289 µs | 714 µs | 2.5 ms | **2.5x faster** |
+| **Correlation** | 698 µs | N/A | N/A | - |
+| **StdDev** | 217 µs | 808 µs | 2.1 ms | **3.7x faster** |
 
 ## Throughput (GB/s)
 
 | Library | **Sum** | **Filter** | **Rolling Sum** | **Horizontal Sum** |
 |---------|---------|------------|-----------------|-------------------|
-| **Galleon** | **85 GB/s** | 25 GB/s | 5.1 GB/s | **63 GB/s** |
-| **Polars** | 79 GB/s | - | - | - |
+| **Galleon** | **86 GB/s** | 25 GB/s | 5.3 GB/s | **66 GB/s** |
+| **Polars** | 90 GB/s | - | - | - |
 | **Pandas** | 32 GB/s | - | - | - |
 
 ## Performance Highlights
@@ -87,29 +110,34 @@ This document presents comprehensive benchmarks comparing Galleon with Polars an
 ═══════════════════════════════════════════════════════════════════════
 
 Rolling Sum (window=100):
-  Galleon  ██ 1.5ms                    ← 6.6x FASTER than Polars!
-  Polars   ████████████ 9.9ms
-  Pandas   ███████ 6.0ms
+  Galleon  ██ 1.5ms                    ← 6.7x FASTER than Polars!
+  Polars   █████████████ 10.1ms
+  Pandas   ███████ 6.1ms
 
 Horizontal Sum (3 cols):
-  Galleon  █ 0.36ms                    ← 2.8x FASTER than Polars!
-  Polars   ███ 1.0ms
-  Pandas   ████████████████████████████████████████████████████████████████ 65.6ms
+  Galleon  █ 0.37ms                    ← 4.1x FASTER than Polars!
+  Polars   ████ 1.5ms
+  Pandas   ████████████████████████████████████████████████████████████████ 72.6ms
 
 Variance:
   Galleon  █ 0.2ms                     ← 3.3x FASTER than Polars!
   Polars   ███ 0.7ms
-  Pandas   █████████ 1.8ms
+  Pandas   ██████████ 2.2ms
+
+StdDev:
+  Galleon  █ 0.22ms                    ← 3.7x FASTER than Polars!
+  Polars   ████ 0.81ms
+  Pandas   ██████████ 2.1ms
 
 Cumulative Sum:
-  Galleon  █ 0.85ms                    ← 4.1x FASTER than Polars!
-  Polars   ████ 3.5ms
-  Pandas   █ 1.1ms
+  Galleon  █ 0.80ms                    ← 4.5x FASTER than Polars!
+  Polars   ████ 3.6ms
+  Pandas   █ 1.2ms
 
-Sum Throughput:
-  Galleon  ████████████████████████████████████████████ 85 GB/s
-  Polars   ████████████████████████████████████████ 79 GB/s
-  Pandas   ████████████████ 32 GB/s
+GroupBy Sum (100K groups):
+  Galleon  ████████ 8.1ms              ← 1.1x FASTER than Polars!
+  Polars   █████████ 9.0ms
+  Pandas   ███████████████████████ 23.6ms
 ```
 
 ## Memory Efficiency
@@ -120,6 +148,7 @@ Sum Throughput:
 | Variance (1M) | 1 | 1 B |
 | Rolling Sum (1M) | 0 | 0 B |
 | Horizontal Sum (3×1M) | 0 | 0 B |
+| Argsort (1M) | 1 | 4 MB |
 | Categorical Create (1M) | 22 | 4 MB |
 
 ### Categorical vs String Memory (1M rows)
@@ -157,16 +186,21 @@ Sum Throughput:
 
 ### Excellent Fit
 - **Window functions**: 4-7x faster than Polars
-- **Horizontal aggregations**: 2-4x faster than Polars
-- **Variance/StdDev**: 3x faster than Polars
-- **Statistics (skewness, kurtosis)**: 1.4-2.3x faster than Polars
+- **Horizontal aggregations**: 2-6x faster than Polars
+- **Variance/StdDev**: 3-4x faster than Polars
+- **Statistics (skewness, kurtosis)**: 2-2.5x faster than Polars
+- **GroupBy (high cardinality)**: Slightly faster than Polars
 - **Go-native applications**: No Python/Rust interop needed
 - **Memory-constrained**: Zero-allocation core operations
 
 ### Competitive
 - **Core aggregations (sum, min, max)**: Equal to Polars
-- **GroupBy**: Slightly slower than Polars (1.4x)
-- **Median**: Slower than Polars (uses Floyd-Rivest vs nth_element)
+- **GroupBy (low cardinality)**: Slightly slower than Polars (1.2x)
+
+### Areas for Improvement
+- **Sort**: Currently slower than Polars (3-15x depending on type)
+- **Join**: Currently slower than Polars (3x)
+- **Median**: Slower than Polars (1.8x)
 
 ### Always Better Than Pandas
 - **Everything**: 2-100x faster across all operations
@@ -197,6 +231,7 @@ python3 compare_resources.py
 ```bash
 cd go
 go test -tags dev -bench='BenchmarkStats_|BenchmarkWindow_|BenchmarkFold_' -benchtime=1s
+go test -tags dev -bench='BenchmarkSortJoin_' -benchtime=1s
 go test -tags dev -bench='BenchmarkResource_' -benchmem -benchtime=1s
 ```
 
@@ -205,7 +240,7 @@ go test -tags dev -bench='BenchmarkResource_' -benchmem -benchtime=1s
 Benchmark results are saved to:
 - `go/benchmarks/compare_all_features.py` - Feature comparison
 - `go/benchmarks/compare_resources.py` - Resource consumption
-- `benchmarks/galleon_benchmark_results.json` - Go benchmark JSON
+- `go/benchmarks/run_all_benchmarks.sh` - Full benchmark script
 
 ---
 

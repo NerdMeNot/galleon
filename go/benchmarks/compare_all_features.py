@@ -233,6 +233,138 @@ def benchmark_fold(n):
     print_row("Max Horizontal (3 cols)", polars_ms, pandas_ms)
 
 # ============================================================================
+# Sort Benchmarks
+# ============================================================================
+
+def benchmark_sort(n):
+    print_header(f"SORT BENCHMARKS - {n:,} elements")
+    print(f"{'Operation':<30} {'Polars':>12} {'Pandas':>12}  {'Comparison'}")
+    print("-" * 70)
+
+    np.random.seed(SEED)
+    float_data = np.random.randn(n) * 100
+    int_data = np.random.randint(0, 1_000_000, n, dtype=np.int64)
+
+    if HAS_POLARS:
+        pl_series_f64 = pl.Series(float_data)
+        pl_series_i64 = pl.Series(int_data)
+
+    if HAS_PANDAS:
+        pd_series_f64 = pd.Series(float_data)
+        pd_series_i64 = pd.Series(int_data)
+
+    # Sort Float64
+    polars_ms = benchmark(lambda: pl_series_f64.sort()) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd_series_f64.sort_values()) if HAS_PANDAS else None
+    print_row("Sort (float64)", polars_ms, pandas_ms)
+
+    # Sort Int64
+    polars_ms = benchmark(lambda: pl_series_i64.sort()) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd_series_i64.sort_values()) if HAS_PANDAS else None
+    print_row("Sort (int64)", polars_ms, pandas_ms)
+
+    # Argsort (return indices)
+    polars_ms = benchmark(lambda: pl_series_f64.arg_sort()) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd_series_f64.argsort()) if HAS_PANDAS else None
+    print_row("Argsort (float64)", polars_ms, pandas_ms)
+
+# ============================================================================
+# Join Benchmarks
+# ============================================================================
+
+def benchmark_join(n):
+    print_header(f"JOIN BENCHMARKS - {n:,} left rows, {n//2:,} right rows, {n//10:,} keys")
+    print(f"{'Operation':<30} {'Polars':>12} {'Pandas':>12}  {'Comparison'}")
+    print("-" * 70)
+
+    np.random.seed(SEED)
+    num_keys = n // 10
+
+    # Left DataFrame: n rows
+    left_ids = np.random.randint(0, num_keys, n, dtype=np.int64)
+    left_vals = np.random.randn(n)
+
+    # Right DataFrame: n/2 rows
+    right_n = n // 2
+    right_ids = np.random.randint(0, num_keys, right_n, dtype=np.int64)
+    right_vals = np.random.randn(right_n)
+
+    if HAS_POLARS:
+        pl_left = pl.DataFrame({'id': left_ids, 'left_val': left_vals})
+        pl_right = pl.DataFrame({'id': right_ids, 'right_val': right_vals})
+
+    if HAS_PANDAS:
+        pd_left = pd.DataFrame({'id': left_ids, 'left_val': left_vals})
+        pd_right = pd.DataFrame({'id': right_ids, 'right_val': right_vals})
+
+    # Inner Join
+    polars_ms = benchmark(lambda: pl_left.join(pl_right, on='id', how='inner')) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd.merge(pd_left, pd_right, on='id', how='inner')) if HAS_PANDAS else None
+    print_row("Inner Join", polars_ms, pandas_ms)
+
+    # Left Join
+    polars_ms = benchmark(lambda: pl_left.join(pl_right, on='id', how='left')) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd.merge(pd_left, pd_right, on='id', how='left')) if HAS_PANDAS else None
+    print_row("Left Join", polars_ms, pandas_ms)
+
+# ============================================================================
+# GroupBy Benchmarks
+# ============================================================================
+
+def benchmark_groupby(n):
+    print_header(f"GROUPBY BENCHMARKS - {n:,} rows, {n//10:,} groups")
+    print(f"{'Operation':<30} {'Polars':>12} {'Pandas':>12}  {'Comparison'}")
+    print("-" * 70)
+
+    np.random.seed(SEED)
+    num_keys = n // 10
+
+    keys = np.random.randint(0, num_keys, n, dtype=np.int64)
+    values = np.random.randn(n)
+
+    if HAS_POLARS:
+        pl_df = pl.DataFrame({'key': keys, 'value': values})
+
+    if HAS_PANDAS:
+        pd_df = pd.DataFrame({'key': keys, 'value': values})
+
+    # GroupBy Sum
+    polars_ms = benchmark(lambda: pl_df.group_by('key').agg(pl.col('value').sum())) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd_df.groupby('key')['value'].sum()) if HAS_PANDAS else None
+    print_row("GroupBy Sum", polars_ms, pandas_ms)
+
+    # GroupBy Mean
+    polars_ms = benchmark(lambda: pl_df.group_by('key').agg(pl.col('value').mean())) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd_df.groupby('key')['value'].mean()) if HAS_PANDAS else None
+    print_row("GroupBy Mean", polars_ms, pandas_ms)
+
+    # GroupBy Min
+    polars_ms = benchmark(lambda: pl_df.group_by('key').agg(pl.col('value').min())) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd_df.groupby('key')['value'].min()) if HAS_PANDAS else None
+    print_row("GroupBy Min", polars_ms, pandas_ms)
+
+    # GroupBy Max
+    polars_ms = benchmark(lambda: pl_df.group_by('key').agg(pl.col('value').max())) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd_df.groupby('key')['value'].max()) if HAS_PANDAS else None
+    print_row("GroupBy Max", polars_ms, pandas_ms)
+
+    # GroupBy Count
+    polars_ms = benchmark(lambda: pl_df.group_by('key').agg(pl.col('value').count())) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd_df.groupby('key')['value'].count()) if HAS_PANDAS else None
+    print_row("GroupBy Count", polars_ms, pandas_ms)
+
+    # GroupBy Multi-Aggregation
+    polars_ms = benchmark(lambda: pl_df.group_by('key').agg([
+        pl.col('value').sum().alias('sum'),
+        pl.col('value').mean().alias('mean'),
+        pl.col('value').min().alias('min'),
+        pl.col('value').max().alias('max'),
+        pl.col('value').count().alias('count'),
+    ])) if HAS_POLARS else None
+    pandas_ms = benchmark(lambda: pd_df.groupby('key')['value'].agg(['sum', 'mean', 'min', 'max', 'count'])) if HAS_PANDAS else None
+    print_row("GroupBy Multi-Agg", polars_ms, pandas_ms)
+
+# ============================================================================
 # Categorical Benchmarks
 # ============================================================================
 
@@ -328,6 +460,9 @@ def main():
     benchmark_statistics(n)
     benchmark_window(n)
     benchmark_fold(n)
+    benchmark_sort(n)
+    benchmark_join(n)
+    benchmark_groupby(n)
     benchmark_categorical(n)
 
     print()
