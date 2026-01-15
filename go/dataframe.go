@@ -770,3 +770,114 @@ func (df *DataFrame) Describe() map[string]map[string]float64 {
 func (df *DataFrame) String() string {
 	return df.StringWithConfig(GetDisplayConfig())
 }
+
+// ============================================================================
+// ChunkedColumn Support
+// ============================================================================
+
+// HasChunkedColumns returns true if any column uses chunked storage.
+func (df *DataFrame) HasChunkedColumns() bool {
+	for _, col := range df.columns {
+		if col.IsChunked() {
+			return true
+		}
+	}
+	return false
+}
+
+// ChunkedColumnNames returns the names of columns that use chunked storage.
+func (df *DataFrame) ChunkedColumnNames() []string {
+	var names []string
+	for _, col := range df.columns {
+		if col.IsChunked() {
+			names = append(names, col.Name())
+		}
+	}
+	return names
+}
+
+// ToChunked returns a new DataFrame with all Float64 columns converted to chunked storage.
+// Chunked storage provides better cache performance for large datasets (>100K rows).
+// Non-Float64 columns are copied as-is.
+func (df *DataFrame) ToChunked() (*DataFrame, error) {
+	if df.height == 0 {
+		return df, nil
+	}
+
+	newCols := make([]*Series, len(df.columns))
+	for i, col := range df.columns {
+		if col.DType() == Float64 && !col.IsChunked() {
+			// Convert Float64 to chunked
+			data := col.Float64()
+			if data != nil {
+				newCols[i] = NewSeriesFloat64Chunked(col.Name(), data)
+				if newCols[i] == nil {
+					return nil, fmt.Errorf("failed to create chunked column for '%s'", col.Name())
+				}
+			} else {
+				newCols[i] = col
+			}
+		} else {
+			// Keep as-is (already chunked or non-Float64)
+			newCols[i] = col
+		}
+	}
+
+	return NewDataFrame(newCols...)
+}
+
+// ToFlat returns a new DataFrame with all chunked columns converted to flat storage.
+// This is the inverse of ToChunked.
+func (df *DataFrame) ToFlat() (*DataFrame, error) {
+	if df.height == 0 {
+		return df, nil
+	}
+
+	newCols := make([]*Series, len(df.columns))
+	for i, col := range df.columns {
+		if col.IsChunked() && col.DType() == Float64 {
+			// Convert chunked to flat
+			data := col.Float64() // This materializes the chunked data
+			if data != nil {
+				newCols[i] = NewSeriesFloat64(col.Name(), data)
+				if newCols[i] == nil {
+					return nil, fmt.Errorf("failed to create flat column for '%s'", col.Name())
+				}
+			} else {
+				newCols[i] = col
+			}
+		} else {
+			newCols[i] = col
+		}
+	}
+
+	return NewDataFrame(newCols...)
+}
+
+// NewDataFrameChunked creates a new DataFrame from columns, converting Float64 columns to chunked storage.
+// This is equivalent to NewDataFrame(...).ToChunked() but more efficient.
+func NewDataFrameChunked(columns ...*Series) (*DataFrame, error) {
+	if len(columns) == 0 {
+		return NewDataFrame()
+	}
+
+	// Convert Float64 columns to chunked
+	chunkedCols := make([]*Series, len(columns))
+	for i, col := range columns {
+		if col.DType() == Float64 && !col.IsChunked() {
+			data := col.Float64()
+			if data != nil {
+				chunkedCols[i] = NewSeriesFloat64Chunked(col.Name(), data)
+				if chunkedCols[i] == nil {
+					return nil, fmt.Errorf("failed to create chunked column for '%s'", col.Name())
+				}
+			} else {
+				chunkedCols[i] = col
+			}
+		} else {
+			chunkedCols[i] = col
+		}
+	}
+
+	return NewDataFrame(chunkedCols...)
+}

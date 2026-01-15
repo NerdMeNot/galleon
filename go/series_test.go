@@ -1687,3 +1687,318 @@ func findSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+// ============================================================================
+// Categorical Series Tests
+// ============================================================================
+
+func TestSeries_Categorical_Create(t *testing.T) {
+	data := []string{"apple", "banana", "apple", "cherry", "banana", "apple"}
+	s := NewSeriesCategorical("fruits", data)
+
+	if s == nil {
+		t.Fatal("NewSeriesCategorical returned nil")
+	}
+
+	if s.Len() != 6 {
+		t.Errorf("Expected length 6, got %d", s.Len())
+	}
+
+	if s.DType() != Categorical {
+		t.Errorf("Expected dtype Categorical, got %s", s.DType())
+	}
+
+	if s.NumCategories() != 3 {
+		t.Errorf("Expected 3 categories, got %d", s.NumCategories())
+	}
+
+	categories := s.Categories()
+	if len(categories) != 3 {
+		t.Errorf("Expected 3 categories, got %d", len(categories))
+	}
+}
+
+func TestSeries_Categorical_Get(t *testing.T) {
+	data := []string{"apple", "banana", "apple", "cherry"}
+	s := NewSeriesCategorical("fruits", data)
+
+	// Get should return the string value, not the index
+	if s.Get(0) != "apple" {
+		t.Errorf("Get(0) expected 'apple', got '%v'", s.Get(0))
+	}
+	if s.Get(1) != "banana" {
+		t.Errorf("Get(1) expected 'banana', got '%v'", s.Get(1))
+	}
+	if s.Get(2) != "apple" {
+		t.Errorf("Get(2) expected 'apple', got '%v'", s.Get(2))
+	}
+	if s.Get(3) != "cherry" {
+		t.Errorf("Get(3) expected 'cherry', got '%v'", s.Get(3))
+	}
+}
+
+func TestSeries_Categorical_Indices(t *testing.T) {
+	data := []string{"apple", "banana", "apple", "cherry", "banana"}
+	s := NewSeriesCategorical("fruits", data)
+
+	indices := s.CategoricalIndices()
+	if len(indices) != 5 {
+		t.Fatalf("Expected 5 indices, got %d", len(indices))
+	}
+
+	// Verify indices are consistent: same string = same index
+	if indices[0] != indices[2] {
+		t.Error("'apple' at positions 0 and 2 should have same index")
+	}
+	if indices[1] != indices[4] {
+		t.Error("'banana' at positions 1 and 4 should have same index")
+	}
+	if indices[0] == indices[1] {
+		t.Error("'apple' and 'banana' should have different indices")
+	}
+}
+
+func TestSeries_Categorical_AsCategorical(t *testing.T) {
+	// Convert String series to Categorical
+	strSeries := NewSeriesString("fruits", []string{"apple", "banana", "apple"})
+	catSeries := strSeries.AsCategorical()
+
+	if catSeries == nil {
+		t.Fatal("AsCategorical returned nil")
+	}
+	if catSeries.DType() != Categorical {
+		t.Errorf("Expected Categorical dtype, got %s", catSeries.DType())
+	}
+	if catSeries.NumCategories() != 2 {
+		t.Errorf("Expected 2 categories, got %d", catSeries.NumCategories())
+	}
+}
+
+func TestSeries_Categorical_AsString(t *testing.T) {
+	catSeries := NewSeriesCategorical("fruits", []string{"apple", "banana", "apple"})
+	strSeries := catSeries.AsString()
+
+	if strSeries == nil {
+		t.Fatal("AsString returned nil")
+	}
+	if strSeries.DType() != String {
+		t.Errorf("Expected String dtype, got %s", strSeries.DType())
+	}
+
+	// Verify values are preserved
+	strings := strSeries.Strings()
+	if strings[0] != "apple" || strings[1] != "banana" || strings[2] != "apple" {
+		t.Error("String values not preserved in conversion")
+	}
+}
+
+func TestSeries_Categorical_WithCategories(t *testing.T) {
+	// Pre-defined categories
+	categories := []string{"apple", "banana", "cherry", "date"}
+	data := []string{"banana", "apple", "cherry"}
+
+	s, err := NewSeriesCategoricalWithCategories("fruits", data, categories)
+	if err != nil {
+		t.Fatalf("NewSeriesCategoricalWithCategories failed: %v", err)
+	}
+
+	if s.NumCategories() != 4 {
+		t.Errorf("Expected 4 categories, got %d", s.NumCategories())
+	}
+
+	// Verify the indices match the predefined category order
+	// "banana" should be index 1, "apple" should be index 0
+	indices := s.CategoricalIndices()
+	if indices[0] != 1 { // banana
+		t.Errorf("Expected index 1 for 'banana', got %d", indices[0])
+	}
+	if indices[1] != 0 { // apple
+		t.Errorf("Expected index 0 for 'apple', got %d", indices[1])
+	}
+}
+
+func TestSeries_Categorical_WithCategories_Unknown(t *testing.T) {
+	categories := []string{"apple", "banana"}
+	data := []string{"apple", "unknown"} // "unknown" not in categories
+
+	_, err := NewSeriesCategoricalWithCategories("fruits", data, categories)
+	if err == nil {
+		t.Error("Expected error for unknown category value")
+	}
+}
+
+func TestSeries_Categorical_Empty(t *testing.T) {
+	s := NewSeriesCategorical("empty", []string{})
+
+	if s.Len() != 0 {
+		t.Errorf("Expected length 0, got %d", s.Len())
+	}
+	if s.NumCategories() != 0 {
+		t.Errorf("Expected 0 categories, got %d", s.NumCategories())
+	}
+}
+
+func TestSeries_Categorical_SingleValue(t *testing.T) {
+	s := NewSeriesCategorical("single", []string{"only"})
+
+	if s.Len() != 1 {
+		t.Errorf("Expected length 1, got %d", s.Len())
+	}
+	if s.NumCategories() != 1 {
+		t.Errorf("Expected 1 category, got %d", s.NumCategories())
+	}
+	if s.Get(0) != "only" {
+		t.Errorf("Expected 'only', got '%v'", s.Get(0))
+	}
+}
+
+func TestSeries_Categorical_Display(t *testing.T) {
+	s := NewSeriesCategorical("fruits", []string{"apple", "banana", "apple"})
+	str := s.String()
+
+	// Verify dtype is shown
+	if !containsSubstring(str, "Categorical") {
+		t.Error("Display should show 'Categorical' dtype")
+	}
+	// Verify name is shown
+	if !containsSubstring(str, "fruits") {
+		t.Error("Display should show series name")
+	}
+}
+
+// ============================================================================
+// Chunked Series Tests
+// ============================================================================
+
+func TestNewSeriesFloat64Chunked(t *testing.T) {
+	data := []float64{1.0, 2.0, 3.0, 4.0, 5.0}
+	s := NewSeriesFloat64Chunked("test", data)
+
+	if s == nil {
+		t.Fatal("NewSeriesFloat64Chunked returned nil")
+	}
+	if !s.IsChunked() {
+		t.Error("IsChunked() = false, want true")
+	}
+	if s.Name() != "test" {
+		t.Errorf("Name() = %q, want %q", s.Name(), "test")
+	}
+	if s.DType() != Float64 {
+		t.Errorf("DType() = %v, want %v", s.DType(), Float64)
+	}
+	if s.Len() != 5 {
+		t.Errorf("Len() = %d, want 5", s.Len())
+	}
+}
+
+func TestChunkedSeriesAggregations(t *testing.T) {
+	data := []float64{1.0, 2.0, 3.0, 4.0, 5.0}
+	s := NewSeriesFloat64Chunked("test", data)
+
+	if s == nil {
+		t.Fatal("NewSeriesFloat64Chunked returned nil")
+	}
+
+	// Test Sum
+	sum := s.Sum()
+	if math.Abs(sum-15.0) > 0.001 {
+		t.Errorf("Sum() = %f, want 15.0", sum)
+	}
+
+	// Test Min
+	min := s.Min()
+	if math.Abs(min-1.0) > 0.001 {
+		t.Errorf("Min() = %f, want 1.0", min)
+	}
+
+	// Test Max
+	max := s.Max()
+	if math.Abs(max-5.0) > 0.001 {
+		t.Errorf("Max() = %f, want 5.0", max)
+	}
+
+	// Test Mean
+	mean := s.Mean()
+	if math.Abs(mean-3.0) > 0.001 {
+		t.Errorf("Mean() = %f, want 3.0", mean)
+	}
+}
+
+func TestChunkedSeriesDataAccess(t *testing.T) {
+	data := []float64{1.0, 2.0, 3.0, 4.0, 5.0}
+	s := NewSeriesFloat64Chunked("test", data)
+
+	if s == nil {
+		t.Fatal("NewSeriesFloat64Chunked returned nil")
+	}
+
+	// Test Get
+	val := s.Get(2)
+	if val.(float64) != 3.0 {
+		t.Errorf("Get(2) = %v, want 3.0", val)
+	}
+
+	// Test GetFloat64
+	f64, ok := s.GetFloat64(2)
+	if !ok || f64 != 3.0 {
+		t.Errorf("GetFloat64(2) = (%f, %v), want (3.0, true)", f64, ok)
+	}
+
+	// Test Float64 slice
+	slice := s.Float64()
+	if len(slice) != 5 {
+		t.Errorf("Float64() len = %d, want 5", len(slice))
+	}
+	for i, v := range data {
+		if slice[i] != v {
+			t.Errorf("Float64()[%d] = %f, want %f", i, slice[i], v)
+		}
+	}
+}
+
+func TestChunkedSeriesSort(t *testing.T) {
+	data := []float64{5.0, 2.0, 8.0, 1.0, 9.0}
+	s := NewSeriesFloat64Chunked("test", data)
+
+	if s == nil {
+		t.Fatal("NewSeriesFloat64Chunked returned nil")
+	}
+
+	sorted := s.Sort()
+	if sorted == nil {
+		t.Fatal("Sort() returned nil")
+	}
+	if !sorted.IsChunked() {
+		t.Error("Sorted series should be chunked")
+	}
+
+	expected := []float64{1.0, 2.0, 5.0, 8.0, 9.0}
+	slice := sorted.Float64()
+	for i, v := range expected {
+		if slice[i] != v {
+			t.Errorf("Sorted[%d] = %f, want %f", i, slice[i], v)
+		}
+	}
+}
+
+func TestChunkedSeriesArgsort(t *testing.T) {
+	data := []float64{5.0, 2.0, 8.0, 1.0, 9.0}
+	s := NewSeriesFloat64Chunked("test", data)
+
+	if s == nil {
+		t.Fatal("NewSeriesFloat64Chunked returned nil")
+	}
+
+	indices := s.Argsort(true)
+	if indices == nil {
+		t.Fatal("Argsort() returned nil")
+	}
+
+	// Sorted order: 1.0 (idx 3), 2.0 (idx 1), 5.0 (idx 0), 8.0 (idx 2), 9.0 (idx 4)
+	expected := []uint32{3, 1, 0, 2, 4}
+	for i, v := range expected {
+		if indices[i] != v {
+			t.Errorf("Argsort[%d] = %d, want %d", i, indices[i], v)
+		}
+	}
+}

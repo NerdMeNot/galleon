@@ -1,7 +1,7 @@
 //! Advanced statistical operations with SIMD acceleration.
 //!
 //! This module provides advanced aggregation functions including:
-//! - Median (quickselect O(n) average case)
+//! - Median (Floyd-Rivest O(n) with lower constants)
 //! - Quantile (percentile computation)
 //! - Skewness (3rd standardized moment)
 //! - Kurtosis (4th standardized moment)
@@ -15,11 +15,11 @@ const VECTOR_WIDTH = core.VECTOR_WIDTH;
 const CHUNK_SIZE = core.CHUNK_SIZE;
 
 // ============================================================================
-// Median (Quickselect Algorithm)
+// Median (Floyd-Rivest Algorithm)
 // ============================================================================
 
-/// Compute median using the quickselect algorithm.
-/// Average case O(n), worst case O(n²).
+/// Compute median using the Floyd-Rivest algorithm.
+/// O(n) with very low constants due to sampling-based pivot selection.
 /// Returns null for empty input.
 pub fn median(comptime T: type, data: []const T, allocator: std.mem.Allocator) ?T {
     if (data.len == 0) return null;
@@ -33,90 +33,197 @@ pub fn median(comptime T: type, data: []const T, allocator: std.mem.Allocator) ?
     const n = data.len;
     if (n % 2 == 1) {
         // Odd length: return middle element
-        return quickselect(T, copy, n / 2);
+        return floydRivestSelect(T, copy, 0, n - 1, n / 2);
     } else {
         // Even length: average of two middle elements
-        const lower = quickselect(T, copy, n / 2 - 1) orelse return null;
-        const upper = quickselect(T, copy, n / 2) orelse return null;
+        const lower = floydRivestSelect(T, copy, 0, n - 1, n / 2 - 1) orelse return null;
+        // After selection, element at n/2-1 is in place, and all elements >= n/2 are >= lower
+        // Find minimum of right partition for upper median
+        var upper = copy[n / 2];
+        for (copy[n / 2 + 1 ..]) |v| {
+            if (v < upper) upper = v;
+        }
         return (lower + upper) / 2.0;
     }
 }
 
-/// Quickselect: find k-th smallest element in O(n) average time.
-fn quickselect(comptime T: type, data: []T, k: usize) ?T {
+/// Floyd-Rivest selection algorithm.
+/// Finds the k-th smallest element (0-indexed) in expected O(n) time
+/// with very low constants due to sampling-based approach.
+///
+/// Algorithm overview:
+/// 1. For small arrays (< 600), use simple selection sort
+/// 2. For larger arrays, take a sample and use percentiles to narrow bounds
+/// 3. Recursively select within narrowed bounds
+fn floydRivestSelect(comptime T: type, data: []T, left_init: usize, right_init: usize, k: usize) ?T {
     if (data.len == 0) return null;
-    if (data.len == 1) return data[0];
+    if (k >= data.len) return null;
 
-    var left: usize = 0;
-    var right: usize = data.len - 1;
+    var left = left_init;
+    var right = right_init;
 
-    while (left < right) {
-        const pivot_idx = partition(T, data, left, right);
+    while (right > left) {
+        // For large arrays, use sampling to find better bounds
+        if (right - left > 600) {
+            const n = right - left + 1;
+            const i_float = @as(T, @floatFromInt(k - left + 1));
+            const n_float = @as(T, @floatFromInt(n));
 
-        if (pivot_idx == k) {
-            return data[pivot_idx];
-        } else if (pivot_idx > k) {
-            right = pivot_idx - 1;
-        } else {
-            left = pivot_idx + 1;
+            // Compute sample size (based on Floyd-Rivest paper)
+            const z = @log(n_float);
+            const s = 0.5 * @exp(2.0 * z / 3.0);
+
+            // Compute standard deviation adjustment
+            const sd = 0.5 * @sqrt(z * s * (n_float - s) / n_float) *
+                @as(T, if (i_float - n_float / 2.0 < 0) -1.0 else 1.0);
+
+            // Compute sample bounds
+            const new_left_f = @max(
+                @as(T, @floatFromInt(left)),
+                @floor(@as(T, @floatFromInt(k)) - i_float * s / n_float + sd),
+            );
+            const new_right_f = @min(
+                @as(T, @floatFromInt(right)),
+                @floor(@as(T, @floatFromInt(k)) + (n_float - i_float) * s / n_float + sd),
+            );
+
+            const new_left = @as(usize, @intFromFloat(new_left_f));
+            const new_right = @as(usize, @intFromFloat(new_right_f));
+
+            // Recursively select within sample to position bounds
+            _ = floydRivestSelect(T, data, new_left, new_right, k);
         }
-    }
 
-    return data[left];
-}
+        // Standard three-way partition around data[k]
+        const pivot = data[k];
+        var i = left;
+        var j = right;
 
-/// Partition around pivot (Lomuto scheme)
-fn partition(comptime T: type, data: []T, left: usize, right: usize) usize {
-    // Use median-of-three for pivot selection to improve worst-case
-    const mid = left + (right - left) / 2;
+        // Swap pivot to left position
+        std.mem.swap(T, &data[left], &data[k]);
 
-    // Sort left, mid, right and use mid as pivot
-    if (data[mid] < data[left]) std.mem.swap(T, &data[left], &data[mid]);
-    if (data[right] < data[left]) std.mem.swap(T, &data[left], &data[right]);
-    if (data[mid] < data[right]) std.mem.swap(T, &data[mid], &data[right]);
+        // Check if right element should be swapped
+        if (data[right] > pivot) {
+            std.mem.swap(T, &data[left], &data[right]);
+        }
 
-    const pivot = data[right];
-    var i = left;
-
-    var j: usize = left;
-    while (j < right) : (j += 1) {
-        if (data[j] <= pivot) {
+        // Partition
+        while (i < j) {
             std.mem.swap(T, &data[i], &data[j]);
             i += 1;
+            if (j == 0) break;
+            j -= 1;
+
+            while (i < data.len and data[i] < pivot) : (i += 1) {}
+            while (j > 0 and data[j] > pivot) : (j -= 1) {}
+        }
+
+        // Place pivot in final position
+        if (data[left] == pivot) {
+            std.mem.swap(T, &data[left], &data[j]);
+        } else {
+            j += 1;
+            std.mem.swap(T, &data[j], &data[right]);
+        }
+
+        // Narrow search range (with overflow protection)
+        if (j <= k) {
+            left = j + 1;
+        }
+        if (k <= j) {
+            if (j == 0) break;
+            right = j - 1;
         }
     }
 
-    std.mem.swap(T, &data[i], &data[right]);
-    return i;
+    return data[k];
+}
+
+/// Simple insertion sort for very small arrays (used as base case)
+fn insertionSort(comptime T: type, data: []T) void {
+    if (data.len < 2) return;
+
+    for (1..data.len) |i| {
+        const key = data[i];
+        var j = i;
+        while (j > 0 and data[j - 1] > key) : (j -= 1) {
+            data[j] = data[j - 1];
+        }
+        data[j] = key;
+    }
 }
 
 // ============================================================================
 // Quantile
 // ============================================================================
 
-/// Compute quantile (percentile / 100) using linear interpolation.
+/// Compute quantile (percentile / 100) using Floyd-Rivest + linear interpolation.
 /// q should be in range [0, 1].
 /// Returns null for empty input or invalid q.
+/// Uses O(n) Floyd-Rivest selection instead of O(n log n) sort.
 pub fn quantile(comptime T: type, data: []const T, q: T, allocator: std.mem.Allocator) ?T {
     if (data.len == 0) return null;
     if (q < 0 or q > 1) return null;
     if (data.len == 1) return data[0];
 
-    // Make a sorted copy
+    // Make a mutable copy for in-place selection
     const copy = allocator.alloc(T, data.len) catch return null;
     defer allocator.free(copy);
     @memcpy(copy, data);
 
-    std.mem.sort(T, copy, {}, std.sort.asc(T));
-
-    // Linear interpolation (like numpy's default)
+    // Calculate indices for interpolation
     const n = @as(T, @floatFromInt(data.len - 1));
     const idx = q * n;
     const lower_idx = @as(usize, @intFromFloat(@floor(idx)));
     const upper_idx = @min(lower_idx + 1, data.len - 1);
     const frac = idx - @floor(idx);
 
-    return copy[lower_idx] * (1.0 - frac) + copy[upper_idx] * frac;
+    // Use Floyd-Rivest to find the lower element - O(n)
+    const lower_val = floydRivestSelect(T, copy, 0, data.len - 1, lower_idx) orelse return null;
+
+    // If we need interpolation, find the minimum of remaining elements
+    // After selection, all elements at index > lower_idx are >= lower_val
+    // So we just need to find the min of copy[lower_idx+1..] which is O(n-k) with SIMD
+    if (frac > 0 and upper_idx != lower_idx and lower_idx + 1 < data.len) {
+        // Find minimum in the right partition (all >= lower_val) using SIMD
+        const right_slice = copy[lower_idx + 1 ..];
+        if (right_slice.len > 0) {
+            const upper_val = findMinSIMD(T, right_slice);
+            return lower_val * (1.0 - frac) + upper_val * frac;
+        }
+    }
+
+    return lower_val;
+}
+
+/// SIMD-accelerated minimum finding for quantile interpolation
+fn findMinSIMD(comptime T: type, data: []const T) T {
+    if (data.len == 0) return 0;
+    if (data.len == 1) return data[0];
+
+    const Vec = @Vector(VECTOR_WIDTH, T);
+
+    // Initialize with first element
+    var min_vec: Vec = @splat(data[0]);
+
+    const aligned_len = data.len - (data.len % VECTOR_WIDTH);
+    var i: usize = 0;
+
+    // Process vectors
+    while (i < aligned_len) : (i += VECTOR_WIDTH) {
+        const chunk: Vec = data[i..][0..VECTOR_WIDTH].*;
+        min_vec = @min(min_vec, chunk);
+    }
+
+    // Reduce vector to scalar
+    var result = @reduce(.Min, min_vec);
+
+    // Handle tail
+    while (i < data.len) : (i += 1) {
+        if (data[i] < result) result = data[i];
+    }
+
+    return result;
 }
 
 // ============================================================================

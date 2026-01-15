@@ -144,6 +144,13 @@ pub const hashInt64Columns = mod.hashInt64Columns;
 pub const rapidHash64 = mod.rapidHash64;
 pub const fastIntHash = mod.fastIntHash;
 
+// Parallel hash functions (using Blitz work-stealing)
+pub const parallelHashInt64Column = mod.parallelHashInt64Column;
+pub const parallelHashInt32Column = mod.parallelHashInt32Column;
+pub const parallelHashFloat64Column = mod.parallelHashFloat64Column;
+pub const parallelHashFloat32Column = mod.parallelHashFloat32Column;
+pub const parallelCombineHashes = mod.parallelCombineHashes;
+
 // Re-export gather functions
 pub const gatherF64 = mod.gatherF64;
 pub const gatherI64 = mod.gatherI64;

@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  benchmark:
+    build:
+      context: ../..
+      dockerfile: go/benchmarks/Dockerfile
+    volumes:
+      # Mount results directory for output
+      - ./results:/results
+    environment:
+      - GOMAXPROCS=8

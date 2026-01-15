@@ -29,11 +29,33 @@ size_t galleon_column_f64_len(const ColumnF64* col);
 double galleon_column_f64_get(const ColumnF64* col, size_t index);
 const double* galleon_column_f64_data(const ColumnF64* col);
 
-// Float64 Aggregations
+// Float64 Aggregations (auto-parallelized for large data via Blitz)
 double galleon_sum_f64(const double* data, size_t len);
 double galleon_min_f64(const double* data, size_t len);
 double galleon_max_f64(const double* data, size_t len);
 double galleon_mean_f64(const double* data, size_t len);
+
+// ============================================================================
+// SIMD Configuration (Runtime CPU Feature Detection)
+// ============================================================================
+
+// SIMD levels:
+// 0 = Scalar (no SIMD or fallback)
+// 1 = SSE4 (128-bit vectors) / ARM NEON
+// 2 = AVX2 (256-bit vectors)
+// 3 = AVX-512 (512-bit vectors)
+
+// Get the detected SIMD level being used
+uint8_t galleon_get_simd_level(void);
+
+// Override the SIMD level (for testing or compatibility)
+void galleon_set_simd_level(uint8_t level);
+
+// Get the SIMD level name as a string ("Scalar", "SSE4", "AVX2", "AVX-512")
+const char* galleon_get_simd_level_name(void);
+
+// Get the vector width in bytes for the current SIMD level
+size_t galleon_get_simd_vector_bytes(void);
 
 // ============================================================================
 // Thread Configuration
@@ -47,6 +69,30 @@ size_t galleon_get_max_threads(void);
 
 // Check if thread count was auto-detected
 bool galleon_is_threads_auto_detected(void);
+
+// ============================================================================
+// Blitz Work-Stealing Thread Pool (Diagnostic Functions)
+// ============================================================================
+// Note: Blitz auto-initializes on first use. These functions are for diagnostics
+// and explicit lifecycle management. The regular galleon_* functions automatically
+// use Blitz for large data (>100K elements).
+
+// Initialize the Blitz work-stealing thread pool (optional - auto-initializes)
+// Returns true on success, false on failure
+bool blitz_init(void);
+
+// Shutdown the Blitz thread pool and free resources
+void blitz_deinit(void);
+
+// Check if Blitz pool is initialized
+bool blitz_is_initialized(void);
+
+// Get the number of worker threads
+uint32_t blitz_num_workers(void);
+
+// ============================================================================
+// Float64 Vectorized Operations
+// ============================================================================
 
 // Float64 Vectorized Operations
 void galleon_add_scalar_f64(double* data, size_t len, double scalar);
@@ -428,6 +474,43 @@ void galleon_all_horizontal2(const uint8_t* a, const uint8_t* b, uint8_t* out, s
 // Count non-null values across columns
 void galleon_count_non_null_horizontal2_f64(const double* a, const double* b, uint32_t* out, size_t len);
 void galleon_count_non_null_horizontal3_f64(const double* a, const double* b, const double* c, uint32_t* out, size_t len);
+
+// ============================================================================
+// ChunkedColumn V2 Operations (Cache-Friendly Chunk-Based Storage)
+// ============================================================================
+// ChunkedColumn stores data in L2-cache-sized chunks for optimal performance.
+// Operations process chunk-by-chunk, always cache-warm.
+
+typedef struct ChunkedColumnF64Handle ChunkedColumnF64Handle;
+typedef struct ChunkedArgsortResult ChunkedArgsortResult;
+
+// Creation and destruction
+ChunkedColumnF64Handle* galleon_chunked_f64_create(const double* data, size_t len);
+void galleon_chunked_f64_destroy(ChunkedColumnF64Handle* col);
+
+// Basic accessors
+size_t galleon_chunked_f64_len(const ChunkedColumnF64Handle* col);
+size_t galleon_chunked_f64_num_chunks(const ChunkedColumnF64Handle* col);
+double galleon_chunked_f64_get(const ChunkedColumnF64Handle* col, size_t index);
+void galleon_chunked_f64_copy_to_slice(const ChunkedColumnF64Handle* col, double* out);
+
+// Aggregations (parallel over chunks)
+double galleon_chunked_f64_sum(const ChunkedColumnF64Handle* col);
+double galleon_chunked_f64_min(const ChunkedColumnF64Handle* col);
+double galleon_chunked_f64_max(const ChunkedColumnF64Handle* col);
+double galleon_chunked_f64_mean(const ChunkedColumnF64Handle* col);
+
+// Filtering (returns new chunked column)
+ChunkedColumnF64Handle* galleon_chunked_f64_filter_gt(const ChunkedColumnF64Handle* col, double threshold);
+ChunkedColumnF64Handle* galleon_chunked_f64_filter_lt(const ChunkedColumnF64Handle* col, double threshold);
+
+// Sorting
+ChunkedArgsortResult* galleon_chunked_f64_argsort(ChunkedColumnF64Handle* col);
+size_t galleon_chunked_argsort_len(const ChunkedArgsortResult* result);
+const uint32_t* galleon_chunked_argsort_indices(const ChunkedArgsortResult* result);
+void galleon_chunked_argsort_destroy(ChunkedArgsortResult* result);
+
+ChunkedColumnF64Handle* galleon_chunked_f64_sort(ChunkedColumnF64Handle* col);
 
 #ifdef __cplusplus
 }

@@ -176,30 +176,57 @@ pub fn cumMax(comptime T: type, data: []const T, out: []T) void {
 // ============================================================================
 
 /// Compute rolling sum with fixed window size.
-/// Uses sliding window technique for O(n) complexity.
+/// Uses sliding window technique for O(n) complexity with SIMD optimization.
 pub fn rollingSum(comptime T: type, data: []const T, window_size: usize, min_periods: usize, out: []T) void {
     if (data.len == 0 or window_size == 0) return;
 
     const effective_min_periods = @max(min_periods, 1);
+
+    // Fill NaN/0 for positions below min_periods
+    const nan_fill = if (@typeInfo(T) == .float) std.math.nan(T) else 0;
+    for (0..@min(effective_min_periods - 1, data.len)) |i| {
+        out[i] = nan_fill;
+    }
+
+    if (data.len < effective_min_periods) return;
+
+    // Compute initial window sum using SIMD
+    const Vec = @Vector(VECTOR_WIDTH, T);
     var sum: T = 0;
 
-    // Initial window buildup
-    for (0..data.len) |i| {
+    // Initial sum buildup with SIMD
+    const init_len = @min(window_size, data.len);
+    const init_aligned = init_len - (init_len % VECTOR_WIDTH);
+    var i: usize = 0;
+
+    if (init_aligned >= VECTOR_WIDTH) {
+        var vec_sum: Vec = @splat(0);
+        while (i < init_aligned) : (i += VECTOR_WIDTH) {
+            const chunk: Vec = data[i..][0..VECTOR_WIDTH].*;
+            vec_sum += chunk;
+        }
+        sum = @reduce(.Add, vec_sum);
+    }
+
+    // Scalar tail for initial window
+    while (i < init_len) : (i += 1) {
         sum += data[i];
+    }
 
-        // Remove element leaving window
-        if (i >= window_size) {
-            sum -= data[i - window_size];
+    // Output initial window sums
+    var running_sum: T = 0;
+    for (0..init_len) |j| {
+        running_sum += data[j];
+        if (j + 1 >= effective_min_periods) {
+            out[j] = running_sum;
         }
+    }
 
-        // Determine if we have enough periods
-        const periods = @min(i + 1, window_size);
-        if (periods >= effective_min_periods) {
-            out[i] = sum;
-        } else {
-            // NaN for floats, 0 for integers when below min_periods
-            out[i] = if (@typeInfo(T) == .float) std.math.nan(T) else 0;
-        }
+    // Sliding window: add new element, subtract old element
+    // This part is inherently sequential but we batch the operations
+    for (window_size..data.len) |j| {
+        running_sum = running_sum + data[j] - data[j - window_size];
+        out[j] = running_sum;
     }
 }
 
@@ -228,12 +255,14 @@ pub fn rollingMean(comptime T: type, data: []const T, window_size: usize, min_pe
 }
 
 /// Compute rolling min with fixed window size.
-/// Uses monotonic deque for O(n) complexity.
+/// Uses monotonic deque with circular buffer for O(n) complexity.
 pub fn rollingMin(comptime T: type, data: []const T, window_size: usize, min_periods: usize, out: []T, allocator: std.mem.Allocator) void {
     if (data.len == 0 or window_size == 0) return;
 
     // Monotonic deque: stores indices where values are in increasing order
-    const deque = allocator.alloc(usize, window_size) catch {
+    // Size is window_size + 1 to handle circular buffer properly
+    const deque_size = window_size + 1;
+    const deque = allocator.alloc(usize, deque_size) catch {
         // Fallback to naive O(n*k) implementation
         rollingMinNaive(T, data, window_size, min_periods, out);
         return;
@@ -246,23 +275,23 @@ pub fn rollingMin(comptime T: type, data: []const T, window_size: usize, min_per
 
     for (0..data.len) |i| {
         // Remove elements outside window
-        while (front < back and deque[front] + window_size <= i) {
+        while (front != back and deque[front % deque_size] + window_size <= i) {
             front += 1;
         }
 
         // Remove elements larger than current (maintain monotonic increasing)
-        while (front < back and data[deque[back - 1]] >= data[i]) {
+        while (front != back and data[deque[(back - 1) % deque_size]] >= data[i]) {
             back -= 1;
         }
 
         // Add current element
-        deque[back] = i;
+        deque[back % deque_size] = i;
         back += 1;
 
         // Output
         const periods = @min(i + 1, window_size);
         if (periods >= effective_min_periods) {
-            out[i] = data[deque[front]];
+            out[i] = data[deque[front % deque_size]];
         } else {
             out[i] = if (@typeInfo(T) == .float) std.math.nan(T) else 0;
         }
@@ -289,11 +318,13 @@ fn rollingMinNaive(comptime T: type, data: []const T, window_size: usize, min_pe
 }
 
 /// Compute rolling max with fixed window size.
-/// Uses monotonic deque for O(n) complexity.
+/// Uses monotonic deque with circular buffer for O(n) complexity.
 pub fn rollingMax(comptime T: type, data: []const T, window_size: usize, min_periods: usize, out: []T, allocator: std.mem.Allocator) void {
     if (data.len == 0 or window_size == 0) return;
 
-    const deque = allocator.alloc(usize, window_size) catch {
+    // Size is window_size + 1 to handle circular buffer properly
+    const deque_size = window_size + 1;
+    const deque = allocator.alloc(usize, deque_size) catch {
         rollingMaxNaive(T, data, window_size, min_periods, out);
         return;
     };
@@ -305,21 +336,21 @@ pub fn rollingMax(comptime T: type, data: []const T, window_size: usize, min_per
 
     for (0..data.len) |i| {
         // Remove elements outside window
-        while (front < back and deque[front] + window_size <= i) {
+        while (front != back and deque[front % deque_size] + window_size <= i) {
             front += 1;
         }
 
         // Remove elements smaller than current (maintain monotonic decreasing)
-        while (front < back and data[deque[back - 1]] <= data[i]) {
+        while (front != back and data[deque[(back - 1) % deque_size]] <= data[i]) {
             back -= 1;
         }
 
-        deque[back] = i;
+        deque[back % deque_size] = i;
         back += 1;
 
         const periods = @min(i + 1, window_size);
         if (periods >= effective_min_periods) {
-            out[i] = data[deque[front]];
+            out[i] = data[deque[front % deque_size]];
         } else {
             out[i] = if (@typeInfo(T) == .float) std.math.nan(T) else 0;
         }
@@ -390,14 +421,30 @@ pub fn rollingStd(comptime T: type, data: []const T, window_size: usize, min_per
 // Diff Operation
 // ============================================================================
 
-/// Compute first difference (data[i] - data[i-1]).
+/// Compute first difference (data[i] - data[i-1]) with SIMD.
 /// First element gets default value.
 pub fn diff(comptime T: type, data: []const T, default: T, out: []T) void {
     if (data.len == 0) return;
 
     out[0] = default;
-    for (1..data.len) |i| {
-        out[i] = data[i] - data[i - 1];
+    if (data.len == 1) return;
+
+    const Vec = @Vector(VECTOR_WIDTH, T);
+    const len = data.len - 1; // Number of differences to compute
+    const aligned_len = len - (len % VECTOR_WIDTH);
+
+    var i: usize = 0;
+    while (i < aligned_len) : (i += VECTOR_WIDTH) {
+        // Load current and previous values
+        const current: Vec = data[i + 1 ..][0..VECTOR_WIDTH].*;
+        const prev: Vec = data[i..][0..VECTOR_WIDTH].*;
+        const result = current - prev;
+        out[i + 1 ..][0..VECTOR_WIDTH].* = result;
+    }
+
+    // Scalar tail
+    while (i < len) : (i += 1) {
+        out[i + 1] = data[i + 1] - data[i];
     }
 }
 

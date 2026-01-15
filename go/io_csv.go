@@ -315,6 +315,18 @@ func buildColumn(name string, dtype DType, records [][]string, colIdx int, nullV
 		}
 		return NewSeriesString(name, data), nil
 
+	case Categorical:
+		// Read as strings, then convert to categorical
+		data := make([]string, n)
+		for i, record := range records {
+			if colIdx >= len(record) {
+				data[i] = ""
+				continue
+			}
+			data[i] = strings.TrimSpace(record[colIdx])
+		}
+		return NewSeriesCategorical(name, data), nil
+
 	default:
 		return nil, fmt.Errorf("unsupported dtype: %s", dtype)
 	}

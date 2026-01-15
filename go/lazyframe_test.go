@@ -1099,3 +1099,181 @@ func TestPlanOp_String_NewOperations(t *testing.T) {
 		}
 	}
 }
+
+// ============================================================================
+// Common Subexpression Elimination Tests
+// ============================================================================
+
+func TestCSE_DetectsDuplicates(t *testing.T) {
+	// Create a DataFrame
+	df, _ := NewDataFrame(
+		NewSeriesFloat64("a", []float64{1, 2, 3}),
+		NewSeriesFloat64("b", []float64{4, 5, 6}),
+	)
+
+	// Create a lazy frame with duplicate expressions
+	// Both projections use (a + b)
+	lf := df.Lazy().
+		WithColumn("x", Col("a").Add(Col("b"))).
+		WithColumn("y", Col("a").Add(Col("b")))
+
+	// Execute and verify results are correct
+	result, err := lf.Collect()
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+
+	// Verify both x and y have the same values (a + b)
+	xCol := result.ColumnByName("x")
+	yCol := result.ColumnByName("y")
+
+	if xCol == nil {
+		t.Fatal("Missing column 'x'")
+	}
+	if yCol == nil {
+		t.Fatal("Missing column 'y'")
+	}
+
+	// x and y should both be [5, 7, 9] (1+4, 2+5, 3+6)
+	expectedVals := []float64{5, 7, 9}
+	for i, expected := range expectedVals {
+		xVal, _ := xCol.GetFloat64(i)
+		yVal, _ := yCol.GetFloat64(i)
+		if xVal != expected {
+			t.Errorf("x[%d] = %f, expected %f", i, xVal, expected)
+		}
+		if yVal != expected {
+			t.Errorf("y[%d] = %f, expected %f", i, yVal, expected)
+		}
+	}
+}
+
+func TestCSE_MultipleWithColumns(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesFloat64("a", []float64{1, 2, 3, 4, 5}),
+		NewSeriesFloat64("b", []float64{10, 20, 30, 40, 50}),
+	)
+
+	// Multiple WithColumn using same expression (a + b)
+	lf := df.Lazy().
+		WithColumn("sum1", Col("a").Add(Col("b"))).
+		WithColumn("sum2", Col("a").Add(Col("b"))).
+		WithColumn("sum3", Col("a").Add(Col("b")))
+
+	result, err := lf.Collect()
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+
+	// Verify all three columns have the same values
+	sum1 := result.ColumnByName("sum1")
+	sum2 := result.ColumnByName("sum2")
+	sum3 := result.ColumnByName("sum3")
+
+	for i := 0; i < 5; i++ {
+		v1, _ := sum1.GetFloat64(i)
+		v2, _ := sum2.GetFloat64(i)
+		v3, _ := sum3.GetFloat64(i)
+		if v1 != v2 || v2 != v3 {
+			t.Errorf("Row %d: sum1=%f, sum2=%f, sum3=%f should be equal", i, v1, v2, v3)
+		}
+	}
+}
+
+func TestCSE_NoFalsePositives(t *testing.T) {
+	// Ensure CSE doesn't incorrectly combine different expressions
+	df, _ := NewDataFrame(
+		NewSeriesFloat64("a", []float64{1, 2, 3}),
+		NewSeriesFloat64("b", []float64{4, 5, 6}),
+	)
+
+	// Different expressions: a+b and a*b
+	lf := df.Lazy().
+		WithColumn("sum", Col("a").Add(Col("b"))).
+		WithColumn("product", Col("a").Mul(Col("b")))
+
+	result, err := lf.Collect()
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+
+	sumCol := result.ColumnByName("sum")
+	prodCol := result.ColumnByName("product")
+
+	// sum = [5, 7, 9], product = [4, 10, 18]
+	sumVals := []float64{5, 7, 9}
+	prodVals := []float64{4, 10, 18}
+
+	for i := 0; i < 3; i++ {
+		s, _ := sumCol.GetFloat64(i)
+		p, _ := prodCol.GetFloat64(i)
+		if s != sumVals[i] {
+			t.Errorf("sum[%d] = %f, expected %f", i, s, sumVals[i])
+		}
+		if p != prodVals[i] {
+			t.Errorf("product[%d] = %f, expected %f", i, p, prodVals[i])
+		}
+	}
+}
+
+// ============================================================================
+// Predicate Pushdown Tests
+// ============================================================================
+
+func TestPredicatePushdown_FilterBeforeJoin(t *testing.T) {
+	// Test that filter on left-side column is pushed below the join
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2, 3, 4, 5}),
+		NewSeriesFloat64("left_val", []float64{10, 20, 30, 40, 50}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2, 3, 4, 5}),
+		NewSeriesFloat64("right_val", []float64{100, 200, 300, 400, 500}),
+	)
+
+	// Filter on left_val > 25, then join
+	// The optimizer should push the filter to the left side of the join
+	leftPred := Col("left_val").Gt(Lit(25.0))
+	result, err := left.Lazy().
+		Join(right.Lazy(), On("id")).
+		Filter(leftPred).
+		Collect()
+
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+
+	// Should have rows where left_val > 25: (3,30), (4,40), (5,50)
+	if result.Height() != 3 {
+		t.Errorf("Expected 3 rows, got %d", result.Height())
+	}
+}
+
+func TestPredicatePushdown_FilterOnRightSide(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2, 3, 4, 5}),
+		NewSeriesString("left_name", []string{"a", "b", "c", "d", "e"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2, 3, 4, 5}),
+		NewSeriesFloat64("right_val", []float64{100, 200, 300, 400, 500}),
+	)
+
+	// Filter on right_val < 350, then join
+	rightPred := Col("right_val").Lt(Lit(350.0))
+	result, err := left.Lazy().
+		Join(right.Lazy(), On("id")).
+		Filter(rightPred).
+		Collect()
+
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+
+	// Should have rows where right_val < 350: (1,100), (2,200), (3,300)
+	if result.Height() != 3 {
+		t.Errorf("Expected 3 rows, got %d", result.Height())
+	}
+}

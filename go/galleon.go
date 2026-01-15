@@ -51,6 +51,94 @@ func GetThreadConfig() ThreadConfig {
 }
 
 // ============================================================================
+// SIMD Level Configuration
+// ============================================================================
+
+// SimdLevel represents the SIMD instruction set level.
+type SimdLevel uint8
+
+const (
+	// SimdScalar uses no SIMD (scalar fallback)
+	SimdScalar SimdLevel = 0
+	// SimdSSE4 uses SSE4.1/4.2 (128-bit vectors)
+	SimdSSE4 SimdLevel = 1
+	// SimdAVX2 uses AVX2 + FMA (256-bit vectors)
+	SimdAVX2 SimdLevel = 2
+	// SimdAVX512 uses AVX-512F + VL + BW (512-bit vectors)
+	SimdAVX512 SimdLevel = 3
+)
+
+// String returns a human-readable name for the SIMD level.
+func (l SimdLevel) String() string {
+	switch l {
+	case SimdScalar:
+		return "Scalar"
+	case SimdSSE4:
+		return "SSE4"
+	case SimdAVX2:
+		return "AVX2"
+	case SimdAVX512:
+		return "AVX-512"
+	default:
+		return "Unknown"
+	}
+}
+
+// VectorBytes returns the vector width in bytes for this SIMD level.
+func (l SimdLevel) VectorBytes() int {
+	switch l {
+	case SimdScalar:
+		return 8
+	case SimdSSE4:
+		return 16
+	case SimdAVX2:
+		return 32
+	case SimdAVX512:
+		return 64
+	default:
+		return 8
+	}
+}
+
+// GetSimdLevel returns the current SIMD level being used.
+func GetSimdLevel() SimdLevel {
+	return SimdLevel(C.galleon_get_simd_level())
+}
+
+// SetSimdLevel sets the SIMD level to use for operations.
+// This can be used to force a lower level for testing or compatibility.
+// After calling this, call ReinitSimdDispatch to apply the change.
+func SetSimdLevel(level SimdLevel) {
+	C.galleon_set_simd_level(C.uint8_t(level))
+}
+
+// GetSimdLevelName returns the human-readable name of the current SIMD level.
+func GetSimdLevelName() string {
+	return C.GoString(C.galleon_get_simd_level_name())
+}
+
+// GetSimdVectorBytes returns the vector width in bytes for the current SIMD level.
+func GetSimdVectorBytes() int {
+	return int(C.galleon_get_simd_vector_bytes())
+}
+
+// SimdConfig holds SIMD configuration information
+type SimdConfig struct {
+	Level       SimdLevel
+	LevelName   string
+	VectorBytes int
+}
+
+// GetSimdConfig returns the current SIMD configuration.
+func GetSimdConfig() SimdConfig {
+	return SimdConfig{
+		Level:       GetSimdLevel(),
+		LevelName:   GetSimdLevelName(),
+		VectorBytes: GetSimdVectorBytes(),
+	}
+}
+
+// ============================================================================
 // Column Types
 // ============================================================================
 
@@ -2686,5 +2774,215 @@ func CountNonNullHorizontal3F64(a, b, c []float64, out []uint32) {
 		(*C.uint32_t)(unsafe.Pointer(&out[0])),
 		C.size_t(n),
 	)
+}
+
+// ============================================================================
+// ChunkedColumnF64 - Cache-Friendly Chunk-Based Storage (V2)
+// ============================================================================
+// ChunkedColumnF64 stores data in L2-cache-sized chunks (64K elements = 512KB for f64).
+// Operations process chunk-by-chunk, always cache-warm, with parallel processing via Blitz.
+
+// ChunkedColumnF64 wraps a Zig ChunkedColumn with automatic memory management.
+type ChunkedColumnF64 struct {
+	ptr *C.ChunkedColumnF64Handle
+}
+
+// NewChunkedColumnF64 creates a new chunked column from a slice.
+// Data is copied into cache-aligned chunks.
+func NewChunkedColumnF64(data []float64) *ChunkedColumnF64 {
+	if len(data) == 0 {
+		ptr := C.galleon_chunked_f64_create(nil, 0)
+		col := &ChunkedColumnF64{ptr: ptr}
+		runtime.SetFinalizer(col, func(c *ChunkedColumnF64) {
+			if c.ptr != nil {
+				C.galleon_chunked_f64_destroy(c.ptr)
+			}
+		})
+		return col
+	}
+
+	ptr := C.galleon_chunked_f64_create(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+	)
+	if ptr == nil {
+		return nil
+	}
+
+	col := &ChunkedColumnF64{ptr: ptr}
+	runtime.SetFinalizer(col, func(c *ChunkedColumnF64) {
+		if c.ptr != nil {
+			C.galleon_chunked_f64_destroy(c.ptr)
+		}
+	})
+	return col
+}
+
+// Len returns the total number of elements.
+func (c *ChunkedColumnF64) Len() int {
+	if c.ptr == nil {
+		return 0
+	}
+	return int(C.galleon_chunked_f64_len(c.ptr))
+}
+
+// NumChunks returns the number of chunks.
+func (c *ChunkedColumnF64) NumChunks() int {
+	if c.ptr == nil {
+		return 0
+	}
+	return int(C.galleon_chunked_f64_num_chunks(c.ptr))
+}
+
+// Get returns the element at index, or 0 if out of bounds.
+func (c *ChunkedColumnF64) Get(index int) float64 {
+	if c.ptr == nil || index < 0 {
+		return 0
+	}
+	return float64(C.galleon_chunked_f64_get(c.ptr, C.size_t(index)))
+}
+
+// ToSlice copies all data to a new slice.
+func (c *ChunkedColumnF64) ToSlice() []float64 {
+	n := c.Len()
+	if n == 0 {
+		return nil
+	}
+	out := make([]float64, n)
+	C.galleon_chunked_f64_copy_to_slice(c.ptr, (*C.double)(unsafe.Pointer(&out[0])))
+	return out
+}
+
+// Sum returns the sum of all elements (parallel over chunks).
+func (c *ChunkedColumnF64) Sum() float64 {
+	if c.ptr == nil {
+		return 0
+	}
+	return float64(C.galleon_chunked_f64_sum(c.ptr))
+}
+
+// Min returns the minimum value (parallel over chunks).
+func (c *ChunkedColumnF64) Min() float64 {
+	if c.ptr == nil {
+		return 0
+	}
+	return float64(C.galleon_chunked_f64_min(c.ptr))
+}
+
+// Max returns the maximum value (parallel over chunks).
+func (c *ChunkedColumnF64) Max() float64 {
+	if c.ptr == nil {
+		return 0
+	}
+	return float64(C.galleon_chunked_f64_max(c.ptr))
+}
+
+// Mean returns the mean of all elements.
+func (c *ChunkedColumnF64) Mean() float64 {
+	if c.ptr == nil {
+		return 0
+	}
+	return float64(C.galleon_chunked_f64_mean(c.ptr))
+}
+
+// FilterGt returns a new column with elements > threshold.
+func (c *ChunkedColumnF64) FilterGt(threshold float64) *ChunkedColumnF64 {
+	if c.ptr == nil {
+		return nil
+	}
+	ptr := C.galleon_chunked_f64_filter_gt(c.ptr, C.double(threshold))
+	if ptr == nil {
+		return nil
+	}
+	result := &ChunkedColumnF64{ptr: ptr}
+	runtime.SetFinalizer(result, func(r *ChunkedColumnF64) {
+		if r.ptr != nil {
+			C.galleon_chunked_f64_destroy(r.ptr)
+		}
+	})
+	return result
+}
+
+// FilterLt returns a new column with elements < threshold.
+func (c *ChunkedColumnF64) FilterLt(threshold float64) *ChunkedColumnF64 {
+	if c.ptr == nil {
+		return nil
+	}
+	ptr := C.galleon_chunked_f64_filter_lt(c.ptr, C.double(threshold))
+	if ptr == nil {
+		return nil
+	}
+	result := &ChunkedColumnF64{ptr: ptr}
+	runtime.SetFinalizer(result, func(r *ChunkedColumnF64) {
+		if r.ptr != nil {
+			C.galleon_chunked_f64_destroy(r.ptr)
+		}
+	})
+	return result
+}
+
+// ChunkedArgsortResult holds the result of an argsort operation.
+type ChunkedArgsortResult struct {
+	ptr *C.ChunkedArgsortResult
+}
+
+// Argsort returns indices that would sort the column.
+func (c *ChunkedColumnF64) Argsort() *ChunkedArgsortResult {
+	if c.ptr == nil {
+		return nil
+	}
+	ptr := C.galleon_chunked_f64_argsort(c.ptr)
+	if ptr == nil {
+		return nil
+	}
+	result := &ChunkedArgsortResult{ptr: ptr}
+	runtime.SetFinalizer(result, func(r *ChunkedArgsortResult) {
+		if r.ptr != nil {
+			C.galleon_chunked_argsort_destroy(r.ptr)
+		}
+	})
+	return result
+}
+
+// Len returns the number of indices.
+func (r *ChunkedArgsortResult) Len() int {
+	if r.ptr == nil {
+		return 0
+	}
+	return int(C.galleon_chunked_argsort_len(r.ptr))
+}
+
+// Indices returns a copy of the sort indices.
+func (r *ChunkedArgsortResult) Indices() []uint32 {
+	n := r.Len()
+	if n == 0 {
+		return nil
+	}
+	indicesPtr := C.galleon_chunked_argsort_indices(r.ptr)
+	out := make([]uint32, n)
+	// Copy from C memory to Go slice
+	cSlice := (*[1 << 30]C.uint32_t)(unsafe.Pointer(indicesPtr))[:n:n]
+	for i, v := range cSlice {
+		out[i] = uint32(v)
+	}
+	return out
+}
+
+// Sort returns a new column with sorted values.
+func (c *ChunkedColumnF64) Sort() *ChunkedColumnF64 {
+	if c.ptr == nil {
+		return nil
+	}
+	ptr := C.galleon_chunked_f64_sort(c.ptr)
+	if ptr == nil {
+		return nil
+	}
+	result := &ChunkedColumnF64{ptr: ptr}
+	runtime.SetFinalizer(result, func(r *ChunkedColumnF64) {
+		if r.ptr != nil {
+			C.galleon_chunked_f64_destroy(r.ptr)
+		}
+	})
+	return result
 }
 

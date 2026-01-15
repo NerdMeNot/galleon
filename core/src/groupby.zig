@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const simd = @import("simd.zig");
+const groupby_agg = @import("simd/groupby_agg.zig");
 
 // ============================================================================
 // GroupBy Hash Table
@@ -1396,14 +1397,13 @@ pub fn computeGroupIdsParallel(
 // ============================================================================
 
 /// Sum values by group (in-place, more efficient than Go version)
+/// Uses parallel execution for large datasets (>50K elements)
 pub fn sumByGroup(comptime T: type, data: []const T, group_ids: []const u32, out: []T) void {
     // Zero output
     @memset(out, 0);
 
-    // Accumulate
-    for (data, group_ids) |val, gid| {
-        out[gid] += val;
-    }
+    // Use parallel version which handles thread-local accumulators + merge
+    groupby_agg.parallelSumByGroup(T, data, group_ids, out);
 }
 
 /// Sum f64 values by group using SIMD where possible
@@ -1419,37 +1419,34 @@ pub fn sumF64ByGroupSIMD(data: []const f64, group_ids: []const u32, out: []f64) 
 }
 
 /// Count rows per group
+/// Uses parallel execution for large datasets (>50K elements)
 pub fn countByGroup(group_ids: []const u32, out: []u64) void {
     @memset(out, 0);
-    for (group_ids) |gid| {
-        out[gid] += 1;
-    }
+
+    // Use parallel version which handles thread-local accumulators + merge
+    groupby_agg.parallelCountByGroup(group_ids, out);
 }
 
 /// Min by group
+/// Uses parallel execution for large datasets (>50K elements)
 pub fn minByGroup(comptime T: type, data: []const T, group_ids: []const u32, out: []T) void {
-    // Initialize with max value
+    // Initialize with max value (needed for sequential fallback)
     const max_val = if (@typeInfo(T) == .float) std.math.inf(T) else std.math.maxInt(T);
     @memset(out, max_val);
 
-    for (data, group_ids) |val, gid| {
-        if (val < out[gid]) {
-            out[gid] = val;
-        }
-    }
+    // Use parallel version which handles thread-local accumulators + merge
+    groupby_agg.parallelMinByGroup(T, data, group_ids, out);
 }
 
 /// Max by group
+/// Uses parallel execution for large datasets (>50K elements)
 pub fn maxByGroup(comptime T: type, data: []const T, group_ids: []const u32, out: []T) void {
-    // Initialize with min value
+    // Initialize with min value (needed for sequential fallback)
     const min_val = if (@typeInfo(T) == .float) -std.math.inf(T) else std.math.minInt(T);
     @memset(out, min_val);
 
-    for (data, group_ids) |val, gid| {
-        if (val > out[gid]) {
-            out[gid] = val;
-        }
-    }
+    // Use parallel version which handles thread-local accumulators + merge
+    groupby_agg.parallelMaxByGroup(T, data, group_ids, out);
 }
 
 // ============================================================================

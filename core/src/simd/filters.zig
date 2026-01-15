@@ -31,16 +31,39 @@ const CHUNK_SIZE = core.CHUNK_SIZE;
 // Mask Utilities
 // ============================================================================
 
-/// Count the number of true (non-zero) values in a u8 mask
+/// Count the number of true (non-zero) values in a u8 mask using SIMD
 pub fn countMaskTrue(mask: []const u8) usize {
     const len = mask.len;
     if (len == 0) return 0;
 
-    var count: usize = 0;
+    // Use SIMD to sum bytes in chunks
+    // Each non-zero byte contributes 1 when we compare != 0
+    const Vec = @Vector(VECTOR_WIDTH * 4, u8); // 32 bytes at a time
+    const zero_vec: Vec = @splat(0);
 
-    // Simple loop - the compiler should optimize this well
-    for (mask) |v| {
-        if (v != 0) count += 1;
+    var count: usize = 0;
+    const chunk_size = VECTOR_WIDTH * 4;
+    const aligned_len = len - (len % chunk_size);
+    var i: usize = 0;
+
+    // Process 32 bytes at a time
+    while (i < aligned_len) : (i += chunk_size) {
+        const chunk: Vec = mask[i..][0..chunk_size].*;
+        // Compare with zero - gives 0xFF for non-zero, 0x00 for zero
+        const cmp = chunk != zero_vec;
+        // Convert bool mask to 1/0 values
+        const ones: Vec = @select(u8, cmp, @as(Vec, @splat(1)), @as(Vec, @splat(0)));
+        // Sum all bytes - use widening to avoid overflow
+        var sum: u32 = 0;
+        inline for (0..chunk_size) |j| {
+            sum += ones[j];
+        }
+        count += sum;
+    }
+
+    // Scalar tail
+    while (i < len) : (i += 1) {
+        if (mask[i] != 0) count += 1;
     }
 
     return count;
@@ -373,21 +396,35 @@ pub fn filterMaskU8GreaterThanInt(comptime T: type, data: []const T, threshold: 
 // ============================================================================
 
 /// Count true values in a boolean slice
+/// Count true values in bool slice using SIMD
 pub fn countTrue(data: []const bool) usize {
     var count: usize = 0;
+    const len = data.len;
+    if (len == 0) return 0;
 
-    // Process 8 bools at a time by reinterpreting as bytes
-    const aligned_len = data.len - (data.len % 8);
+    // Bools are stored as u8 (0 or 1), so we can sum them directly
+    // Use SIMD to process 32 bytes at a time
+    const Vec = @Vector(32, u8);
+    const chunk_size = 32;
+    const aligned_len = len - (len % chunk_size);
     var i: usize = 0;
 
-    while (i < aligned_len) : (i += 8) {
-        // Each bool is 1 byte, so sum them directly
+    while (i < aligned_len) : (i += chunk_size) {
+        const b = @as(*const [chunk_size]u8, @ptrCast(data[i..].ptr));
+        const chunk: Vec = b.*;
+        // Sum all bytes using horizontal reduction
+        count += @reduce(.Add, @as(@Vector(32, u32), chunk));
+    }
+
+    // Process remaining 8 at a time
+    while (i + 8 <= len) : (i += 8) {
         const b = @as(*const [8]u8, @ptrCast(data[i..].ptr));
         count += @as(usize, b[0]) + @as(usize, b[1]) + @as(usize, b[2]) + @as(usize, b[3]) +
             @as(usize, b[4]) + @as(usize, b[5]) + @as(usize, b[6]) + @as(usize, b[7]);
     }
 
-    while (i < data.len) : (i += 1) {
+    // Scalar tail
+    while (i < len) : (i += 1) {
         count += @intFromBool(data[i]);
     }
 

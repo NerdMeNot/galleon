@@ -27,6 +27,9 @@ const (
 	Struct // Struct with named fields
 	List   // Variable-length list of elements
 	Array  // Fixed-length array of elements
+
+	// Categorical type (dictionary-encoded strings)
+	Categorical // String stored as integer indices into a dictionary
 )
 
 // String returns the string representation of the DType
@@ -60,6 +63,8 @@ func (d DType) String() string {
 		return "List"
 	case Array:
 		return "Array"
+	case Categorical:
+		return "Categorical"
 	default:
 		return fmt.Sprintf("Unknown(%d)", d)
 	}
@@ -110,6 +115,11 @@ func (d DType) IsNested() bool {
 	}
 }
 
+// IsCategorical returns true if the dtype is Categorical
+func (d DType) IsCategorical() bool {
+	return d == Categorical
+}
+
 // Size returns the size in bytes of the dtype
 func (d DType) Size() int {
 	switch d {
@@ -119,7 +129,7 @@ func (d DType) Size() int {
 		return 4
 	case Bool:
 		return 1
-	case String, List, Struct, Array:
+	case String, List, Struct, Array, Categorical:
 		return -1 // Variable size
 	case Null:
 		return 0

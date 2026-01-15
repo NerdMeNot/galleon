@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core.zig");
 const hashing = @import("hashing.zig");
 const groupby_agg = @import("groupby_agg.zig");
+const blitz = @import("../blitz/mod.zig");
 
 // Import core constants
 const MAX_THREADS = core.MAX_THREADS;
@@ -841,20 +842,8 @@ pub fn innerJoinI64Swiss(
 // Parallel Join Implementations
 // ============================================================================
 
-fn parallelSumWorker(ctx: *ParallelSumContext) void {
-    const data = ctx.data;
-    const group_ids = ctx.group_ids;
-    const partial_sums = ctx.partial_sums;
-
-    var i = ctx.start_idx;
-    while (i < ctx.end_idx) : (i += 1) {
-        const gid = group_ids[i];
-        partial_sums[gid] += data[i];
-    }
-}
-
-/// Parallel sum aggregation by group
-/// Splits work across threads, each building partial sums, then merges
+/// Parallel sum aggregation by group using Blitz
+/// Splits work across workers, each building partial sums, then merges
 pub fn parallelAggregateSumF64ByGroup(
     allocator: std.mem.Allocator,
     data: []const f64,
@@ -871,67 +860,63 @@ pub fn parallelAggregateSumF64ByGroup(
         return out_sums;
     }
 
-    const num_threads = @min(getMaxThreads(), n / 1000);
-    const chunk_size = (n + num_threads - 1) / num_threads;
+    const num_workers = blitz.numWorkers();
+    const num_chunks = @min(num_workers, n / 1000);
+    const chunk_size = (n + num_chunks - 1) / num_chunks;
 
-    // Allocate partial sum buffers for each thread
-    const thread_sums = try allocator.alloc([]f64, num_threads);
-    defer allocator.free(thread_sums);
+    // Allocate partial sum buffers for each chunk
+    const chunk_sums = try allocator.alloc([]f64, num_chunks);
+    defer allocator.free(chunk_sums);
 
-    for (thread_sums) |*ts| {
-        ts.* = try allocator.alloc(f64, num_groups);
-        @memset(ts.*, 0);
+    for (chunk_sums) |*cs| {
+        cs.* = try allocator.alloc(f64, num_groups);
+        @memset(cs.*, 0);
     }
     defer {
-        for (thread_sums) |ts| {
-            allocator.free(ts);
+        for (chunk_sums) |cs| {
+            allocator.free(cs);
         }
     }
 
-    // Create thread contexts
-    var contexts = try allocator.alloc(ParallelSumContext, num_threads);
-    defer allocator.free(contexts);
+    // Process chunks in parallel using Blitz
+    const SumCtx = struct {
+        data: []const f64,
+        group_ids: []const u32,
+        chunk_sums: [][]f64,
+        chunk_size: usize,
+        len: usize,
+    };
 
-    for (0..num_threads) |t| {
-        const start = t * chunk_size;
-        const end = @min(start + chunk_size, n);
-        contexts[t] = ParallelSumContext{
-            .data = data,
-            .group_ids = group_ids,
-            .partial_sums = thread_sums[t],
-            .num_groups = num_groups,
-            .start_idx = start,
-            .end_idx = end,
-        };
-    }
+    const ctx = SumCtx{
+        .data = data,
+        .group_ids = group_ids,
+        .chunk_sums = chunk_sums,
+        .chunk_size = chunk_size,
+        .len = n,
+    };
 
-    // Spawn threads
-    var threads: [MAX_THREADS]std.Thread = undefined;
-    var spawned: usize = 0;
+    blitz.parallelForWithGrain(num_chunks, SumCtx, ctx, struct {
+        fn processChunks(c: SumCtx, start_chunk: usize, end_chunk: usize) void {
+            for (start_chunk..end_chunk) |chunk_idx| {
+                const start = chunk_idx * c.chunk_size;
+                const end = @min(start + c.chunk_size, c.len);
+                const partial_sums = c.chunk_sums[chunk_idx];
 
-    for (0..num_threads) |t| {
-        threads[t] = std.Thread.spawn(.{}, parallelSumWorker, .{&contexts[t]}) catch {
-            // If thread spawn fails, run remaining work in main thread
-            for (t..num_threads) |remaining| {
-                parallelSumWorker(&contexts[remaining]);
+                for (start..end) |i| {
+                    const gid = c.group_ids[i];
+                    partial_sums[gid] += c.data[i];
+                }
             }
-            break;
-        };
-        spawned += 1;
-    }
-
-    // Wait for all threads
-    for (threads[0..spawned]) |thread| {
-        thread.join();
-    }
+        }
+    }.processChunks, 1);
 
     // Merge partial sums
     const final_sums = try allocator.alloc(f64, num_groups);
     @memset(final_sums, 0);
 
-    for (thread_sums) |ts| {
+    for (chunk_sums) |cs| {
         for (0..num_groups) |g| {
-            final_sums[g] += ts[g];
+            final_sums[g] += cs[g];
         }
     }
 
@@ -1093,7 +1078,7 @@ fn singlePassProbeWorker(ctx: *SinglePassProbeContext) void {
     ctx.alloc_failed = false;
 }
 
-/// Memory-efficient parallel inner join
+/// Memory-efficient parallel inner join using Blitz
 /// - Single pass (no count-then-fill)
 /// - Computes left hashes on-the-fly (saves 8 bytes per left row)
 /// - Uses adaptive hash table sizing
@@ -1131,16 +1116,17 @@ pub fn parallelInnerJoinI64(
     // This saves memory and uses the same hash function as probe phase
     buildJoinHashTableFast(right_keys, table, next, table_size);
 
-    // Single-pass parallel probe with thread-local dynamic arrays
-    const num_threads = @min(getMaxThreads(), left_n / 10000);
-    const actual_threads = @max(num_threads, 1);
-    const chunk_size = (left_n + actual_threads - 1) / actual_threads;
+    // Single-pass parallel probe with chunk-local dynamic arrays using Blitz
+    const num_workers = blitz.numWorkers();
+    const num_chunks = @min(num_workers, left_n / 10000);
+    const actual_chunks = @max(num_chunks, 1);
+    const chunk_size = (left_n + actual_chunks - 1) / actual_chunks;
 
-    var contexts = try allocator.alloc(SinglePassProbeContext, actual_threads);
+    var contexts = try allocator.alloc(SinglePassProbeContext, actual_chunks);
     defer allocator.free(contexts);
 
     // Initialize contexts
-    for (0..actual_threads) |t| {
+    for (0..actual_chunks) |t| {
         const start = t * chunk_size;
         const end = @min(start + chunk_size, left_n);
         contexts[t] = SinglePassProbeContext{
@@ -1160,24 +1146,20 @@ pub fn parallelInnerJoinI64(
         };
     }
 
-    // Spawn threads for single-pass probe
-    var threads: [MAX_THREADS]std.Thread = undefined;
-    var spawned: usize = 0;
+    // Process chunks in parallel using Blitz
+    const ProbeCtx = struct {
+        contexts: []SinglePassProbeContext,
+    };
 
-    for (0..actual_threads) |t| {
-        threads[t] = std.Thread.spawn(.{}, singlePassProbeWorker, .{&contexts[t]}) catch {
-            // Fallback to sequential if thread spawn fails
-            for (t..actual_threads) |remaining| {
-                singlePassProbeWorker(&contexts[remaining]);
+    const probe_ctx = ProbeCtx{ .contexts = contexts };
+
+    blitz.parallelForWithGrain(actual_chunks, ProbeCtx, probe_ctx, struct {
+        fn processChunks(c: ProbeCtx, start_chunk: usize, end_chunk: usize) void {
+            for (start_chunk..end_chunk) |chunk_idx| {
+                singlePassProbeWorker(&c.contexts[chunk_idx]);
             }
-            break;
-        };
-        spawned += 1;
-    }
-
-    for (threads[0..spawned]) |thread| {
-        thread.join();
-    }
+        }
+    }.processChunks, 1);
 
     // Check for allocation failures and calculate total matches
     var total_matches: usize = 0;
@@ -1195,7 +1177,7 @@ pub fn parallelInnerJoinI64(
         total_matches += ctx.count;
     }
 
-    // Merge thread-local results into final arrays
+    // Merge chunk-local results into final arrays
     const left_indices = try allocator.alloc(i32, total_matches);
     const right_indices = try allocator.alloc(i32, total_matches);
 
@@ -1206,7 +1188,7 @@ pub fn parallelInnerJoinI64(
             @memcpy(right_indices[offset .. offset + ctx.count], ctx.right_indices[0..ctx.count]);
             offset += ctx.count;
         }
-        // Free thread-local arrays
+        // Free chunk-local arrays
         if (ctx.capacity > 0) {
             allocator.free(ctx.left_indices.ptr[0..ctx.capacity]);
             allocator.free(ctx.right_indices.ptr[0..ctx.capacity]);
@@ -1626,7 +1608,7 @@ fn leftProbeWorker(ctx: *LeftProbeContext) void {
     ctx.alloc_failed = false;
 }
 
-/// Parallel left join
+/// Parallel left join using Blitz
 pub fn parallelLeftJoinI64(
     allocator: std.mem.Allocator,
     left_keys: []const i64,
@@ -1673,15 +1655,16 @@ pub fn parallelLeftJoinI64(
     defer allocator.free(next);
     buildJoinHashTableFast(right_keys, table, next, table_size);
 
-    // Parallel probe
-    const num_threads = @min(getMaxThreads(), left_n / 10000);
-    const actual_threads = @max(num_threads, 1);
-    const chunk_size = (left_n + actual_threads - 1) / actual_threads;
+    // Parallel probe using Blitz
+    const num_workers = blitz.numWorkers();
+    const num_chunks = @min(num_workers, left_n / 10000);
+    const actual_chunks = @max(num_chunks, 1);
+    const chunk_size = (left_n + actual_chunks - 1) / actual_chunks;
 
-    var contexts = try allocator.alloc(LeftProbeContext, actual_threads);
+    var contexts = try allocator.alloc(LeftProbeContext, actual_chunks);
     defer allocator.free(contexts);
 
-    for (0..actual_threads) |t| {
+    for (0..actual_chunks) |t| {
         const start = t * chunk_size;
         const end = @min(start + chunk_size, left_n);
         contexts[t] = LeftProbeContext{
@@ -1701,22 +1684,20 @@ pub fn parallelLeftJoinI64(
         };
     }
 
-    var threads: [MAX_THREADS]std.Thread = undefined;
-    var spawned: usize = 0;
+    // Process chunks in parallel using Blitz
+    const LeftProbeCtx = struct {
+        contexts: []LeftProbeContext,
+    };
 
-    for (0..actual_threads) |t| {
-        threads[t] = std.Thread.spawn(.{}, leftProbeWorker, .{&contexts[t]}) catch {
-            for (t..actual_threads) |remaining| {
-                leftProbeWorker(&contexts[remaining]);
+    const probe_ctx = LeftProbeCtx{ .contexts = contexts };
+
+    blitz.parallelForWithGrain(actual_chunks, LeftProbeCtx, probe_ctx, struct {
+        fn processChunks(c: LeftProbeCtx, start_chunk: usize, end_chunk: usize) void {
+            for (start_chunk..end_chunk) |chunk_idx| {
+                leftProbeWorker(&c.contexts[chunk_idx]);
             }
-            break;
-        };
-        spawned += 1;
-    }
-
-    for (threads[0..spawned]) |thread| {
-        thread.join();
-    }
+        }
+    }.processChunks, 1);
 
     // Check for failures and count total
     var total_rows: usize = 0;

@@ -311,6 +311,9 @@ func hashColumn(col *Series, outHashes []uint64) {
 				outHashes[i] = 0
 			}
 		}
+	case Categorical:
+		// Hash the int32 indices using SIMD (much faster than string hashing!)
+		HashI32Column(col.CategoricalIndices(), outHashes)
 	default:
 		// Fallback using deterministic string conversion
 		for i := 0; i < col.Len(); i++ {
@@ -964,6 +967,13 @@ func valuesEqual(left *Series, leftRow int, right *Series, rightRow int) bool {
 			return left.Bool()[leftRow] == right.Bool()[rightRow]
 		case String:
 			return left.Strings()[leftRow] == right.Strings()[rightRow]
+		case Categorical:
+			// Compare actual string values (dictionaries may be different)
+			leftCategories := left.Categories()
+			rightCategories := right.Categories()
+			leftIdx := left.CategoricalIndices()[leftRow]
+			rightIdx := right.CategoricalIndices()[rightRow]
+			return leftCategories[leftIdx] == rightCategories[rightIdx]
 		}
 	}
 	// Fallback for mixed types
@@ -1085,6 +1095,29 @@ func buildJoinColumn(name string, src *Series, indices []int, numRows int) *Seri
 			}
 		}
 		return NewSeriesString(name, data)
+
+	case Categorical:
+		// Gather indices and keep the same dictionary
+		srcIndices := src.CategoricalIndices()
+		categories := src.Categories()
+		newIndices := make([]int32, numRows)
+		// Use SIMD gather for int32 indices
+		GatherI32(srcIndices, indices32, newIndices)
+		// Create new categorical with same dictionary
+		result, _ := NewSeriesCategoricalWithCategories(name, nil, categories)
+		if result != nil {
+			result.catData.Indices = newIndices
+			result.length = numRows
+			return result
+		}
+		// Fallback: reconstruct from strings
+		data := make([]string, numRows)
+		for i, idx := range indices {
+			if idx >= 0 && srcIndices[idx] >= 0 && int(srcIndices[idx]) < len(categories) {
+				data[i] = categories[srcIndices[idx]]
+			}
+		}
+		return NewSeriesCategorical(name, data)
 
 	default:
 		// Fallback to string

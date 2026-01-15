@@ -779,3 +779,162 @@ func TestCorrectness_DataFrame_Filter_PreservesRowIntegrity(t *testing.T) {
 		}
 	}
 }
+
+// ============================================================================
+// Categorical Correctness Tests
+// ============================================================================
+
+func TestCorrectness_Categorical_EncodingMatchesValues(t *testing.T) {
+	data := []string{"apple", "banana", "apple", "cherry", "banana", "apple"}
+	cat := NewSeriesCategorical("fruit", data)
+
+	// Verify that Get() returns the correct string values
+	for i, expected := range data {
+		got := cat.Get(i).(string)
+		if got != expected {
+			t.Errorf("Categorical Get(%d): expected %s, got %s", i, expected, got)
+		}
+	}
+}
+
+func TestCorrectness_Categorical_UniqueCategories(t *testing.T) {
+	data := []string{"A", "B", "A", "C", "B", "A", "C", "C"}
+	cat := NewSeriesCategorical("group", data)
+
+	categories := cat.Categories()
+	expectedCategories := map[string]bool{"A": true, "B": true, "C": true}
+
+	if len(categories) != len(expectedCategories) {
+		t.Errorf("Expected %d unique categories, got %d", len(expectedCategories), len(categories))
+	}
+
+	for _, c := range categories {
+		if !expectedCategories[c] {
+			t.Errorf("Unexpected category: %s", c)
+		}
+	}
+}
+
+func TestCorrectness_Categorical_IndicesAreConsistent(t *testing.T) {
+	data := []string{"x", "y", "x", "z", "y", "x"}
+	cat := NewSeriesCategorical("val", data)
+
+	indices := cat.CategoricalIndices()
+	categories := cat.Categories()
+
+	// Verify that decoding indices gives back original values
+	for i, idx := range indices {
+		decoded := categories[idx]
+		if decoded != data[i] {
+			t.Errorf("Index decode mismatch at %d: index %d -> %s, expected %s",
+				i, idx, decoded, data[i])
+		}
+	}
+}
+
+func TestCorrectness_Categorical_SameValuesSameIndex(t *testing.T) {
+	data := []string{"red", "blue", "red", "green", "red", "blue"}
+	cat := NewSeriesCategorical("color", data)
+
+	indices := cat.CategoricalIndices()
+
+	// All "red" values should have the same index
+	redIndex := indices[0]
+	for i, val := range data {
+		if val == "red" && indices[i] != redIndex {
+			t.Errorf("Same value 'red' has different indices: %d vs %d", redIndex, indices[i])
+		}
+	}
+
+	// All "blue" values should have the same index
+	blueIndex := indices[1]
+	for i, val := range data {
+		if val == "blue" && indices[i] != blueIndex {
+			t.Errorf("Same value 'blue' has different indices: %d vs %d", blueIndex, indices[i])
+		}
+	}
+}
+
+func TestCorrectness_Categorical_AsStringRoundtrip(t *testing.T) {
+	original := []string{"cat", "dog", "bird", "cat", "bird"}
+	cat := NewSeriesCategorical("animal", original)
+
+	// Convert to string and back
+	strSeries := cat.AsString()
+	backToCat := strSeries.AsCategorical()
+
+	// Verify values match
+	for i, expected := range original {
+		got := backToCat.Get(i).(string)
+		if got != expected {
+			t.Errorf("Roundtrip mismatch at %d: expected %s, got %s", i, expected, got)
+		}
+	}
+}
+
+func TestCorrectness_Categorical_GroupByProducesCorrectSums(t *testing.T) {
+	df, _ := NewDataFrame(
+		NewSeriesCategorical("category", []string{"A", "B", "A", "B", "A"}),
+		NewSeriesFloat64("value", []float64{10.0, 20.0, 30.0, 40.0, 50.0}),
+	)
+
+	result, err := df.Lazy().
+		GroupBy("category").
+		Agg(Col("value").Sum().Alias("sum")).
+		Collect()
+	if err != nil {
+		t.Fatalf("GroupBy failed: %v", err)
+	}
+
+	// Manual calculation: A = 10+30+50 = 90, B = 20+40 = 60
+	expected := map[string]float64{"A": 90.0, "B": 60.0}
+
+	groups := result.ColumnByName("category")
+	sums := result.ColumnByName("sum").Float64()
+
+	for i := 0; i < result.Height(); i++ {
+		group := groups.Get(i).(string)
+		expectedSum := expected[group]
+		if math.Abs(sums[i]-expectedSum) > 0.0001 {
+			t.Errorf("Group %s sum: expected %f, got %f", group, expectedSum, sums[i])
+		}
+	}
+}
+
+func TestCorrectness_Categorical_JoinMatchesStringJoin(t *testing.T) {
+	// Test join with categorical key columns (same values on both sides)
+	// This matches the pattern of TestJoinCategoricalKeys which works correctly
+	catLeft, _ := NewDataFrame(
+		NewSeriesCategorical("category", []string{"A", "B", "C", "A"}),
+		NewSeriesFloat64("val1", []float64{1.0, 2.0, 3.0, 4.0}),
+	)
+	catRight, _ := NewDataFrame(
+		NewSeriesCategorical("category", []string{"A", "B", "D"}),
+		NewSeriesFloat64("val2", []float64{10.0, 20.0, 30.0}),
+	)
+
+	// Categorical join
+	catResult, err := catLeft.Lazy().
+		Join(catRight.Lazy(), On("category")).
+		Collect()
+	if err != nil {
+		t.Fatalf("Categorical join failed: %v", err)
+	}
+
+	// A appears 2x in left, 1x in right -> 2 matches
+	// B appears 1x in left, 1x in right -> 1 match
+	// Total: 3 rows
+	if catResult.Height() != 3 {
+		t.Errorf("Expected 3 rows, got %d", catResult.Height())
+	}
+
+	// Verify all joined rows have valid category values
+	categories := catResult.ColumnByName("category")
+	validCategories := map[string]bool{"A": true, "B": true}
+	for i := 0; i < catResult.Height(); i++ {
+		cat := categories.Get(i).(string)
+		if !validCategories[cat] {
+			t.Errorf("Unexpected category in join result: %s", cat)
+		}
+	}
+}

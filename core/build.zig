@@ -37,12 +37,14 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/bench.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .link_libc = true, // Required for C allocator
     });
 
     const bench = b.addExecutable(.{
         .name = "bench",
         .root_module = bench_mod,
     });
+    bench.linkLibC();
     b.installArtifact(bench);
 
     const run_bench = b.addRunArtifact(bench);

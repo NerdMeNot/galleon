@@ -143,6 +143,13 @@ pub const hashInt64Columns = hashing.hashInt64Columns;
 pub const rapidHash64 = hashing.rapidHash64;
 pub const fastIntHash = hashing.fastIntHash;
 
+// Parallel hash functions (using Blitz work-stealing)
+pub const parallelHashInt64Column = hashing.parallelHashInt64Column;
+pub const parallelHashInt32Column = hashing.parallelHashInt32Column;
+pub const parallelHashFloat64Column = hashing.parallelHashFloat64Column;
+pub const parallelHashFloat32Column = hashing.parallelHashFloat32Column;
+pub const parallelCombineHashes = hashing.parallelCombineHashes;
+
 // Re-export gather functions (generic and type-specific wrappers)
 pub const gatherGeneric = gather.gather; // Generic gather for any numeric type
 pub const gatherF64 = gather.gatherF64;
@@ -155,6 +162,29 @@ pub const aggregateSumByGroup = groupby_agg.aggregateSumByGroup;
 pub const aggregateMinByGroup = groupby_agg.aggregateMinByGroup;
 pub const aggregateMaxByGroup = groupby_agg.aggregateMaxByGroup;
 pub const countByGroup = groupby_agg.countByGroup;
+
+// Sorted-path groupby aggregations (for pre-sorted data)
+pub const isSorted = groupby_agg.isSorted;
+pub const aggregateSumByGroupSorted = groupby_agg.aggregateSumByGroupSorted;
+pub const aggregateMinByGroupSorted = groupby_agg.aggregateMinByGroupSorted;
+pub const aggregateMaxByGroupSorted = groupby_agg.aggregateMaxByGroupSorted;
+pub const countByGroupSorted = groupby_agg.countByGroupSorted;
+
+// Smart groupby aggregations (auto-detect optimal path)
+pub const smartSumByGroup = groupby_agg.smartSumByGroup;
+pub const smartMinByGroup = groupby_agg.smartMinByGroup;
+pub const smartMaxByGroup = groupby_agg.smartMaxByGroup;
+pub const smartCountByGroup = groupby_agg.smartCountByGroup;
+
+// Radix sort-based groupby (for high cardinality)
+pub const radixSortSumByGroup = groupby_agg.radixSortSumByGroup;
+pub const radixSortMinByGroup = groupby_agg.radixSortMinByGroup;
+pub const radixSortMaxByGroup = groupby_agg.radixSortMaxByGroup;
+
+// Optimal groupby (chooses best algorithm)
+pub const optimalSumByGroup = groupby_agg.optimalSumByGroup;
+pub const optimalMinByGroup = groupby_agg.optimalMinByGroup;
+pub const optimalMaxByGroup = groupby_agg.optimalMaxByGroup;
 
 // Re-export sorting functions
 pub const argsort = sorting.argsort;

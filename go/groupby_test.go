@@ -975,6 +975,104 @@ func TestGroupBySingleRow(t *testing.T) {
 	}
 }
 
+func TestGroupByCategoricalKey(t *testing.T) {
+	// Test GroupBy with categorical key column
+	df, err := NewDataFrame(
+		NewSeriesCategorical("fruit", []string{"apple", "banana", "apple", "cherry", "banana", "apple"}),
+		NewSeriesFloat64("value", []float64{1, 2, 3, 4, 5, 6}),
+	)
+	if err != nil {
+		t.Fatalf("failed to create dataframe: %v", err)
+	}
+
+	result, err := df.GroupBy("fruit").Sum("value")
+	if err != nil {
+		t.Fatalf("GroupBy Sum failed: %v", err)
+	}
+
+	// Should have 3 groups: apple, banana, cherry
+	if result.Height() != 3 {
+		t.Errorf("Expected 3 groups, got %d", result.Height())
+	}
+
+	// The key column should still be categorical
+	keyCol := result.ColumnByName("fruit")
+	if keyCol.DType() != Categorical {
+		t.Errorf("Expected Categorical dtype for key column, got %s", keyCol.DType())
+	}
+}
+
+func TestGroupByCategoricalKeySum(t *testing.T) {
+	df, err := NewDataFrame(
+		NewSeriesCategorical("category", []string{"A", "B", "A", "B", "A"}),
+		NewSeriesFloat64("value", []float64{10, 20, 30, 40, 50}),
+	)
+	if err != nil {
+		t.Fatalf("failed to create dataframe: %v", err)
+	}
+
+	result, err := df.GroupBy("category").Sum("value")
+	if err != nil {
+		t.Fatalf("GroupBy Sum failed: %v", err)
+	}
+
+	// Verify sums: A = 10+30+50 = 90, B = 20+40 = 60
+	sumCol := result.ColumnByName("value_sum")
+	keyCol := result.ColumnByName("category")
+
+	for i := 0; i < result.Height(); i++ {
+		key := keyCol.Get(i)
+		val, _ := sumCol.GetFloat64(i)
+		switch key {
+		case "A":
+			if val != 90 {
+				t.Errorf("Sum for A: expected 90, got %f", val)
+			}
+		case "B":
+			if val != 60 {
+				t.Errorf("Sum for B: expected 60, got %f", val)
+			}
+		}
+	}
+}
+
+func TestGroupByCategoricalFirstLast(t *testing.T) {
+	df, err := NewDataFrame(
+		NewSeriesCategorical("group", []string{"X", "Y", "X", "Y"}),
+		NewSeriesCategorical("fruit", []string{"apple", "banana", "cherry", "date"}),
+	)
+	if err != nil {
+		t.Fatalf("failed to create dataframe: %v", err)
+	}
+
+	// Test First aggregation on categorical column
+	firstResult, err := df.GroupBy("group").First("fruit")
+	if err != nil {
+		t.Fatalf("GroupBy First failed: %v", err)
+	}
+
+	if firstResult.Height() != 2 {
+		t.Errorf("Expected 2 groups, got %d", firstResult.Height())
+	}
+
+	// Result column should be categorical
+	fruitCol := firstResult.ColumnByName("fruit_first")
+	if fruitCol.DType() != Categorical {
+		t.Errorf("Expected Categorical dtype for first result, got %s", fruitCol.DType())
+	}
+
+	// Test Last aggregation
+	lastResult, err := df.GroupBy("group").Last("fruit")
+	if err != nil {
+		t.Fatalf("GroupBy Last failed: %v", err)
+	}
+
+	lastFruitCol := lastResult.ColumnByName("fruit_last")
+	if lastFruitCol.DType() != Categorical {
+		t.Errorf("Expected Categorical dtype for last result, got %s", lastFruitCol.DType())
+	}
+}
+
 func BenchmarkGroupBySum(b *testing.B) {
 	// Create a DataFrame with 100k rows and 100 groups
 	n := 100000

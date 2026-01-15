@@ -6,9 +6,47 @@ pub const column = @import("column.zig");
 pub const simd = @import("simd.zig");
 pub const groupby = @import("groupby.zig");
 
+// Runtime dispatch system
+pub const cpuid = @import("cpuid.zig");
+pub const dispatch = @import("dispatch.zig");
+
+// Work-stealing parallel execution
+pub const blitz = @import("blitz/mod.zig");
+
 // ============================================================================
 // C ABI Exports - These are called from Go via CGO
 // ============================================================================
+
+// --- SIMD Level Detection and Configuration ---
+
+/// Get the detected SIMD level (0=Scalar, 1=SSE4, 2=AVX2, 3=AVX512)
+export fn galleon_get_simd_level() u8 {
+    return @intFromEnum(cpuid.getSimdLevel());
+}
+
+/// Override the SIMD level (for testing or compatibility)
+/// Pass 0=Scalar, 1=SSE4, 2=AVX2, 3=AVX512
+export fn galleon_set_simd_level(level: u8) void {
+    if (level <= @intFromEnum(cpuid.SimdLevel.avx512)) {
+        cpuid.setSimdLevel(@enumFromInt(level));
+        dispatch.reinitDispatch();
+    }
+}
+
+/// Get the SIMD level name as a C string
+export fn galleon_get_simd_level_name() [*:0]const u8 {
+    return switch (cpuid.getSimdLevel()) {
+        .scalar => "Scalar",
+        .sse4 => "SSE4",
+        .avx2 => "AVX2",
+        .avx512 => "AVX-512",
+    };
+}
+
+/// Get the vector width in bytes for the current SIMD level
+export fn galleon_get_simd_vector_bytes() usize {
+    return cpuid.getSimdLevel().vectorBytes();
+}
 
 // --- Column Creation ---
 
@@ -32,21 +70,35 @@ export fn galleon_column_f64_data(col: *const column.ColumnF64) [*]const f64 {
     return col.data().ptr;
 }
 
-// --- Aggregations ---
+// --- Aggregations (auto-parallelized via Blitz for large data) ---
+// Uses intelligent threshold system - parallelizes based on operation cost and core count
 
 export fn galleon_sum_f64(data: [*]const f64, len: usize) f64 {
+    if (blitz.shouldParallelize(.sum, len)) {
+        return blitz.parallelSum(f64, data[0..len]);
+    }
     return simd.sum(f64, data[0..len]);
 }
 
 export fn galleon_min_f64(data: [*]const f64, len: usize) f64 {
+    if (blitz.shouldParallelize(.min, len)) {
+        return blitz.parallelMin(f64, data[0..len]) orelse 0.0;
+    }
     return simd.min(f64, data[0..len]) orelse 0.0;
 }
 
 export fn galleon_max_f64(data: [*]const f64, len: usize) f64 {
+    if (blitz.shouldParallelize(.max, len)) {
+        return blitz.parallelMax(f64, data[0..len]) orelse 0.0;
+    }
     return simd.max(f64, data[0..len]) orelse 0.0;
 }
 
 export fn galleon_mean_f64(data: [*]const f64, len: usize) f64 {
+    if (blitz.shouldParallelize(.mean, len)) {
+        if (len == 0) return 0.0;
+        return blitz.parallelSum(f64, data[0..len]) / @as(f64, @floatFromInt(len));
+    }
     return simd.mean(f64, data[0..len]) orelse 0.0;
 }
 
@@ -69,6 +121,31 @@ export fn galleon_is_threads_auto_detected() bool {
     return simd.getThreadConfig().auto_detected;
 }
 
+// --- Blitz Work-Stealing Thread Pool (diagnostic functions) ---
+
+/// Initialize the Blitz work-stealing thread pool
+/// Note: Blitz auto-initializes on first parallel operation, but this allows explicit control
+/// Returns true on success, false on failure
+export fn blitz_init() bool {
+    blitz.init() catch return false;
+    return true;
+}
+
+/// Shutdown the Blitz thread pool
+export fn blitz_deinit() void {
+    blitz.deinit();
+}
+
+/// Check if Blitz pool is initialized
+export fn blitz_is_initialized() bool {
+    return blitz.isInitialized();
+}
+
+/// Get the number of worker threads
+export fn blitz_num_workers() u32 {
+    return blitz.numWorkers();
+}
+
 // --- Vectorized Operations ---
 
 export fn galleon_add_scalar_f64(data: [*]f64, len: usize, scalar: f64) void {
@@ -86,6 +163,8 @@ export fn galleon_add_arrays_f64(dst: [*]f64, src: [*]const f64, len: usize) voi
 // --- Vector Arithmetic (out = a op b) ---
 
 export fn galleon_add_f64(a: [*]const f64, b: [*]const f64, out: [*]f64, len: usize) void {
+    // Element-wise ops are memory-bound - parallelism adds cache contention
+    // Benchmarks showed parallel Add slower than sequential Sub
     simd.addArraysOut(f64, a[0..len], b[0..len], out[0..len]);
 }
 
@@ -522,14 +601,23 @@ export fn galleon_column_i64_data(col: *const column.ColumnI64) [*]const i64 {
 }
 
 export fn galleon_sum_i64(data: [*]const i64, len: usize) i64 {
+    if (blitz.shouldParallelize(.sum, len)) {
+        return blitz.parallelSumInt(i64, data[0..len]);
+    }
     return simd.sumInt(i64, data[0..len]);
 }
 
 export fn galleon_min_i64(data: [*]const i64, len: usize) i64 {
+    if (blitz.shouldParallelize(.min, len)) {
+        return blitz.parallelMinInt(i64, data[0..len]) orelse 0;
+    }
     return simd.minInt(i64, data[0..len]) orelse 0;
 }
 
 export fn galleon_max_i64(data: [*]const i64, len: usize) i64 {
+    if (blitz.shouldParallelize(.max, len)) {
+        return blitz.parallelMaxInt(i64, data[0..len]) orelse 0;
+    }
     return simd.maxInt(i64, data[0..len]) orelse 0;
 }
 
@@ -595,14 +683,23 @@ export fn galleon_column_i32_data(col: *const column.ColumnI32) [*]const i32 {
 }
 
 export fn galleon_sum_i32(data: [*]const i32, len: usize) i32 {
+    if (blitz.shouldParallelize(.sum, len)) {
+        return blitz.parallelSumInt(i32, data[0..len]);
+    }
     return simd.sumInt(i32, data[0..len]);
 }
 
 export fn galleon_min_i32(data: [*]const i32, len: usize) i32 {
+    if (blitz.shouldParallelize(.min, len)) {
+        return blitz.parallelMinInt(i32, data[0..len]) orelse 0;
+    }
     return simd.minInt(i32, data[0..len]) orelse 0;
 }
 
 export fn galleon_max_i32(data: [*]const i32, len: usize) i32 {
+    if (blitz.shouldParallelize(.max, len)) {
+        return blitz.parallelMaxInt(i32, data[0..len]) orelse 0;
+    }
     return simd.maxInt(i32, data[0..len]) orelse 0;
 }
 
@@ -668,18 +765,31 @@ export fn galleon_column_f32_data(col: *const column.ColumnF32) [*]const f32 {
 }
 
 export fn galleon_sum_f32(data: [*]const f32, len: usize) f32 {
+    if (blitz.shouldParallelize(.sum, len)) {
+        return blitz.parallelSum(f32, data[0..len]);
+    }
     return simd.sum(f32, data[0..len]);
 }
 
 export fn galleon_min_f32(data: [*]const f32, len: usize) f32 {
+    if (blitz.shouldParallelize(.min, len)) {
+        return blitz.parallelMin(f32, data[0..len]) orelse 0.0;
+    }
     return simd.min(f32, data[0..len]) orelse 0.0;
 }
 
 export fn galleon_max_f32(data: [*]const f32, len: usize) f32 {
+    if (blitz.shouldParallelize(.max, len)) {
+        return blitz.parallelMax(f32, data[0..len]) orelse 0.0;
+    }
     return simd.max(f32, data[0..len]) orelse 0.0;
 }
 
 export fn galleon_mean_f32(data: [*]const f32, len: usize) f32 {
+    if (blitz.shouldParallelize(.mean, len)) {
+        if (len == 0) return 0.0;
+        return blitz.parallelSum(f32, data[0..len]) / @as(f32, @floatFromInt(len));
+    }
     return simd.mean(f32, data[0..len]) orelse 0.0;
 }
 
@@ -830,7 +940,11 @@ export fn galleon_hash_i64_column(
     out_hashes: [*]u64,
     len: usize,
 ) void {
-    simd.hashInt64Column(data[0..len], out_hashes[0..len]);
+    if (blitz.shouldParallelize(.hash, len)) {
+        simd.parallelHashInt64Column(data[0..len], out_hashes[0..len]);
+    } else {
+        simd.hashInt64Column(data[0..len], out_hashes[0..len]);
+    }
 }
 
 export fn galleon_hash_i32_column(
@@ -838,7 +952,11 @@ export fn galleon_hash_i32_column(
     out_hashes: [*]u64,
     len: usize,
 ) void {
-    simd.hashInt32Column(data[0..len], out_hashes[0..len]);
+    if (blitz.shouldParallelize(.hash, len)) {
+        simd.parallelHashInt32Column(data[0..len], out_hashes[0..len]);
+    } else {
+        simd.hashInt32Column(data[0..len], out_hashes[0..len]);
+    }
 }
 
 export fn galleon_hash_f64_column(
@@ -846,7 +964,11 @@ export fn galleon_hash_f64_column(
     out_hashes: [*]u64,
     len: usize,
 ) void {
-    simd.hashFloat64Column(data[0..len], out_hashes[0..len]);
+    if (blitz.shouldParallelize(.hash, len)) {
+        simd.parallelHashFloat64Column(data[0..len], out_hashes[0..len]);
+    } else {
+        simd.hashFloat64Column(data[0..len], out_hashes[0..len]);
+    }
 }
 
 export fn galleon_hash_f32_column(
@@ -854,7 +976,11 @@ export fn galleon_hash_f32_column(
     out_hashes: [*]u64,
     len: usize,
 ) void {
-    simd.hashFloat32Column(data[0..len], out_hashes[0..len]);
+    if (blitz.shouldParallelize(.hash, len)) {
+        simd.parallelHashFloat32Column(data[0..len], out_hashes[0..len]);
+    } else {
+        simd.hashFloat32Column(data[0..len], out_hashes[0..len]);
+    }
 }
 
 export fn galleon_combine_hashes(
@@ -863,7 +989,11 @@ export fn galleon_combine_hashes(
     out_hashes: [*]u64,
     len: usize,
 ) void {
-    simd.combineHashes(hash1[0..len], hash2[0..len], out_hashes[0..len]);
+    if (blitz.shouldParallelize(.hash, len)) {
+        simd.parallelCombineHashes(hash1[0..len], hash2[0..len], out_hashes[0..len]);
+    } else {
+        simd.combineHashes(hash1[0..len], hash2[0..len], out_hashes[0..len]);
+    }
 }
 
 // ============================================================================
@@ -1362,6 +1492,114 @@ export fn galleon_groupby_count(
     num_groups: usize,
 ) void {
     groupby.countByGroup(group_ids[0..data_len], out[0..num_groups]);
+}
+
+// ============================================================================
+// ChunkedColumn V2 Operations
+// ============================================================================
+
+const chunked = @import("chunked_column.zig");
+
+/// ChunkedColumn handle for CGO
+pub const ChunkedColumnF64Handle = chunked.ChunkedColumn(f64);
+
+/// Create a new chunked column from data
+export fn galleon_chunked_f64_create(data: [*]const f64, len: usize) ?*ChunkedColumnF64Handle {
+    return chunked.ChunkedColumn(f64).createFromSlice(std.heap.c_allocator, data[0..len]) catch null;
+}
+
+/// Destroy a chunked column
+export fn galleon_chunked_f64_destroy(col: *ChunkedColumnF64Handle) void {
+    col.destroy();
+}
+
+/// Get total length of chunked column
+export fn galleon_chunked_f64_len(col: *const ChunkedColumnF64Handle) usize {
+    return col.total_length;
+}
+
+/// Get number of chunks
+export fn galleon_chunked_f64_num_chunks(col: *const ChunkedColumnF64Handle) usize {
+    return col.num_chunks;
+}
+
+/// Get element at index (returns 0 if out of bounds)
+export fn galleon_chunked_f64_get(col: *const ChunkedColumnF64Handle, index: usize) f64 {
+    return col.get(index) orelse 0.0;
+}
+
+/// Copy all data to output buffer (caller must allocate)
+export fn galleon_chunked_f64_copy_to_slice(col: *const ChunkedColumnF64Handle, out: [*]f64) void {
+    col.copyToSlice(out[0..col.total_length]);
+}
+
+/// Parallel sum over all chunks
+export fn galleon_chunked_f64_sum(col: *const ChunkedColumnF64Handle) f64 {
+    return chunked.OpsF64.sum(col);
+}
+
+/// Parallel min over all chunks
+export fn galleon_chunked_f64_min(col: *const ChunkedColumnF64Handle) f64 {
+    return chunked.OpsF64.min(col) orelse 0.0;
+}
+
+/// Parallel max over all chunks
+export fn galleon_chunked_f64_max(col: *const ChunkedColumnF64Handle) f64 {
+    return chunked.OpsF64.max(col) orelse 0.0;
+}
+
+/// Parallel mean over all chunks
+export fn galleon_chunked_f64_mean(col: *const ChunkedColumnF64Handle) f64 {
+    return chunked.OpsF64.mean(col) orelse 0.0;
+}
+
+/// Filter greater than - returns new chunked column
+export fn galleon_chunked_f64_filter_gt(col: *const ChunkedColumnF64Handle, threshold: f64) ?*ChunkedColumnF64Handle {
+    return chunked.OpsF64.filterGt(col, std.heap.c_allocator, threshold) catch null;
+}
+
+/// Filter less than - returns new chunked column
+export fn galleon_chunked_f64_filter_lt(col: *const ChunkedColumnF64Handle, threshold: f64) ?*ChunkedColumnF64Handle {
+    return chunked.OpsF64.filterLt(col, std.heap.c_allocator, threshold) catch null;
+}
+
+/// Argsort result handle
+pub const ChunkedArgsortResult = struct {
+    indices: []u32,
+    allocator: Allocator,
+};
+
+/// Argsort - returns indices that would sort the column
+export fn galleon_chunked_f64_argsort(col: *chunked.ChunkedColumn(f64)) ?*ChunkedArgsortResult {
+    const result = chunked.OpsF64.argsort(col, std.heap.c_allocator) catch return null;
+    const handle = std.heap.c_allocator.create(ChunkedArgsortResult) catch {
+        result.allocator.free(result.indices);
+        return null;
+    };
+    handle.indices = result.indices;
+    handle.allocator = result.allocator;
+    return handle;
+}
+
+/// Get argsort result length
+export fn galleon_chunked_argsort_len(handle: *const ChunkedArgsortResult) usize {
+    return handle.indices.len;
+}
+
+/// Get argsort result indices pointer
+export fn galleon_chunked_argsort_indices(handle: *const ChunkedArgsortResult) [*]const u32 {
+    return handle.indices.ptr;
+}
+
+/// Free argsort result
+export fn galleon_chunked_argsort_destroy(handle: *ChunkedArgsortResult) void {
+    handle.allocator.free(handle.indices);
+    std.heap.c_allocator.destroy(handle);
+}
+
+/// Sort - returns new sorted chunked column
+export fn galleon_chunked_f64_sort(col: *chunked.ChunkedColumn(f64)) ?*ChunkedColumnF64Handle {
+    return chunked.OpsF64.sort(col, std.heap.c_allocator) catch null;
 }
 
 // ============================================================================

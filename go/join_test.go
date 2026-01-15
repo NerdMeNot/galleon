@@ -853,3 +853,97 @@ func BenchmarkLeftJoin(b *testing.B) {
 		left.LeftJoin(right, On("id"))
 	}
 }
+
+// ============================================================================
+// Categorical Join Tests
+// ============================================================================
+
+func TestJoinCategoricalKeys(t *testing.T) {
+	// Test join with categorical key columns
+	left, _ := NewDataFrame(
+		NewSeriesCategorical("category", []string{"A", "B", "C", "A"}),
+		NewSeriesInt64("left_val", []int64{1, 2, 3, 4}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesCategorical("category", []string{"A", "B", "D"}),
+		NewSeriesFloat64("right_val", []float64{10, 20, 30}),
+	)
+
+	result, err := left.Join(right, On("category"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	// Inner join: A matches (twice from left), B matches once
+	// Expected: 3 rows (A-10, A-10, B-20)
+	if result.Height() != 3 {
+		t.Errorf("expected 3 rows, got %d", result.Height())
+	}
+
+	// Verify the category column is categorical
+	catCol := result.ColumnByName("category")
+	if catCol.DType() != Categorical {
+		t.Errorf("Expected Categorical dtype, got %s", catCol.DType())
+	}
+}
+
+func TestLeftJoinCategoricalKeys(t *testing.T) {
+	left, _ := NewDataFrame(
+		NewSeriesCategorical("fruit", []string{"apple", "banana", "cherry"}),
+		NewSeriesInt64("qty", []int64{10, 20, 30}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesCategorical("fruit", []string{"apple", "cherry"}),
+		NewSeriesFloat64("price", []float64{1.5, 2.5}),
+	)
+
+	result, err := left.LeftJoin(right, On("fruit"))
+	if err != nil {
+		t.Fatalf("failed to left join: %v", err)
+	}
+
+	// Left join: all left rows preserved (3 rows)
+	if result.Height() != 3 {
+		t.Errorf("expected 3 rows, got %d", result.Height())
+	}
+
+	// Categorical key should be preserved
+	fruitCol := result.ColumnByName("fruit")
+	if fruitCol.DType() != Categorical {
+		t.Errorf("Expected Categorical dtype, got %s", fruitCol.DType())
+	}
+}
+
+func TestJoinCategoricalValue(t *testing.T) {
+	// Test that categorical value columns are correctly transferred in join
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2, 3}),
+		NewSeriesCategorical("status", []string{"active", "inactive", "active"}),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", []int64{1, 2}),
+		NewSeriesFloat64("score", []float64{100, 200}),
+	)
+
+	result, err := left.Join(right, On("id"))
+	if err != nil {
+		t.Fatalf("failed to join: %v", err)
+	}
+
+	// Check that status column (categorical) is preserved
+	statusCol := result.ColumnByName("status")
+	if statusCol == nil {
+		t.Fatal("status column missing from result")
+	}
+	if statusCol.DType() != Categorical {
+		t.Errorf("Expected Categorical dtype for status, got %s", statusCol.DType())
+	}
+
+	// Verify values are correct
+	if statusCol.Get(0) != "active" {
+		t.Errorf("Expected 'active' for first row, got '%v'", statusCol.Get(0))
+	}
+}

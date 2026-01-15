@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("core.zig");
+const blitz = @import("../blitz/mod.zig");
 
 // Import core constants
 const MAX_THREADS = core.MAX_THREADS;
@@ -312,28 +313,33 @@ fn parallelSampleSortPairs(pairs: []ValueIndexPair, ascending: bool) void {
         bucket_cursors[bucket] += 1;
     }
 
-    // Sort each bucket in parallel
-    var threads: [8]?std.Thread = [_]?std.Thread{null} ** 8;
+    // Sort each bucket in parallel using Blitz
+    const BucketSortCtx = struct {
+        temp: []ValueIndexPair,
+        bucket_offsets: *const [9]usize,
+        num_buckets: usize,
+        ascending: bool,
+    };
 
-    for (0..num_buckets) |t| {
-        const start = bucket_offsets[t];
-        const end = bucket_offsets[t + 1];
-        if (start >= end) continue;
+    const ctx = BucketSortCtx{
+        .temp = temp,
+        .bucket_offsets = &bucket_offsets,
+        .num_buckets = num_buckets,
+        .ascending = ascending,
+    };
 
-        threads[t] = std.Thread.spawn(.{}, struct {
-            fn work(slice: []ValueIndexPair, asc: bool) void {
-                simdQuicksortPairs(slice, asc);
+    // Use Blitz to sort buckets in parallel
+    blitz.parallelForWithGrain(num_buckets, BucketSortCtx, ctx, struct {
+        fn sortBuckets(c: BucketSortCtx, start_bucket: usize, end_bucket: usize) void {
+            for (start_bucket..end_bucket) |i| {
+                const start = c.bucket_offsets[i];
+                const end = c.bucket_offsets[i + 1];
+                if (start < end) {
+                    simdQuicksortPairs(c.temp[start..end], c.ascending);
+                }
             }
-        }.work, .{ temp[start..end], ascending }) catch null;
-    }
-
-    // Wait for all threads
-    for (&threads) |*t| {
-        if (t.*) |thread| {
-            thread.join();
-            t.* = null;
         }
-    }
+    }.sortBuckets, 1); // Grain size 1 means each bucket can be stolen
 
     // Copy back
     @memcpy(pairs, temp);
@@ -391,37 +397,13 @@ fn argsortSmall(comptime T: type, data: []const T, out_indices: []u32, ascending
 // Public Argsort Functions
 // ============================================================================
 
-/// NEW: Pair-based sort using parallel sample sort + SIMD quicksort
-/// This is cache-friendly because comparisons access contiguous memory
+/// High-performance radix sort for f64 argsort
+/// Uses optimized single-threaded LSD radix sort
 pub fn argsortPairRadix(data: []const f64, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
-
-    const allocator = std.heap.page_allocator;
-
-    // Allocate pairs array
-    const pairs = allocator.alloc(ValueIndexPair, len) catch {
-        argsortFallback(f64, data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(pairs);
-
-    // Initialize pairs
-    for (data[0..len], 0..) |val, i| {
-        pairs[i] = .{ .value = val, .idx = @intCast(i) };
-    }
-
-    // Sort pairs using parallel sample sort
-    parallelSampleSortPairs(pairs, ascending);
-
-    // Extract indices
-    for (pairs, 0..) |pair, i| {
-        out_indices[i] = pair.idx;
-    }
+    argsortRadixF64(data, out_indices, ascending);
 }
 
-/// Parallel radix sort for f64 argsort - much faster than comparison sort
-/// Uses LSB radix sort with parallel counting and distribution
+/// Radix sort for f64 argsort - uses c_allocator for better performance
 pub fn argsortRadixF64(data: []const f64, out_indices: []u32, ascending: bool) void {
     const len = @min(data.len, out_indices.len);
     if (len == 0) return;
@@ -432,11 +414,10 @@ pub fn argsortRadixF64(data: []const f64, out_indices: []u32, ascending: bool) v
         return;
     }
 
-    const allocator = std.heap.page_allocator;
+    const allocator = std.heap.c_allocator;
 
     // Allocate working buffers
     const keys = allocator.alloc(u64, len) catch {
-        // Fallback to simple sort on allocation failure
         argsortSmall(f64, data, out_indices, ascending);
         return;
     };
@@ -460,34 +441,34 @@ pub fn argsortRadixF64(data: []const f64, out_indices: []u32, ascending: bool) v
         out_indices[i] = @intCast(i);
     }
 
-    // Perform radix sort passes (8 passes for 64-bit keys)
     var src_keys = keys;
     var dst_keys = temp_keys;
     var src_indices = out_indices;
     var dst_indices = temp_indices;
 
-    // LSD radix sort: process from least significant byte to most significant
-    var shift: u6 = 0;
-    while (shift < 64) : (shift += RADIX_BITS) {
+    // LSD radix sort: 8 passes for 64-bit keys
+    var pass: u8 = 0;
+    while (pass < 8) : (pass += 1) {
+        const shift: u6 = @intCast(pass * 8);
         // Count occurrences for this digit
-        var counts: [RADIX_SIZE]usize = [_]usize{0} ** RADIX_SIZE;
+        var counts: [256]usize = [_]usize{0} ** 256;
         for (src_keys[0..len]) |key| {
-            const digit: usize = @intCast((key >> shift) & RADIX_MASK);
+            const digit: usize = @intCast((key >> shift) & 0xFF);
             counts[digit] += 1;
         }
 
-        // Compute prefix sums (starting positions for each bucket)
-        var offsets: [RADIX_SIZE]usize = undefined;
+        // Compute prefix sums
+        var offsets: [256]usize = undefined;
         var total: usize = 0;
-        for (0..RADIX_SIZE) |i| {
+        for (0..256) |i| {
             offsets[i] = total;
             total += counts[i];
         }
 
-        // Distribute elements to destination
+        // Distribute elements
         for (0..len) |i| {
             const key = src_keys[i];
-            const digit: usize = @intCast((key >> shift) & RADIX_MASK);
+            const digit: usize = @intCast((key >> shift) & 0xFF);
             const dst_pos = offsets[digit];
             offsets[digit] += 1;
 
@@ -495,7 +476,7 @@ pub fn argsortRadixF64(data: []const f64, out_indices: []u32, ascending: bool) v
             dst_indices[dst_pos] = src_indices[i];
         }
 
-        // Swap source and destination for next pass
+        // Swap buffers
         const tmp_keys = src_keys;
         src_keys = dst_keys;
         dst_keys = tmp_keys;
@@ -505,10 +486,9 @@ pub fn argsortRadixF64(data: []const f64, out_indices: []u32, ascending: bool) v
         dst_indices = tmp_indices;
     }
 
-    // After 8 passes (even number), result is in original buffers
-    // Keys are in keys, indices are in out_indices - already correct!
+    // After 8 passes, result is in original buffers
 
-    // If descending, reverse the result
+    // If descending, reverse
     if (!ascending) {
         var left: usize = 0;
         var right: usize = len - 1;
@@ -522,8 +502,8 @@ pub fn argsortRadixF64(data: []const f64, out_indices: []u32, ascending: bool) v
     }
 }
 
-/// Parallel sort using divide-and-conquer with parallel merge
-/// Each thread sorts its chunk, then we merge in parallel
+/// Parallel sort using divide-and-conquer with parallel merge (using Blitz)
+/// Each chunk is sorted in parallel, then merged using parallel pairwise merge
 pub fn argsortParallelMerge(data: []const f64, out_indices: []u32, ascending: bool) void {
     const len = @min(data.len, out_indices.len);
     if (len == 0) return;
@@ -534,8 +514,14 @@ pub fn argsortParallelMerge(data: []const f64, out_indices: []u32, ascending: bo
         return;
     }
 
-    const num_threads = getMaxThreads();
+    const num_threads = blitz.numWorkers();
+    if (num_threads <= 1) {
+        argsortRadixF64(data, out_indices, ascending);
+        return;
+    }
+
     const allocator = std.heap.page_allocator;
+    const chunk_size = (len + num_threads - 1) / num_threads;
 
     // Allocate temp buffer for merging
     const temp_indices = allocator.alloc(u32, len) catch {
@@ -549,212 +535,121 @@ pub fn argsortParallelMerge(data: []const f64, out_indices: []u32, ascending: bo
         idx.* = @intCast(i);
     }
 
-    // Each thread sorts its chunk using radix sort
-    const chunk_size = (len + num_threads - 1) / num_threads;
-
-    // Allocate per-thread buffers for radix sort
-    const thread_keys = allocator.alloc([]u64, num_threads) catch {
-        argsortRadixF64(data, out_indices, ascending);
-        return;
+    // Phase 1: Sort chunks in parallel using Blitz
+    const ChunkSortCtx = struct {
+        data: []const f64,
+        indices: []u32,
+        chunk_size: usize,
+        len: usize,
+        ascending: bool,
     };
-    defer allocator.free(thread_keys);
 
-    const thread_temp_keys = allocator.alloc([]u64, num_threads) catch {
-        argsortRadixF64(data, out_indices, ascending);
-        return;
+    const sort_ctx = ChunkSortCtx{
+        .data = data,
+        .indices = out_indices,
+        .chunk_size = chunk_size,
+        .len = len,
+        .ascending = ascending,
     };
-    defer allocator.free(thread_temp_keys);
 
-    const thread_temp_indices = allocator.alloc([]u32, num_threads) catch {
-        argsortRadixF64(data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(thread_temp_indices);
+    blitz.parallelForWithGrain(num_threads, ChunkSortCtx, sort_ctx, struct {
+        fn sortChunks(ctx: ChunkSortCtx, start_chunk: usize, end_chunk: usize) void {
+            for (start_chunk..end_chunk) |t| {
+                const start = t * ctx.chunk_size;
+                const end = @min(start + ctx.chunk_size, ctx.len);
+                if (start >= ctx.len) continue;
 
-    // Allocate buffers for each thread
-    var alloc_failed = false;
-    for (0..num_threads) |t| {
-        const start = t * chunk_size;
-        const end = @min(start + chunk_size, len);
-        if (start >= len) {
-            thread_keys[t] = &[_]u64{};
-            thread_temp_keys[t] = &[_]u64{};
-            thread_temp_indices[t] = &[_]u32{};
-            continue;
-        }
-        const csize = end - start;
-
-        thread_keys[t] = allocator.alloc(u64, csize) catch {
-            alloc_failed = true;
-            break;
-        };
-        thread_temp_keys[t] = allocator.alloc(u64, csize) catch {
-            alloc_failed = true;
-            break;
-        };
-        thread_temp_indices[t] = allocator.alloc(u32, csize) catch {
-            alloc_failed = true;
-            break;
-        };
-    }
-
-    if (alloc_failed) {
-        // Free any allocated buffers and fallback
-        for (0..num_threads) |t| {
-            if (thread_keys[t].len > 0) allocator.free(thread_keys[t]);
-            if (thread_temp_keys[t].len > 0) allocator.free(thread_temp_keys[t]);
-            if (thread_temp_indices[t].len > 0) allocator.free(thread_temp_indices[t]);
-        }
-        argsortRadixF64(data, out_indices, ascending);
-        return;
-    }
-    defer {
-        for (0..num_threads) |t| {
-            if (thread_keys[t].len > 0) allocator.free(thread_keys[t]);
-            if (thread_temp_keys[t].len > 0) allocator.free(thread_temp_keys[t]);
-            if (thread_temp_indices[t].len > 0) allocator.free(thread_temp_indices[t]);
-        }
-    }
-
-    // Sort chunks in parallel
-    var sort_threads: [MAX_THREADS]?std.Thread = [_]?std.Thread{null} ** MAX_THREADS;
-    for (0..num_threads) |t| {
-        const start = t * chunk_size;
-        const end = @min(start + chunk_size, len);
-        if (start >= len) break;
-
-        sort_threads[t] = std.Thread.spawn(.{}, struct {
-            fn work(
-                d: []const f64,
-                indices: []u32,
-                keys: []u64,
-                temp_keys_buf: []u64,
-                temp_idx: []u32,
-                s: usize,
-                e: usize,
-            ) void {
-                const clen = e - s;
-                const chunk_indices = indices[s..e];
-
-                // Convert to sortable keys
-                for (0..clen) |i| {
-                    keys[i] = floatToSortable(d[s + i]);
+                const chunk = ctx.indices[start..end];
+                if (ctx.ascending) {
+                    std.sort.pdq(u32, chunk, ctx.data, struct {
+                        fn lt(d: []const f64, a: u32, b: u32) bool {
+                            return d[a] < d[b];
+                        }
+                    }.lt);
+                } else {
+                    std.sort.pdq(u32, chunk, ctx.data, struct {
+                        fn lt(d: []const f64, a: u32, b: u32) bool {
+                            return d[a] > d[b];
+                        }
+                    }.lt);
                 }
-
-                // LSD Radix sort on this chunk
-                var src_keys_local = keys;
-                var dst_keys_local = temp_keys_buf;
-                var src_idx = chunk_indices;
-                var dst_idx = temp_idx;
-
-                var shift: u6 = 0;
-                while (shift < 64) : (shift += RADIX_BITS) {
-                    var counts: [RADIX_SIZE]usize = [_]usize{0} ** RADIX_SIZE;
-                    for (src_keys_local[0..clen]) |key| {
-                        const digit: usize = @intCast((key >> shift) & RADIX_MASK);
-                        counts[digit] += 1;
-                    }
-
-                    var offsets: [RADIX_SIZE]usize = undefined;
-                    var total: usize = 0;
-                    for (0..RADIX_SIZE) |i| {
-                        offsets[i] = total;
-                        total += counts[i];
-                    }
-
-                    for (0..clen) |i| {
-                        const key = src_keys_local[i];
-                        const digit: usize = @intCast((key >> shift) & RADIX_MASK);
-                        const dst_pos = offsets[digit];
-                        offsets[digit] += 1;
-
-                        dst_keys_local[dst_pos] = key;
-                        dst_idx[dst_pos] = src_idx[i];
-                    }
-
-                    const tmp_k = src_keys_local;
-                    src_keys_local = dst_keys_local;
-                    dst_keys_local = tmp_k;
-
-                    const tmp_i = src_idx;
-                    src_idx = dst_idx;
-                    dst_idx = tmp_i;
-                }
-
-                // Copy result back if needed (after 8 passes, result is in original)
-                // Since we did 8 passes, result should be in keys and chunk_indices
             }
-        }.work, .{ data, out_indices, thread_keys[t], thread_temp_keys[t], thread_temp_indices[t], start, end }) catch null;
-    }
-
-    // Wait for all sorts to complete
-    for (&sort_threads) |*t| {
-        if (t.*) |thread| {
-            thread.join();
-            t.* = null;
         }
-    }
+    }.sortChunks, 1);
 
-    // Now merge sorted chunks using k-way merge
-    // For simplicity, do pairwise merging
+    // Phase 2: Parallel pairwise merge
     var current_chunk_size = chunk_size;
     var src = out_indices;
     var dst = temp_indices;
 
     while (current_chunk_size < len) {
-        const merge_threads_count = (len + 2 * current_chunk_size - 1) / (2 * current_chunk_size);
-        var merge_threads: [MAX_THREADS]?std.Thread = [_]?std.Thread{null} ** MAX_THREADS;
+        const num_merges = (len + 2 * current_chunk_size - 1) / (2 * current_chunk_size);
 
-        for (0..@min(merge_threads_count, num_threads)) |t| {
-            const merge_start = t * 2 * current_chunk_size;
-            if (merge_start >= len) break;
+        const MergeCtx = struct {
+            data: []const f64,
+            src: []const u32,
+            dst: []u32,
+            current_chunk_size: usize,
+            len: usize,
+            ascending: bool,
+        };
 
-            const mid = @min(merge_start + current_chunk_size, len);
-            const merge_end = @min(merge_start + 2 * current_chunk_size, len);
+        const merge_ctx = MergeCtx{
+            .data = data,
+            .src = src,
+            .dst = dst,
+            .current_chunk_size = current_chunk_size,
+            .len = len,
+            .ascending = ascending,
+        };
 
-            merge_threads[t] = std.Thread.spawn(.{}, struct {
-                fn work(d: []const f64, s_buf: []const u32, d_buf: []u32, left: usize, m: usize, right: usize, asc: bool) void {
+        blitz.parallelForWithGrain(num_merges, MergeCtx, merge_ctx, struct {
+            fn doMerges(ctx: MergeCtx, start_merge: usize, end_merge: usize) void {
+                for (start_merge..end_merge) |t| {
+                    const left = t * 2 * ctx.current_chunk_size;
+                    if (left >= ctx.len) continue;
+
+                    const mid = @min(left + ctx.current_chunk_size, ctx.len);
+                    const right = @min(left + 2 * ctx.current_chunk_size, ctx.len);
+
+                    if (mid >= right) {
+                        // Only one chunk, just copy
+                        @memcpy(ctx.dst[left..right], ctx.src[left..right]);
+                        continue;
+                    }
+
+                    // Merge [left..mid] and [mid..right]
                     var i = left;
-                    var j = m;
+                    var j = mid;
                     var k = left;
 
-                    while (i < m and j < right) {
-                        const cmp = if (asc)
-                            d[s_buf[i]] <= d[s_buf[j]]
+                    while (i < mid and j < right) {
+                        const cmp = if (ctx.ascending)
+                            ctx.data[ctx.src[i]] <= ctx.data[ctx.src[j]]
                         else
-                            d[s_buf[i]] >= d[s_buf[j]];
+                            ctx.data[ctx.src[i]] >= ctx.data[ctx.src[j]];
 
                         if (cmp) {
-                            d_buf[k] = s_buf[i];
+                            ctx.dst[k] = ctx.src[i];
                             i += 1;
                         } else {
-                            d_buf[k] = s_buf[j];
+                            ctx.dst[k] = ctx.src[j];
                             j += 1;
                         }
                         k += 1;
                     }
 
-                    while (i < m) {
-                        d_buf[k] = s_buf[i];
-                        i += 1;
+                    while (i < mid) : (i += 1) {
+                        ctx.dst[k] = ctx.src[i];
                         k += 1;
                     }
-
-                    while (j < right) {
-                        d_buf[k] = s_buf[j];
-                        j += 1;
+                    while (j < right) : (j += 1) {
+                        ctx.dst[k] = ctx.src[j];
                         k += 1;
                     }
                 }
-            }.work, .{ data, src, dst, merge_start, mid, merge_end, ascending }) catch null;
-        }
-
-        for (&merge_threads) |*t| {
-            if (t.*) |thread| {
-                thread.join();
-                t.* = null;
             }
-        }
+        }.doMerges, 1);
 
         // Swap buffers
         const tmp = src;
@@ -770,7 +665,7 @@ pub fn argsortParallelMerge(data: []const f64, out_indices: []u32, ascending: bo
     }
 }
 
-/// Parallel argsort using divide-and-conquer
+/// Parallel argsort using divide-and-conquer with Blitz
 /// Divides data into chunks, sorts each in parallel, then merges
 pub fn argsortParallel(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
     const len = @min(data.len, out_indices.len);
@@ -782,8 +677,9 @@ pub fn argsortParallel(comptime T: type, data: []const T, out_indices: []u32, as
         return;
     }
 
-    const num_threads = getMaxThreads();
-    const chunk_size = (len + num_threads - 1) / num_threads;
+    const num_workers = blitz.numWorkers();
+    const chunk_size = (len + num_workers - 1) / num_workers;
+    const num_chunks = (len + chunk_size - 1) / chunk_size;
     const allocator = std.heap.page_allocator;
 
     // Initialize indices
@@ -798,43 +694,49 @@ pub fn argsortParallel(comptime T: type, data: []const T, out_indices: []u32, as
     };
     defer allocator.free(temp);
 
-    // Sort chunks in parallel
-    var threads: [MAX_THREADS]?std.Thread = [_]?std.Thread{null} ** MAX_THREADS;
+    // Sort chunks in parallel using Blitz
+    const ChunkSortCtx = struct {
+        data: []const T,
+        indices: []u32,
+        chunk_size: usize,
+        len: usize,
+        ascending: bool,
+    };
 
-    for (0..num_threads) |t| {
-        const start = t * chunk_size;
-        const end = @min(start + chunk_size, len);
-        if (start >= len) break;
+    const sort_ctx = ChunkSortCtx{
+        .data = data,
+        .indices = out_indices,
+        .chunk_size = chunk_size,
+        .len = len,
+        .ascending = ascending,
+    };
 
-        threads[t] = std.Thread.spawn(.{}, struct {
-            fn work(d: []const T, indices: []u32, s: usize, e: usize, asc: bool) void {
-                const chunk = indices[s..e];
-                if (asc) {
-                    std.mem.sort(u32, chunk, d, struct {
-                        fn lt(ctx: []const T, a: u32, b: u32) bool {
-                            return ctx[a] < ctx[b];
+    blitz.parallelForWithGrain(num_chunks, ChunkSortCtx, sort_ctx, struct {
+        fn sortChunks(ctx: ChunkSortCtx, start_chunk: usize, end_chunk: usize) void {
+            for (start_chunk..end_chunk) |c| {
+                const start = c * ctx.chunk_size;
+                const end = @min(start + ctx.chunk_size, ctx.len);
+                if (start >= ctx.len) break;
+
+                const chunk = ctx.indices[start..end];
+                if (ctx.ascending) {
+                    std.mem.sort(u32, chunk, ctx.data, struct {
+                        fn lt(d: []const T, a: u32, b: u32) bool {
+                            return d[a] < d[b];
                         }
                     }.lt);
                 } else {
-                    std.mem.sort(u32, chunk, d, struct {
-                        fn lt(ctx: []const T, a: u32, b: u32) bool {
-                            return ctx[a] > ctx[b];
+                    std.mem.sort(u32, chunk, ctx.data, struct {
+                        fn lt(d: []const T, a: u32, b: u32) bool {
+                            return d[a] > d[b];
                         }
                     }.lt);
                 }
             }
-        }.work, .{ data, out_indices, start, end, ascending }) catch null;
-    }
-
-    // Wait for all sorts
-    for (&threads) |*t| {
-        if (t.*) |thread| {
-            thread.join();
-            t.* = null;
         }
-    }
+    }.sortChunks, 1);
 
-    // Merge sorted chunks (log(num_threads) levels)
+    // Merge sorted chunks (log(num_chunks) levels)
     var current_size = chunk_size;
     var src = out_indices;
     var dst = temp;
@@ -842,106 +744,66 @@ pub fn argsortParallel(comptime T: type, data: []const T, out_indices: []u32, as
     while (current_size < len) {
         const num_merges = (len + 2 * current_size - 1) / (2 * current_size);
 
-        // Parallel merge
-        var merge_threads: [MAX_THREADS]?std.Thread = [_]?std.Thread{null} ** MAX_THREADS;
+        // Parallel merge using Blitz
+        const MergeCtx = struct {
+            data: []const T,
+            src: []const u32,
+            dst: []u32,
+            current_size: usize,
+            len: usize,
+            ascending: bool,
+        };
 
-        for (0..@min(num_merges, num_threads)) |t| {
-            const left = t * 2 * current_size;
-            if (left >= len) break;
+        const merge_ctx = MergeCtx{
+            .data = data,
+            .src = src,
+            .dst = dst,
+            .current_size = current_size,
+            .len = len,
+            .ascending = ascending,
+        };
 
-            const mid = @min(left + current_size, len);
-            const right = @min(left + 2 * current_size, len);
+        blitz.parallelForWithGrain(num_merges, MergeCtx, merge_ctx, struct {
+            fn doMerges(ctx: MergeCtx, start_merge: usize, end_merge: usize) void {
+                for (start_merge..end_merge) |m| {
+                    const left = m * 2 * ctx.current_size;
+                    if (left >= ctx.len) break;
 
-            if (mid >= right) {
-                // Only one chunk, just copy
-                @memcpy(dst[left..right], src[left..right]);
-                continue;
-            }
+                    const mid = @min(left + ctx.current_size, ctx.len);
+                    const right = @min(left + 2 * ctx.current_size, ctx.len);
 
-            merge_threads[t] = std.Thread.spawn(.{}, struct {
-                fn work(d: []const T, s_buf: []const u32, d_buf: []u32, l: usize, m: usize, r: usize, asc: bool) void {
-                    var i = l;
-                    var j = m;
-                    var k = l;
+                    if (mid >= right) {
+                        @memcpy(ctx.dst[left..right], ctx.src[left..right]);
+                        continue;
+                    }
 
-                    while (i < m and j < r) {
-                        const cmp = if (asc)
-                            d[s_buf[i]] <= d[s_buf[j]]
+                    // Merge [left..mid] and [mid..right]
+                    var i = left;
+                    var j = mid;
+                    var k = left;
+
+                    while (i < mid and j < right) {
+                        const cmp = if (ctx.ascending)
+                            ctx.data[ctx.src[i]] <= ctx.data[ctx.src[j]]
                         else
-                            d[s_buf[i]] >= d[s_buf[j]];
+                            ctx.data[ctx.src[i]] >= ctx.data[ctx.src[j]];
 
                         if (cmp) {
-                            d_buf[k] = s_buf[i];
+                            ctx.dst[k] = ctx.src[i];
                             i += 1;
                         } else {
-                            d_buf[k] = s_buf[j];
+                            ctx.dst[k] = ctx.src[j];
                             j += 1;
                         }
                         k += 1;
                     }
 
-                    while (i < m) : (i += 1) {
-                        d_buf[k] = s_buf[i];
-                        k += 1;
-                    }
-                    while (j < r) : (j += 1) {
-                        d_buf[k] = s_buf[j];
-                        k += 1;
-                    }
+                    @memcpy(ctx.dst[k .. k + (mid - i)], ctx.src[i..mid]);
+                    k += mid - i;
+                    @memcpy(ctx.dst[k .. k + (right - j)], ctx.src[j..right]);
                 }
-            }.work, .{ data, src, dst, left, mid, right, ascending }) catch null;
-        }
-
-        // Handle remaining merges if more than num_threads
-        for (@min(num_merges, num_threads)..num_merges) |t| {
-            const left = t * 2 * current_size;
-            if (left >= len) break;
-
-            const mid = @min(left + current_size, len);
-            const right = @min(left + 2 * current_size, len);
-
-            if (mid >= right) {
-                @memcpy(dst[left..right], src[left..right]);
-                continue;
             }
-
-            // Sequential merge for extra chunks
-            var i = left;
-            var j = mid;
-            var k = left;
-
-            while (i < mid and j < right) {
-                const cmp = if (ascending)
-                    data[src[i]] <= data[src[j]]
-                else
-                    data[src[i]] >= data[src[j]];
-
-                if (cmp) {
-                    dst[k] = src[i];
-                    i += 1;
-                } else {
-                    dst[k] = src[j];
-                    j += 1;
-                }
-                k += 1;
-            }
-
-            while (i < mid) : (i += 1) {
-                dst[k] = src[i];
-                k += 1;
-            }
-            while (j < right) : (j += 1) {
-                dst[k] = src[j];
-                k += 1;
-            }
-        }
-
-        for (&merge_threads) |*t| {
-            if (t.*) |thread| {
-                thread.join();
-                t.* = null;
-            }
-        }
+        }.doMerges, 1);
 
         // Swap buffers
         const tmp = src;
@@ -957,46 +819,55 @@ pub fn argsortParallel(comptime T: type, data: []const T, out_indices: []u32, as
     }
 }
 
-/// In-place parallel sort (modifies out_indices directly)
+/// In-place parallel sort using Blitz (modifies out_indices directly)
 fn argsortParallelInPlace(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
     const len = out_indices.len;
-    const num_threads = getMaxThreads();
-    const chunk_size = (len + num_threads - 1) / num_threads;
+    const num_workers = blitz.numWorkers();
+    const chunk_size = (len + num_workers - 1) / num_workers;
+    const num_chunks = (len + chunk_size - 1) / chunk_size;
     const allocator = std.heap.page_allocator;
 
-    // Sort chunks in parallel
-    var threads: [MAX_THREADS]?std.Thread = [_]?std.Thread{null} ** MAX_THREADS;
+    // Sort chunks in parallel using Blitz
+    const ChunkSortCtx = struct {
+        data: []const T,
+        indices: []u32,
+        chunk_size: usize,
+        len: usize,
+        ascending: bool,
+    };
 
-    for (0..num_threads) |t| {
-        const start = t * chunk_size;
-        const end = @min(start + chunk_size, len);
-        if (start >= len) break;
+    const sort_ctx = ChunkSortCtx{
+        .data = data,
+        .indices = out_indices,
+        .chunk_size = chunk_size,
+        .len = len,
+        .ascending = ascending,
+    };
 
-        threads[t] = std.Thread.spawn(.{}, struct {
-            fn work(d: []const T, indices: []u32, asc: bool) void {
-                if (asc) {
-                    std.mem.sort(u32, indices, d, struct {
-                        fn lt(ctx: []const T, a: u32, b: u32) bool {
-                            return ctx[a] < ctx[b];
+    blitz.parallelForWithGrain(num_chunks, ChunkSortCtx, sort_ctx, struct {
+        fn sortChunks(ctx: ChunkSortCtx, start_chunk: usize, end_chunk: usize) void {
+            for (start_chunk..end_chunk) |c| {
+                const start = c * ctx.chunk_size;
+                const end = @min(start + ctx.chunk_size, ctx.len);
+                if (start >= ctx.len) break;
+
+                const chunk = ctx.indices[start..end];
+                if (ctx.ascending) {
+                    std.mem.sort(u32, chunk, ctx.data, struct {
+                        fn lt(d: []const T, a: u32, b: u32) bool {
+                            return d[a] < d[b];
                         }
                     }.lt);
                 } else {
-                    std.mem.sort(u32, indices, d, struct {
-                        fn lt(ctx: []const T, a: u32, b: u32) bool {
-                            return ctx[a] > ctx[b];
+                    std.mem.sort(u32, chunk, ctx.data, struct {
+                        fn lt(d: []const T, a: u32, b: u32) bool {
+                            return d[a] > d[b];
                         }
                     }.lt);
                 }
             }
-        }.work, .{ data, out_indices[start..end], ascending }) catch null;
-    }
-
-    for (&threads) |*t| {
-        if (t.*) |thread| {
-            thread.join();
-            t.* = null;
         }
-    }
+    }.sortChunks, 1);
 
     // K-way merge using heap
     const temp_buf = allocator.alloc(u32, len) catch {
@@ -1005,43 +876,73 @@ fn argsortParallelInPlace(comptime T: type, data: []const T, out_indices: []u32,
     };
     defer allocator.free(temp_buf);
 
-    // Merge pairs iteratively
+    // Merge pairs iteratively using Blitz
     var current_size = chunk_size;
     var src = out_indices;
     var dst = temp_buf;
 
     while (current_size < len) {
-        var merge_idx: usize = 0;
-        while (merge_idx * 2 * current_size < len) : (merge_idx += 1) {
-            const left = merge_idx * 2 * current_size;
-            const mid = @min(left + current_size, len);
-            const right = @min(left + 2 * current_size, len);
+        const num_merges = (len + 2 * current_size - 1) / (2 * current_size);
 
-            // Merge [left..mid] and [mid..right] into dst[left..right]
-            var i = left;
-            var j = mid;
-            var k = left;
+        const MergeCtx = struct {
+            data: []const T,
+            src: []const u32,
+            dst: []u32,
+            current_size: usize,
+            len: usize,
+            ascending: bool,
+        };
 
-            while (i < mid and j < right) {
-                const cmp = if (ascending)
-                    data[src[i]] <= data[src[j]]
-                else
-                    data[src[i]] >= data[src[j]];
+        const merge_ctx = MergeCtx{
+            .data = data,
+            .src = src,
+            .dst = dst,
+            .current_size = current_size,
+            .len = len,
+            .ascending = ascending,
+        };
 
-                if (cmp) {
-                    dst[k] = src[i];
-                    i += 1;
-                } else {
-                    dst[k] = src[j];
-                    j += 1;
+        blitz.parallelForWithGrain(num_merges, MergeCtx, merge_ctx, struct {
+            fn doMerges(ctx: MergeCtx, start_merge: usize, end_merge: usize) void {
+                for (start_merge..end_merge) |m| {
+                    const left = m * 2 * ctx.current_size;
+                    if (left >= ctx.len) break;
+
+                    const mid = @min(left + ctx.current_size, ctx.len);
+                    const right = @min(left + 2 * ctx.current_size, ctx.len);
+
+                    if (mid >= right) {
+                        @memcpy(ctx.dst[left..right], ctx.src[left..right]);
+                        continue;
+                    }
+
+                    // Merge [left..mid] and [mid..right]
+                    var i = left;
+                    var j = mid;
+                    var k = left;
+
+                    while (i < mid and j < right) {
+                        const cmp = if (ctx.ascending)
+                            ctx.data[ctx.src[i]] <= ctx.data[ctx.src[j]]
+                        else
+                            ctx.data[ctx.src[i]] >= ctx.data[ctx.src[j]];
+
+                        if (cmp) {
+                            ctx.dst[k] = ctx.src[i];
+                            i += 1;
+                        } else {
+                            ctx.dst[k] = ctx.src[j];
+                            j += 1;
+                        }
+                        k += 1;
+                    }
+
+                    @memcpy(ctx.dst[k .. k + (mid - i)], ctx.src[i..mid]);
+                    k += mid - i;
+                    @memcpy(ctx.dst[k .. k + (right - j)], ctx.src[j..right]);
                 }
-                k += 1;
             }
-
-            @memcpy(dst[k .. k + (mid - i)], src[i..mid]);
-            k += mid - i;
-            @memcpy(dst[k .. k + (right - j)], src[j..right]);
-        }
+        }.doMerges, 1);
 
         const tmp = src;
         src = dst;

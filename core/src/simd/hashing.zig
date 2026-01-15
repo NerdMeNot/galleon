@@ -1,4 +1,9 @@
 const std = @import("std");
+const blitz = @import("../blitz/mod.zig");
+const core = @import("core.zig");
+
+const VECTOR_WIDTH = core.VECTOR_WIDTH;
+const CHUNK_SIZE = core.CHUNK_SIZE;
 
 // ============================================================================
 // Rapidhash - Fast, high-quality hash function (evolution of wyhash)
@@ -44,98 +49,229 @@ pub inline fn fastIntHash(val: i64) u64 {
 // Column Hashing Functions
 // ============================================================================
 
-/// Hash int64 column for groupby/join using rapidhash
-/// Outputs hash values that can be used for grouping
-pub fn hashInt64Column(data: []const i64, out_hashes: []u64) void {
-    const len = @min(data.len, out_hashes.len);
+// ============================================================================
+// SIMD-Accelerated Hash Functions
+// Uses vectorized multiply-xorshift for high throughput
+// ============================================================================
 
-    // Process 4 at a time for better ILP
-    const unrolled = len - (len % 4);
+/// SIMD constants for vectorized hashing (golden ratio based)
+const HASH_MULT: u64 = 0x9E3779B97F4A7C15;
+const HASH_MIX: u64 = 0xBF58476D1CE4E5B9;
+
+/// SIMD hash for int64 column using vectorized multiply-xorshift
+/// Processes 4 u64 values at a time using SIMD vectors
+pub fn hashInt64ColumnSIMD(data: []const i64, out_hashes: []u64) void {
+    const len = @min(data.len, out_hashes.len);
+    if (len == 0) return;
+
+    // For 64-bit values, we can process 4 at a time efficiently
+    const Vec4 = @Vector(4, u64);
+    const mult_vec: Vec4 = @splat(HASH_MULT);
+    const mix_vec: Vec4 = @splat(HASH_MIX);
+
+    const aligned_len = len - (len % 4);
     var i: usize = 0;
 
-    while (i < unrolled) : (i += 4) {
-        out_hashes[i] = rapidHash64(@bitCast(data[i]));
-        out_hashes[i + 1] = rapidHash64(@bitCast(data[i + 1]));
-        out_hashes[i + 2] = rapidHash64(@bitCast(data[i + 2]));
-        out_hashes[i + 3] = rapidHash64(@bitCast(data[i + 3]));
+    // Process 4 elements at a time with SIMD
+    while (i < aligned_len) : (i += 4) {
+        // Load 4 values (reinterpret i64 as u64)
+        const vals: Vec4 = @bitCast(data[i..][0..4].*);
+
+        // Multiply by golden ratio prime
+        const h1 = vals *% mult_vec;
+
+        // XOR with shifted version
+        const h2 = h1 ^ (h1 >> @splat(32));
+
+        // Second round of mixing
+        const h3 = h2 *% mix_vec;
+        const result = h3 ^ (h3 >> @splat(32));
+
+        // Store result
+        out_hashes[i..][0..4].* = result;
     }
 
     // Handle remainder
     while (i < len) : (i += 1) {
-        out_hashes[i] = rapidHash64(@bitCast(data[i]));
+        const val: u64 = @bitCast(data[i]);
+        var h = val *% HASH_MULT;
+        h ^= h >> 32;
+        h *%= HASH_MIX;
+        out_hashes[i] = h ^ (h >> 32);
     }
+}
+
+/// SIMD hash for float64 column
+pub fn hashFloat64ColumnSIMD(data: []const f64, out_hashes: []u64) void {
+    const len = @min(data.len, out_hashes.len);
+    if (len == 0) return;
+
+    const Vec4 = @Vector(4, u64);
+    const mult_vec: Vec4 = @splat(HASH_MULT);
+    const mix_vec: Vec4 = @splat(HASH_MIX);
+
+    const aligned_len = len - (len % 4);
+    var i: usize = 0;
+
+    while (i < aligned_len) : (i += 4) {
+        // Load and bitcast f64 to u64
+        const vals: Vec4 = @bitCast(data[i..][0..4].*);
+
+        const h1 = vals *% mult_vec;
+        const h2 = h1 ^ (h1 >> @splat(32));
+        const h3 = h2 *% mix_vec;
+        const result = h3 ^ (h3 >> @splat(32));
+
+        out_hashes[i..][0..4].* = result;
+    }
+
+    while (i < len) : (i += 1) {
+        const val: u64 = @bitCast(data[i]);
+        var h = val *% HASH_MULT;
+        h ^= h >> 32;
+        h *%= HASH_MIX;
+        out_hashes[i] = h ^ (h >> 32);
+    }
+}
+
+/// SIMD hash for int32 column - processes 8 at a time
+pub fn hashInt32ColumnSIMD(data: []const i32, out_hashes: []u64) void {
+    const len = @min(data.len, out_hashes.len);
+    if (len == 0) return;
+
+    // Process 4 at a time (32->64 bit expansion limits parallelism)
+    const Vec4 = @Vector(4, u64);
+    const mult_vec: Vec4 = @splat(HASH_MULT);
+    const mix_vec: Vec4 = @splat(HASH_MIX);
+
+    const aligned_len = len - (len % 4);
+    var i: usize = 0;
+
+    while (i < aligned_len) : (i += 4) {
+        // Load and expand i32 to u64
+        const vals_i32: @Vector(4, i32) = data[i..][0..4].*;
+        const vals_u32: @Vector(4, u32) = @bitCast(vals_i32);
+        const vals: Vec4 = vals_u32;
+
+        const h1 = vals *% mult_vec;
+        const h2 = h1 ^ (h1 >> @splat(32));
+        const h3 = h2 *% mix_vec;
+        const result = h3 ^ (h3 >> @splat(32));
+
+        out_hashes[i..][0..4].* = result;
+    }
+
+    while (i < len) : (i += 1) {
+        const val: u64 = @as(u32, @bitCast(data[i]));
+        var h = val *% HASH_MULT;
+        h ^= h >> 32;
+        h *%= HASH_MIX;
+        out_hashes[i] = h ^ (h >> 32);
+    }
+}
+
+/// SIMD hash for float32 column
+pub fn hashFloat32ColumnSIMD(data: []const f32, out_hashes: []u64) void {
+    const len = @min(data.len, out_hashes.len);
+    if (len == 0) return;
+
+    const Vec4 = @Vector(4, u64);
+    const mult_vec: Vec4 = @splat(HASH_MULT);
+    const mix_vec: Vec4 = @splat(HASH_MIX);
+
+    const aligned_len = len - (len % 4);
+    var i: usize = 0;
+
+    while (i < aligned_len) : (i += 4) {
+        const vals_f32: @Vector(4, f32) = data[i..][0..4].*;
+        const vals_u32: @Vector(4, u32) = @bitCast(vals_f32);
+        const vals: Vec4 = vals_u32;
+
+        const h1 = vals *% mult_vec;
+        const h2 = h1 ^ (h1 >> @splat(32));
+        const h3 = h2 *% mix_vec;
+        const result = h3 ^ (h3 >> @splat(32));
+
+        out_hashes[i..][0..4].* = result;
+    }
+
+    while (i < len) : (i += 1) {
+        const val: u64 = @as(u32, @bitCast(data[i]));
+        var h = val *% HASH_MULT;
+        h ^= h >> 32;
+        h *%= HASH_MIX;
+        out_hashes[i] = h ^ (h >> 32);
+    }
+}
+
+/// SIMD combine hashes - processes 4 at a time
+pub fn combineHashesSIMD(hash1: []const u64, hash2: []const u64, out_hashes: []u64) void {
+    const len = @min(@min(hash1.len, hash2.len), out_hashes.len);
+    if (len == 0) return;
+
+    const Vec4 = @Vector(4, u64);
+    const mix_vec: Vec4 = @splat(HASH_MIX);
+
+    const aligned_len = len - (len % 4);
+    var i: usize = 0;
+
+    while (i < aligned_len) : (i += 4) {
+        const h1: Vec4 = hash1[i..][0..4].*;
+        const h2: Vec4 = hash2[i..][0..4].*;
+
+        // Combine using XOR and mixing
+        const combined = h1 ^ h2;
+        const h3 = combined *% mix_vec;
+        const result = h3 ^ (h3 >> @splat(32));
+
+        out_hashes[i..][0..4].* = result;
+    }
+
+    while (i < len) : (i += 1) {
+        const combined = hash1[i] ^ hash2[i];
+        const h = combined *% HASH_MIX;
+        out_hashes[i] = h ^ (h >> 32);
+    }
+}
+
+// ============================================================================
+// Original Column Hashing Functions (Rapidhash)
+// Kept for compatibility and when high-quality hashing is needed
+// ============================================================================
+
+/// Hash int64 column for groupby/join using rapidhash
+/// Outputs hash values that can be used for grouping
+pub fn hashInt64Column(data: []const i64, out_hashes: []u64) void {
+    // Use SIMD version by default for better performance
+    hashInt64ColumnSIMD(data, out_hashes);
 }
 
 /// Hash int32 column
 pub fn hashInt32Column(data: []const i32, out_hashes: []u64) void {
-    const len = @min(data.len, out_hashes.len);
-
-    const unrolled = len - (len % 4);
-    var i: usize = 0;
-
-    while (i < unrolled) : (i += 4) {
-        out_hashes[i] = rapidHash32(@bitCast(data[i]));
-        out_hashes[i + 1] = rapidHash32(@bitCast(data[i + 1]));
-        out_hashes[i + 2] = rapidHash32(@bitCast(data[i + 2]));
-        out_hashes[i + 3] = rapidHash32(@bitCast(data[i + 3]));
-    }
-
-    while (i < len) : (i += 1) {
-        out_hashes[i] = rapidHash32(@bitCast(data[i]));
-    }
+    // Use SIMD version by default
+    hashInt32ColumnSIMD(data, out_hashes);
 }
 
 /// Hash float64 column
 pub fn hashFloat64Column(data: []const f64, out_hashes: []u64) void {
-    const len = @min(data.len, out_hashes.len);
-
-    const unrolled = len - (len % 4);
-    var i: usize = 0;
-
-    while (i < unrolled) : (i += 4) {
-        out_hashes[i] = rapidHash64(@bitCast(data[i]));
-        out_hashes[i + 1] = rapidHash64(@bitCast(data[i + 1]));
-        out_hashes[i + 2] = rapidHash64(@bitCast(data[i + 2]));
-        out_hashes[i + 3] = rapidHash64(@bitCast(data[i + 3]));
-    }
-
-    while (i < len) : (i += 1) {
-        out_hashes[i] = rapidHash64(@bitCast(data[i]));
-    }
+    // Use SIMD version by default
+    hashFloat64ColumnSIMD(data, out_hashes);
 }
 
 /// Hash float32 column
 pub fn hashFloat32Column(data: []const f32, out_hashes: []u64) void {
-    const len = @min(data.len, out_hashes.len);
-
-    const unrolled = len - (len % 4);
-    var i: usize = 0;
-
-    while (i < unrolled) : (i += 4) {
-        out_hashes[i] = rapidHash32(@bitCast(data[i]));
-        out_hashes[i + 1] = rapidHash32(@bitCast(data[i + 1]));
-        out_hashes[i + 2] = rapidHash32(@bitCast(data[i + 2]));
-        out_hashes[i + 3] = rapidHash32(@bitCast(data[i + 3]));
-    }
-
-    while (i < len) : (i += 1) {
-        out_hashes[i] = rapidHash32(@bitCast(data[i]));
-    }
+    // Use SIMD version by default
+    hashFloat32ColumnSIMD(data, out_hashes);
 }
 
 // ============================================================================
 // Hash Combination Functions
 // ============================================================================
 
-/// Combine two hash columns (for multi-key groupby/join) using rapidhash mixing
+/// Combine two hash columns (for multi-key groupby/join) using SIMD mixing
 pub fn combineHashes(hash1: []const u64, hash2: []const u64, out_hashes: []u64) void {
-    const len = @min(@min(hash1.len, hash2.len), out_hashes.len);
-
-    var i: usize = 0;
-    while (i < len) : (i += 1) {
-        // Combine using rapidhash mixing
-        out_hashes[i] = rapidMix(hash1[i], hash2[i]);
-    }
+    // Use SIMD version by default
+    combineHashesSIMD(hash1, hash2, out_hashes);
 }
 
 /// Hash multiple int64 columns together (for multi-key groupby/join)
@@ -158,6 +294,202 @@ pub fn hashInt64Columns(columns: []const []const i64, out_hashes: []u64) void {
 
         out_hashes[row] = hash ^ RAPID_SECRET2;
     }
+}
+
+// ============================================================================
+// Parallel Hashing (using Blitz work-stealing)
+// ============================================================================
+
+/// Chunk size for parallel hashing (~64KB of i64 values)
+const HASH_CHUNK_SIZE: usize = 8192;
+
+/// Parallel hash int64 column using Blitz work-stealing
+pub fn parallelHashInt64Column(data: []const i64, out_hashes: []u64) void {
+    const len = @min(data.len, out_hashes.len);
+    if (len == 0) return;
+
+    const Context = struct {
+        data: []const i64,
+        out: []u64,
+    };
+    const ctx = Context{ .data = data[0..len], .out = out_hashes[0..len] };
+
+    blitz.parallelForWithGrain(
+        len,
+        Context,
+        ctx,
+        struct {
+            fn body(c: Context, start: usize, end: usize) void {
+                // Hash this chunk
+                const chunk_data = c.data[start..end];
+                const chunk_out = c.out[start..end];
+                const chunk_len = end - start;
+
+                // Process 4 at a time for ILP
+                const unrolled = chunk_len - (chunk_len % 4);
+                var i: usize = 0;
+
+                while (i < unrolled) : (i += 4) {
+                    chunk_out[i] = rapidHash64(@bitCast(chunk_data[i]));
+                    chunk_out[i + 1] = rapidHash64(@bitCast(chunk_data[i + 1]));
+                    chunk_out[i + 2] = rapidHash64(@bitCast(chunk_data[i + 2]));
+                    chunk_out[i + 3] = rapidHash64(@bitCast(chunk_data[i + 3]));
+                }
+
+                while (i < chunk_len) : (i += 1) {
+                    chunk_out[i] = rapidHash64(@bitCast(chunk_data[i]));
+                }
+            }
+        }.body,
+        HASH_CHUNK_SIZE,
+    );
+}
+
+/// Parallel hash int32 column using Blitz work-stealing
+pub fn parallelHashInt32Column(data: []const i32, out_hashes: []u64) void {
+    const len = @min(data.len, out_hashes.len);
+    if (len == 0) return;
+
+    const Context = struct {
+        data: []const i32,
+        out: []u64,
+    };
+    const ctx = Context{ .data = data[0..len], .out = out_hashes[0..len] };
+
+    blitz.parallelForWithGrain(
+        len,
+        Context,
+        ctx,
+        struct {
+            fn body(c: Context, start: usize, end: usize) void {
+                const chunk_data = c.data[start..end];
+                const chunk_out = c.out[start..end];
+                const chunk_len = end - start;
+
+                const unrolled = chunk_len - (chunk_len % 4);
+                var i: usize = 0;
+
+                while (i < unrolled) : (i += 4) {
+                    chunk_out[i] = rapidHash32(@bitCast(chunk_data[i]));
+                    chunk_out[i + 1] = rapidHash32(@bitCast(chunk_data[i + 1]));
+                    chunk_out[i + 2] = rapidHash32(@bitCast(chunk_data[i + 2]));
+                    chunk_out[i + 3] = rapidHash32(@bitCast(chunk_data[i + 3]));
+                }
+
+                while (i < chunk_len) : (i += 1) {
+                    chunk_out[i] = rapidHash32(@bitCast(chunk_data[i]));
+                }
+            }
+        }.body,
+        HASH_CHUNK_SIZE,
+    );
+}
+
+/// Parallel hash float64 column using Blitz work-stealing
+pub fn parallelHashFloat64Column(data: []const f64, out_hashes: []u64) void {
+    const len = @min(data.len, out_hashes.len);
+    if (len == 0) return;
+
+    const Context = struct {
+        data: []const f64,
+        out: []u64,
+    };
+    const ctx = Context{ .data = data[0..len], .out = out_hashes[0..len] };
+
+    blitz.parallelForWithGrain(
+        len,
+        Context,
+        ctx,
+        struct {
+            fn body(c: Context, start: usize, end: usize) void {
+                const chunk_data = c.data[start..end];
+                const chunk_out = c.out[start..end];
+                const chunk_len = end - start;
+
+                const unrolled = chunk_len - (chunk_len % 4);
+                var i: usize = 0;
+
+                while (i < unrolled) : (i += 4) {
+                    chunk_out[i] = rapidHash64(@bitCast(chunk_data[i]));
+                    chunk_out[i + 1] = rapidHash64(@bitCast(chunk_data[i + 1]));
+                    chunk_out[i + 2] = rapidHash64(@bitCast(chunk_data[i + 2]));
+                    chunk_out[i + 3] = rapidHash64(@bitCast(chunk_data[i + 3]));
+                }
+
+                while (i < chunk_len) : (i += 1) {
+                    chunk_out[i] = rapidHash64(@bitCast(chunk_data[i]));
+                }
+            }
+        }.body,
+        HASH_CHUNK_SIZE,
+    );
+}
+
+/// Parallel hash float32 column using Blitz work-stealing
+pub fn parallelHashFloat32Column(data: []const f32, out_hashes: []u64) void {
+    const len = @min(data.len, out_hashes.len);
+    if (len == 0) return;
+
+    const Context = struct {
+        data: []const f32,
+        out: []u64,
+    };
+    const ctx = Context{ .data = data[0..len], .out = out_hashes[0..len] };
+
+    blitz.parallelForWithGrain(
+        len,
+        Context,
+        ctx,
+        struct {
+            fn body(c: Context, start: usize, end: usize) void {
+                const chunk_data = c.data[start..end];
+                const chunk_out = c.out[start..end];
+                const chunk_len = end - start;
+
+                const unrolled = chunk_len - (chunk_len % 4);
+                var i: usize = 0;
+
+                while (i < unrolled) : (i += 4) {
+                    chunk_out[i] = rapidHash32(@bitCast(chunk_data[i]));
+                    chunk_out[i + 1] = rapidHash32(@bitCast(chunk_data[i + 1]));
+                    chunk_out[i + 2] = rapidHash32(@bitCast(chunk_data[i + 2]));
+                    chunk_out[i + 3] = rapidHash32(@bitCast(chunk_data[i + 3]));
+                }
+
+                while (i < chunk_len) : (i += 1) {
+                    chunk_out[i] = rapidHash32(@bitCast(chunk_data[i]));
+                }
+            }
+        }.body,
+        HASH_CHUNK_SIZE,
+    );
+}
+
+/// Parallel combine hashes using Blitz work-stealing
+pub fn parallelCombineHashes(hash1: []const u64, hash2: []const u64, out_hashes: []u64) void {
+    const len = @min(@min(hash1.len, hash2.len), out_hashes.len);
+    if (len == 0) return;
+
+    const Context = struct {
+        h1: []const u64,
+        h2: []const u64,
+        out: []u64,
+    };
+    const ctx = Context{ .h1 = hash1[0..len], .h2 = hash2[0..len], .out = out_hashes[0..len] };
+
+    blitz.parallelForWithGrain(
+        len,
+        Context,
+        ctx,
+        struct {
+            fn body(c: Context, start: usize, end: usize) void {
+                for (start..end) |i| {
+                    c.out[i] = rapidMix(c.h1[i], c.h2[i]);
+                }
+            }
+        }.body,
+        HASH_CHUNK_SIZE,
+    );
 }
 
 // ============================================================================

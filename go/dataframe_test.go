@@ -960,3 +960,176 @@ func TestFromStructsNotStruct(t *testing.T) {
 		t.Error("FromStructs with slice of non-struct should fail")
 	}
 }
+
+// ============================================================================
+// ChunkedColumn DataFrame Tests
+// ============================================================================
+
+func TestDataFrame_HasChunkedColumns(t *testing.T) {
+	// Regular DataFrame
+	df, err := NewDataFrame(
+		NewSeriesFloat64("a", []float64{1, 2, 3}),
+		NewSeriesInt64("b", []int64{4, 5, 6}),
+	)
+	if err != nil {
+		t.Fatalf("NewDataFrame failed: %v", err)
+	}
+	if df.HasChunkedColumns() {
+		t.Error("Regular DataFrame should not have chunked columns")
+	}
+
+	// DataFrame with chunked column
+	df2, err := NewDataFrame(
+		NewSeriesFloat64Chunked("a", []float64{1, 2, 3}),
+		NewSeriesInt64("b", []int64{4, 5, 6}),
+	)
+	if err != nil {
+		t.Fatalf("NewDataFrame with chunked column failed: %v", err)
+	}
+	if !df2.HasChunkedColumns() {
+		t.Error("DataFrame with chunked column should report HasChunkedColumns=true")
+	}
+}
+
+func TestDataFrame_ChunkedColumnNames(t *testing.T) {
+	df, err := NewDataFrame(
+		NewSeriesFloat64Chunked("chunked1", []float64{1, 2, 3}),
+		NewSeriesInt64("regular", []int64{4, 5, 6}),
+		NewSeriesFloat64Chunked("chunked2", []float64{7, 8, 9}),
+	)
+	if err != nil {
+		t.Fatalf("NewDataFrame failed: %v", err)
+	}
+
+	names := df.ChunkedColumnNames()
+	if len(names) != 2 {
+		t.Errorf("ChunkedColumnNames returned %d names, want 2", len(names))
+	}
+	if names[0] != "chunked1" || names[1] != "chunked2" {
+		t.Errorf("ChunkedColumnNames = %v, want [chunked1, chunked2]", names)
+	}
+}
+
+func TestDataFrame_ToChunked(t *testing.T) {
+	df, err := NewDataFrame(
+		NewSeriesFloat64("a", []float64{1, 2, 3}),
+		NewSeriesInt64("b", []int64{4, 5, 6}),
+		NewSeriesFloat64("c", []float64{7, 8, 9}),
+	)
+	if err != nil {
+		t.Fatalf("NewDataFrame failed: %v", err)
+	}
+
+	chunkedDf, err := df.ToChunked()
+	if err != nil {
+		t.Fatalf("ToChunked failed: %v", err)
+	}
+
+	// Check Float64 columns are now chunked
+	colA := chunkedDf.ColumnByName("a")
+	if !colA.IsChunked() {
+		t.Error("Column 'a' should be chunked after ToChunked")
+	}
+
+	colC := chunkedDf.ColumnByName("c")
+	if !colC.IsChunked() {
+		t.Error("Column 'c' should be chunked after ToChunked")
+	}
+
+	// Check Int64 column is not chunked (only Float64 supported)
+	colB := chunkedDf.ColumnByName("b")
+	if colB.IsChunked() {
+		t.Error("Column 'b' (Int64) should not be chunked")
+	}
+
+	// Verify data is preserved
+	dataA := colA.Float64()
+	expected := []float64{1, 2, 3}
+	for i, v := range expected {
+		if dataA[i] != v {
+			t.Errorf("Column 'a' data mismatch at %d: got %f, want %f", i, dataA[i], v)
+		}
+	}
+}
+
+func TestDataFrame_ToFlat(t *testing.T) {
+	// Start with chunked DataFrame
+	df, err := NewDataFrame(
+		NewSeriesFloat64Chunked("a", []float64{1, 2, 3}),
+		NewSeriesInt64("b", []int64{4, 5, 6}),
+	)
+	if err != nil {
+		t.Fatalf("NewDataFrame failed: %v", err)
+	}
+
+	if !df.HasChunkedColumns() {
+		t.Error("DataFrame should have chunked columns")
+	}
+
+	flatDf, err := df.ToFlat()
+	if err != nil {
+		t.Fatalf("ToFlat failed: %v", err)
+	}
+
+	if flatDf.HasChunkedColumns() {
+		t.Error("DataFrame should not have chunked columns after ToFlat")
+	}
+
+	// Verify data is preserved
+	dataA := flatDf.ColumnByName("a").Float64()
+	expected := []float64{1, 2, 3}
+	for i, v := range expected {
+		if dataA[i] != v {
+			t.Errorf("Column 'a' data mismatch at %d: got %f, want %f", i, dataA[i], v)
+		}
+	}
+}
+
+func TestNewDataFrameChunked(t *testing.T) {
+	df, err := NewDataFrameChunked(
+		NewSeriesFloat64("a", []float64{1, 2, 3}),
+		NewSeriesInt64("b", []int64{4, 5, 6}),
+		NewSeriesFloat64("c", []float64{7, 8, 9}),
+	)
+	if err != nil {
+		t.Fatalf("NewDataFrameChunked failed: %v", err)
+	}
+
+	// Float64 columns should be chunked
+	if !df.ColumnByName("a").IsChunked() {
+		t.Error("Column 'a' should be chunked")
+	}
+	if !df.ColumnByName("c").IsChunked() {
+		t.Error("Column 'c' should be chunked")
+	}
+
+	// Int64 column should not be chunked
+	if df.ColumnByName("b").IsChunked() {
+		t.Error("Column 'b' (Int64) should not be chunked")
+	}
+}
+
+func TestDataFrame_SortByChunked(t *testing.T) {
+	// Create DataFrame with chunked column
+	df, err := NewDataFrame(
+		NewSeriesFloat64Chunked("values", []float64{5, 2, 8, 1, 9}),
+		NewSeriesString("names", []string{"e", "b", "h", "a", "i"}),
+	)
+	if err != nil {
+		t.Fatalf("NewDataFrame failed: %v", err)
+	}
+
+	sorted, err := df.SortBy("values", true)
+	if err != nil {
+		t.Fatalf("SortBy failed: %v", err)
+	}
+
+	// Verify sorted order
+	names := sorted.ColumnByName("names").Strings()
+	expected := []string{"a", "b", "e", "h", "i"}
+	for i, v := range expected {
+		if names[i] != v {
+			t.Errorf("Sorted names[%d] = %s, want %s", i, names[i], v)
+		}
+	}
+}

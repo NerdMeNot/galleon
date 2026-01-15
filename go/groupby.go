@@ -142,6 +142,11 @@ func (gb *GroupBy) hashColumn(col *Series, outHashes []uint64) {
 			h.WriteString(s)
 			outHashes[i] = h.Sum64()
 		}
+	case Categorical:
+		// Hash the int32 indices using SIMD (much faster than string hashing!)
+		// Categorical columns store strings as integer indices, so we can use
+		// fast integer hashing instead of string hashing.
+		HashI32Column(col.CategoricalIndices(), outHashes)
 	case Bool:
 		// Simple hash for bools
 		data := col.Bool()
@@ -189,6 +194,11 @@ func (gb *GroupBy) keysEqual(keyCols []*Series, row1, row2 int) bool {
 			}
 		case Bool:
 			if col.Bool()[row1] != col.Bool()[row2] {
+				return false
+			}
+		case Categorical:
+			// Compare indices (faster than string comparison)
+			if col.CategoricalIndices()[row1] != col.CategoricalIndices()[row2] {
 				return false
 			}
 		default:
@@ -448,6 +458,8 @@ func newEmptySeries(name string, dtype DType) *Series {
 		return NewSeriesBool(name, []bool{})
 	case String:
 		return NewSeriesString(name, []string{})
+	case Categorical:
+		return NewSeriesCategorical(name, []string{})
 	default:
 		return NewSeriesString(name, []string{})
 	}
@@ -505,6 +517,23 @@ func (gb *GroupBy) buildKeyColumn(name string, dtype DType, keyIdx int) *Series 
 			data[i] = srcData[gb.firstRowIdx[i]]
 		}
 		return NewSeriesString(name, data)
+
+	case Categorical:
+		// Extract string values for the group keys
+		// The result stays categorical with the same dictionary
+		srcIndices := keyCol.CategoricalIndices()
+		categories := keyCol.Categories()
+		data := make([]string, numGroups)
+		for i := 0; i < numGroups; i++ {
+			data[i] = categories[srcIndices[gb.firstRowIdx[i]]]
+		}
+		// Create new categorical with extracted values (may have fewer unique categories)
+		result, _ := NewSeriesCategoricalWithCategories(name, data, categories)
+		if result != nil {
+			return result
+		}
+		// Fallback: create fresh categorical
+		return NewSeriesCategorical(name, data)
 
 	default:
 		data := make([]string, numGroups)
@@ -925,6 +954,17 @@ func (gb *GroupBy) computeFirst(agg Aggregation) (*Series, error) {
 		}
 		return NewSeriesString(agg.alias, data), nil
 
+	case Categorical:
+		srcIndices := col.CategoricalIndices()
+		categories := col.Categories()
+		data := make([]string, numGroups)
+		for i := 0; i < numGroups; i++ {
+			if gb.groupCounts[i] > 0 {
+				data[i] = categories[srcIndices[gb.firstRowIdx[i]]]
+			}
+		}
+		return NewSeriesCategorical(agg.alias, data), nil
+
 	default:
 		return nil, fmt.Errorf("first not supported for dtype %s", col.DType())
 	}
@@ -1000,6 +1040,17 @@ func (gb *GroupBy) computeLast(agg Aggregation) (*Series, error) {
 			}
 		}
 		return NewSeriesString(agg.alias, data), nil
+
+	case Categorical:
+		srcIndices := col.CategoricalIndices()
+		categories := col.Categories()
+		data := make([]string, numGroups)
+		for i := 0; i < numGroups; i++ {
+			if gb.groupCounts[i] > 0 {
+				data[i] = categories[srcIndices[lastRowIdx[i]]]
+			}
+		}
+		return NewSeriesCategorical(agg.alias, data), nil
 
 	default:
 		return nil, fmt.Errorf("last not supported for dtype %s", col.DType())

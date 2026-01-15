@@ -25,8 +25,24 @@ type Series struct {
 	i32Col  *C.ColumnI32
 	boolCol *C.ColumnBool
 
+	// ChunkedColumn storage (V2) - cache-friendly chunk-based storage
+	// When set, operations use chunk-optimized algorithms
+	chunkedF64 *ChunkedColumnF64
+
 	// String data is stored in Go (Zig doesn't handle strings well via FFI)
 	strData []string
+
+	// Categorical data (dictionary-encoded strings)
+	catData *CategoricalData
+}
+
+// CategoricalData represents dictionary-encoded string data.
+// Strings are stored once in Dictionary, and data is stored as indices.
+// This is much more efficient for columns with repeated string values.
+type CategoricalData struct {
+	Indices    []int32          // The actual data: indices into Dictionary
+	Dictionary []string         // Unique category values
+	indexMap   map[string]int32 // For encoding: string -> index
 }
 
 // NewSeriesFloat64 creates a new Float64 series from a slice
@@ -51,6 +67,31 @@ func NewSeriesFloat64(name string, data []float64) *Series {
 	}
 	runtime.SetFinalizer(s, (*Series).free)
 	return s
+}
+
+// NewSeriesFloat64Chunked creates a Float64 series backed by ChunkedColumn.
+// ChunkedColumn stores data in L2-cache-sized chunks (64K elements = 512KB)
+// for optimal cache performance on large datasets.
+// Use this for datasets > 100K elements where operations like sort and filter benefit.
+func NewSeriesFloat64Chunked(name string, data []float64) *Series {
+	chunked := NewChunkedColumnF64(data)
+	if chunked == nil {
+		return nil
+	}
+
+	s := &Series{
+		name:       name,
+		dtype:      Float64,
+		length:     len(data),
+		chunkedF64: chunked,
+	}
+	// Note: chunkedF64 has its own finalizer, no need to set one for the Series
+	return s
+}
+
+// IsChunked returns true if the series uses chunked storage (V2).
+func (s *Series) IsChunked() bool {
+	return s.chunkedF64 != nil
 }
 
 // NewSeriesFloat32 creates a new Float32 series from a slice
@@ -167,6 +208,90 @@ func NewSeriesString(name string, data []string) *Series {
 	}
 }
 
+// NewSeriesCategorical creates a new Categorical series from string data.
+// The data is dictionary-encoded: unique values are stored once in a dictionary,
+// and the actual data consists of integer indices into the dictionary.
+// This is much more efficient for columns with many repeated values.
+func NewSeriesCategorical(name string, data []string) *Series {
+	if len(data) == 0 {
+		return &Series{
+			name:   name,
+			dtype:  Categorical,
+			length: 0,
+			catData: &CategoricalData{
+				Indices:    []int32{},
+				Dictionary: []string{},
+				indexMap:   make(map[string]int32),
+			},
+		}
+	}
+
+	// Build dictionary and encode indices
+	indexMap := make(map[string]int32)
+	dictionary := make([]string, 0)
+	indices := make([]int32, len(data))
+
+	for i, val := range data {
+		if idx, exists := indexMap[val]; exists {
+			indices[i] = idx
+		} else {
+			idx := int32(len(dictionary))
+			indexMap[val] = idx
+			dictionary = append(dictionary, val)
+			indices[i] = idx
+		}
+	}
+
+	return &Series{
+		name:   name,
+		dtype:  Categorical,
+		length: len(data),
+		catData: &CategoricalData{
+			Indices:    indices,
+			Dictionary: dictionary,
+			indexMap:   indexMap,
+		},
+	}
+}
+
+// NewSeriesCategoricalWithCategories creates a Categorical series with predefined categories.
+// This is useful when you want specific category ordering or when categories are known in advance.
+func NewSeriesCategoricalWithCategories(name string, data []string, categories []string) (*Series, error) {
+	// Build index map from categories
+	indexMap := make(map[string]int32, len(categories))
+	for i, cat := range categories {
+		if _, exists := indexMap[cat]; exists {
+			return nil, fmt.Errorf("duplicate category: %s", cat)
+		}
+		indexMap[cat] = int32(i)
+	}
+
+	// Encode data
+	indices := make([]int32, len(data))
+	for i, val := range data {
+		idx, exists := indexMap[val]
+		if !exists {
+			return nil, fmt.Errorf("value %q not in categories", val)
+		}
+		indices[i] = idx
+	}
+
+	// Copy categories
+	dict := make([]string, len(categories))
+	copy(dict, categories)
+
+	return &Series{
+		name:   name,
+		dtype:  Categorical,
+		length: len(data),
+		catData: &CategoricalData{
+			Indices:    indices,
+			Dictionary: dict,
+			indexMap:   indexMap,
+		},
+	}, nil
+}
+
 // NewSeries creates a Series from any supported slice type.
 // This is a convenience constructor that infers the type from the input.
 // Supported types: []float64, []float32, []int64, []int32, []bool, []string
@@ -265,7 +390,14 @@ func (s *Series) IsEmpty() bool {
 
 // Float64 returns the underlying data as []float64
 func (s *Series) Float64() []float64 {
-	if s.dtype != Float64 || s.f64Col == nil || s.length == 0 {
+	if s.dtype != Float64 || s.length == 0 {
+		return nil
+	}
+	// For chunked storage, materialize the data
+	if s.chunkedF64 != nil {
+		return s.chunkedF64.ToSlice()
+	}
+	if s.f64Col == nil {
 		return nil
 	}
 	ptr := C.galleon_column_f64_data(s.f64Col)
@@ -316,6 +448,77 @@ func (s *Series) Strings() []string {
 	return s.strData
 }
 
+// Categories returns the unique category values for a Categorical series.
+// Returns nil for non-categorical series.
+func (s *Series) Categories() []string {
+	if s.dtype != Categorical || s.catData == nil {
+		return nil
+	}
+	// Return a copy to prevent modification
+	result := make([]string, len(s.catData.Dictionary))
+	copy(result, s.catData.Dictionary)
+	return result
+}
+
+// NumCategories returns the number of unique categories.
+// Returns 0 for non-categorical series.
+func (s *Series) NumCategories() int {
+	if s.dtype != Categorical || s.catData == nil {
+		return 0
+	}
+	return len(s.catData.Dictionary)
+}
+
+// CategoricalIndices returns the underlying integer indices for a Categorical series.
+// Each value is an index into Categories(). Returns nil for non-categorical series.
+func (s *Series) CategoricalIndices() []int32 {
+	if s.dtype != Categorical || s.catData == nil {
+		return nil
+	}
+	return s.catData.Indices
+}
+
+// GetCategoryIndex returns the category index for a value at the given position.
+// Returns -1 for non-categorical series or out of bounds index.
+func (s *Series) GetCategoryIndex(index int) int32 {
+	if s.dtype != Categorical || s.catData == nil || index < 0 || index >= s.length {
+		return -1
+	}
+	return s.catData.Indices[index]
+}
+
+// AsCategorical converts a String series to a Categorical series.
+// Returns a new series with dictionary-encoded data.
+// Returns nil if the series is not of String type.
+func (s *Series) AsCategorical() *Series {
+	if s.dtype != String {
+		return nil
+	}
+	return NewSeriesCategorical(s.name, s.strData)
+}
+
+// AsString converts a Categorical series back to a String series.
+// Returns a new series with expanded string data.
+// Returns nil if the series is not of Categorical type.
+func (s *Series) AsString() *Series {
+	if s.dtype != Categorical || s.catData == nil {
+		return nil
+	}
+
+	// Expand indices to full strings
+	strData := make([]string, s.length)
+	for i, idx := range s.catData.Indices {
+		strData[i] = s.catData.Dictionary[idx]
+	}
+
+	return &Series{
+		name:    s.name,
+		dtype:   String,
+		length:  s.length,
+		strData: strData,
+	}
+}
+
 // Get returns the value at index as interface{}
 func (s *Series) Get(index int) interface{} {
 	if index < 0 || index >= s.length {
@@ -324,6 +527,9 @@ func (s *Series) Get(index int) interface{} {
 
 	switch s.dtype {
 	case Float64:
+		if s.chunkedF64 != nil {
+			return s.chunkedF64.Get(index)
+		}
 		if s.f64Col != nil {
 			return float64(C.galleon_column_f64_get(s.f64Col, C.size_t(index)))
 		}
@@ -347,13 +553,24 @@ func (s *Series) Get(index int) interface{} {
 		if s.strData != nil {
 			return s.strData[index]
 		}
+	case Categorical:
+		if s.catData != nil {
+			idx := s.catData.Indices[index]
+			return s.catData.Dictionary[idx]
+		}
 	}
 	return nil
 }
 
 // GetFloat64 returns the value at index as float64
 func (s *Series) GetFloat64(index int) (float64, bool) {
-	if s.dtype != Float64 || s.f64Col == nil || index < 0 || index >= s.length {
+	if s.dtype != Float64 || index < 0 || index >= s.length {
+		return 0, false
+	}
+	if s.chunkedF64 != nil {
+		return s.chunkedF64.Get(index), true
+	}
+	if s.f64Col == nil {
 		return 0, false
 	}
 	return float64(C.galleon_column_f64_get(s.f64Col, C.size_t(index))), true
@@ -387,6 +604,10 @@ func (s *Series) Sum() float64 {
 
 	switch s.dtype {
 	case Float64:
+		// Use chunked storage if available
+		if s.chunkedF64 != nil {
+			return s.chunkedF64.Sum()
+		}
 		data := s.Float64()
 		if data == nil {
 			return 0
@@ -445,6 +666,10 @@ func (s *Series) Min() float64 {
 
 	switch s.dtype {
 	case Float64:
+		// Use chunked storage if available
+		if s.chunkedF64 != nil {
+			return s.chunkedF64.Min()
+		}
 		data := s.Float64()
 		if data == nil {
 			return 0
@@ -480,6 +705,10 @@ func (s *Series) Max() float64 {
 
 	switch s.dtype {
 	case Float64:
+		// Use chunked storage if available
+		if s.chunkedF64 != nil {
+			return s.chunkedF64.Max()
+		}
 		data := s.Float64()
 		if data == nil {
 			return 0
@@ -515,6 +744,10 @@ func (s *Series) Mean() float64 {
 
 	switch s.dtype {
 	case Float64:
+		// Use chunked storage if available
+		if s.chunkedF64 != nil {
+			return s.chunkedF64.Mean()
+		}
 		data := s.Float64()
 		if data == nil {
 			return 0
@@ -910,6 +1143,76 @@ func (s *Series) NeqString(target string) []uint32 {
 // Sort Operations
 // ============================================================================
 
+// Sort returns a new sorted series.
+// For chunked Float64 series, uses optimized chunk-based sorting with k-way merge.
+func (s *Series) Sort() *Series {
+	if s.length == 0 {
+		return &Series{name: s.name, dtype: s.dtype, length: 0}
+	}
+
+	switch s.dtype {
+	case Float64:
+		// Use chunked storage if available
+		if s.chunkedF64 != nil {
+			sorted := s.chunkedF64.Sort()
+			if sorted == nil {
+				return nil
+			}
+			return &Series{
+				name:       s.name,
+				dtype:      Float64,
+				length:     sorted.Len(),
+				chunkedF64: sorted,
+			}
+		}
+		// Fall back to regular sort via argsort + gather
+		data := s.Float64()
+		if data == nil {
+			return nil
+		}
+		indices := ArgsortF64(data, true)
+		result := make([]float64, len(data))
+		for i, idx := range indices {
+			result[i] = data[idx]
+		}
+		return NewSeriesFloat64(s.name, result)
+	case Float32:
+		data := s.Float32()
+		if data == nil {
+			return nil
+		}
+		indices := ArgsortF32(data, true)
+		result := make([]float32, len(data))
+		for i, idx := range indices {
+			result[i] = data[idx]
+		}
+		return NewSeriesFloat32(s.name, result)
+	case Int64:
+		data := s.Int64()
+		if data == nil {
+			return nil
+		}
+		indices := ArgsortI64(data, true)
+		result := make([]int64, len(data))
+		for i, idx := range indices {
+			result[i] = data[idx]
+		}
+		return NewSeriesInt64(s.name, result)
+	case Int32:
+		data := s.Int32()
+		if data == nil {
+			return nil
+		}
+		indices := ArgsortI32(data, true)
+		result := make([]int32, len(data))
+		for i, idx := range indices {
+			result[i] = data[idx]
+		}
+		return NewSeriesInt32(s.name, result)
+	}
+	return nil
+}
+
 // Argsort returns indices that would sort the series
 func (s *Series) Argsort(ascending bool) []uint32 {
 	if s.length == 0 {
@@ -918,6 +1221,14 @@ func (s *Series) Argsort(ascending bool) []uint32 {
 
 	switch s.dtype {
 	case Float64:
+		// Use chunked storage if available (ascending only for now)
+		if s.chunkedF64 != nil && ascending {
+			result := s.chunkedF64.Argsort()
+			if result == nil {
+				return nil
+			}
+			return result.Indices()
+		}
 		data := s.Float64()
 		if data == nil {
 			return nil
