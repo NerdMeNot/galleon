@@ -191,6 +191,8 @@ pub const argsort = sorting.argsort;
 pub const argsortInt = sorting.argsortInt;
 pub const argsortParallel = sorting.argsortParallel;
 pub const argsortRadixF64 = sorting.argsortRadixF64;
+pub const argsortRadixI64 = sorting.argsortRadixI64;
+pub const argsortRadixI32 = sorting.argsortRadixI32;
 pub const argsortParallelMerge = sorting.argsortParallelMerge;
 
 // Re-export join types and functions

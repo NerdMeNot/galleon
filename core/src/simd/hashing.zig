@@ -35,14 +35,18 @@ pub inline fn rapidHash32(val: u32) u64 {
     return rapidHash64(extended);
 }
 
-/// Fast integer hash using multiply-shift
-/// Faster than rapidHash64 for simple integer keys
-/// Uses a prime multiplier for good bit mixing
+/// Fast integer hash using triple multiply-shift mixing
+/// Better distribution than single multiply-xorshift for join operations
+/// Uses Murmur3-style finalization for excellent bit avalanche
 pub inline fn fastIntHash(val: i64) u64 {
-    const x = @as(u64, @bitCast(val));
-    // Multiply by golden ratio prime, then mix high/low bits
-    const h = x *% 0x9E3779B97F4A7C15;
-    return h ^ (h >> 32);
+    var x = @as(u64, @bitCast(val));
+    // Murmur3 64-bit finalization mix
+    x ^= x >> 33;
+    x *%= 0xFF51AFD7ED558CCD;
+    x ^= x >> 33;
+    x *%= 0xC4CEB9FE1A85EC53;
+    x ^= x >> 33;
+    return x;
 }
 
 // ============================================================================
@@ -51,12 +55,12 @@ pub inline fn fastIntHash(val: i64) u64 {
 
 // ============================================================================
 // SIMD-Accelerated Hash Functions
-// Uses vectorized multiply-xorshift for high throughput
+// Uses vectorized Murmur3 finalization for high throughput and excellent distribution
 // ============================================================================
 
-/// SIMD constants for vectorized hashing (golden ratio based)
-const HASH_MULT: u64 = 0x9E3779B97F4A7C15;
-const HASH_MIX: u64 = 0xBF58476D1CE4E5B9;
+/// SIMD constants for vectorized hashing (Murmur3 finalization constants)
+const HASH_MULT: u64 = 0xFF51AFD7ED558CCD;
+const HASH_MIX: u64 = 0xC4CEB9FE1A85EC53;
 
 /// SIMD hash for int64 column using vectorized multiply-xorshift
 /// Processes 4 u64 values at a time using SIMD vectors
@@ -72,32 +76,30 @@ pub fn hashInt64ColumnSIMD(data: []const i64, out_hashes: []u64) void {
     const aligned_len = len - (len % 4);
     var i: usize = 0;
 
-    // Process 4 elements at a time with SIMD
+    // Process 4 elements at a time with SIMD (Murmur3 finalization)
     while (i < aligned_len) : (i += 4) {
         // Load 4 values (reinterpret i64 as u64)
-        const vals: Vec4 = @bitCast(data[i..][0..4].*);
+        var vals: Vec4 = @bitCast(data[i..][0..4].*);
 
-        // Multiply by golden ratio prime
-        const h1 = vals *% mult_vec;
-
-        // XOR with shifted version
-        const h2 = h1 ^ (h1 >> @splat(32));
-
-        // Second round of mixing
-        const h3 = h2 *% mix_vec;
-        const result = h3 ^ (h3 >> @splat(32));
+        // Murmur3 64-bit finalization mix (3 rounds)
+        vals ^= vals >> @splat(33);
+        vals *%= mult_vec;
+        vals ^= vals >> @splat(33);
+        vals *%= mix_vec;
+        vals ^= vals >> @splat(33);
 
         // Store result
-        out_hashes[i..][0..4].* = result;
+        out_hashes[i..][0..4].* = vals;
     }
 
-    // Handle remainder
+    // Handle remainder with same mixing
     while (i < len) : (i += 1) {
-        const val: u64 = @bitCast(data[i]);
-        var h = val *% HASH_MULT;
-        h ^= h >> 32;
+        var h: u64 = @bitCast(data[i]);
+        h ^= h >> 33;
+        h *%= HASH_MULT;
+        h ^= h >> 33;
         h *%= HASH_MIX;
-        out_hashes[i] = h ^ (h >> 32);
+        out_hashes[i] = h ^ (h >> 33);
     }
 }
 

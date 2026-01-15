@@ -358,36 +358,42 @@ pub const LockFreeProbeContext = struct {
 // Helper Functions
 // ============================================================================
 
-/// Fast cardinality estimation using small sample
-/// Returns multiplier to use: 2 (high cardinality), 4 (medium), or 8 (low)
+/// Fast cardinality estimation using hash-based sampling
+/// Returns multiplier to use: 2 (high cardinality) or 3 (low cardinality)
+/// Uses O(n) hash-based duplicate detection instead of O(n²)
 fn estimateCardinalityMultiplier(keys: []const i64) usize {
     const n = keys.len;
-    if (n <= 100) return 4; // Default for small
+    if (n <= 100) return 2; // Default for small arrays
 
-    // Quick check: sample first 64 keys for duplicates
-    // This is very fast and gives us a hint about data characteristics
-    const sample_size: usize = @min(64, n);
+    // Use a small hash table to detect duplicates in sample
+    // This is O(sample_size) instead of O(sample_size²)
+    const sample_size: usize = @min(128, n);
+
+    // Small hash table for quick duplicate detection (64 slots)
+    var seen: [64]i64 = undefined;
+    var seen_valid: [64]bool = [_]bool{false} ** 64;
     var duplicates: usize = 0;
 
-    // Simple duplicate detection in small sample
-    for (1..sample_size) |i| {
+    for (0..sample_size) |i| {
         const key = keys[i];
-        for (keys[0..i]) |prev| {
-            if (prev == key) {
+        // Simple hash to get slot
+        const slot: usize = @intCast((@as(u64, @bitCast(key)) *% 0x9E3779B97F4A7C15) >> 58);
+        if (seen_valid[slot]) {
+            if (seen[slot] == key) {
                 duplicates += 1;
-                break;
             }
+        } else {
+            seen[slot] = key;
+            seen_valid[slot] = true;
         }
     }
 
-    // High duplicates in sample -> low cardinality -> need larger table
-    // No duplicates in sample -> high cardinality -> smaller table is fine
-    if (duplicates == 0) {
-        return 4; // High cardinality - 4x for good performance
-    } else if (duplicates < sample_size / 4) {
-        return 6; // Medium cardinality
+    // More aggressive sizing: Polars uses ~2x
+    // High duplicates in sample -> need slightly larger table for chains
+    if (duplicates < sample_size / 8) {
+        return 2; // High cardinality - 2x is sufficient
     } else {
-        return 8; // Low cardinality - need more space for chains
+        return 3; // Low cardinality - 3x for chains
     }
 }
 
@@ -396,8 +402,8 @@ fn optimalJoinTableSize(num_keys: usize, keys: []const i64) u32 {
     const multiplier = estimateCardinalityMultiplier(keys);
     var size = num_keys * multiplier;
 
-    // Cap at reasonable size
-    size = @min(size, 16 * 1024 * 1024);
+    // Cap at reasonable size (4M entries = 16MB for i32 table)
+    size = @min(size, 4 * 1024 * 1024);
 
     return nextPowerOf2Join(@intCast(size));
 }

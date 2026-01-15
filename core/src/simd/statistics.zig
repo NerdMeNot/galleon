@@ -38,11 +38,9 @@ pub fn median(comptime T: type, data: []const T, allocator: std.mem.Allocator) ?
         // Even length: average of two middle elements
         const lower = floydRivestSelect(T, copy, 0, n - 1, n / 2 - 1) orelse return null;
         // After selection, element at n/2-1 is in place, and all elements >= n/2 are >= lower
-        // Find minimum of right partition for upper median
-        var upper = copy[n / 2];
-        for (copy[n / 2 + 1 ..]) |v| {
-            if (v < upper) upper = v;
-        }
+        // Find minimum of right partition for upper median using SIMD
+        const right_partition = copy[n / 2 ..];
+        const upper = aggregations.min(T, right_partition) orelse return null;
         return (lower + upper) / 2.0;
     }
 }

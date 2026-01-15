@@ -76,6 +76,27 @@ pub inline fn sortableToFloat(bits: u64) f64 {
 }
 
 // ============================================================================
+// Integer to Sortable Conversion
+// ============================================================================
+
+/// Convert i64 to sortable u64 representation
+/// For signed integers: flip the sign bit to make negative numbers sort first
+/// -9223372036854775808 (MIN) -> 0x0000000000000000
+/// -1                        -> 0x7FFFFFFFFFFFFFFF
+/// 0                         -> 0x8000000000000000
+/// 9223372036854775807 (MAX) -> 0xFFFFFFFFFFFFFFFF
+pub inline fn i64ToSortable(val: i64) u64 {
+    const bits: u64 = @bitCast(val);
+    return bits ^ (@as(u64, 1) << 63); // Flip sign bit
+}
+
+/// Convert i32 to sortable u32 representation
+pub inline fn i32ToSortable(val: i32) u32 {
+    const bits: u32 = @bitCast(val);
+    return bits ^ (@as(u32, 1) << 31); // Flip sign bit
+}
+
+// ============================================================================
 // Partitioning Functions
 // ============================================================================
 
@@ -499,6 +520,229 @@ pub fn argsortRadixF64(data: []const f64, out_indices: []u32, ascending: bool) v
             left += 1;
             right -= 1;
         }
+    }
+}
+
+/// Radix sort for i64 argsort - O(n) complexity
+/// Uses LSD (Least Significant Digit) radix sort with sign bit flip
+pub fn argsortRadixI64(data: []const i64, out_indices: []u32, ascending: bool) void {
+    const len = @min(data.len, out_indices.len);
+    if (len == 0) return;
+
+    // For small arrays, use simple sort
+    if (len < 256) {
+        argsortSmallInt(i64, data, out_indices, ascending);
+        return;
+    }
+
+    const allocator = std.heap.c_allocator;
+
+    // Allocate working buffers
+    const keys = allocator.alloc(u64, len) catch {
+        argsortSmallInt(i64, data, out_indices, ascending);
+        return;
+    };
+    defer allocator.free(keys);
+
+    const temp_indices = allocator.alloc(u32, len) catch {
+        argsortSmallInt(i64, data, out_indices, ascending);
+        return;
+    };
+    defer allocator.free(temp_indices);
+
+    const temp_keys = allocator.alloc(u64, len) catch {
+        argsortSmallInt(i64, data, out_indices, ascending);
+        return;
+    };
+    defer allocator.free(temp_keys);
+
+    // Convert signed integers to sortable unsigned and initialize indices
+    for (0..len) |i| {
+        keys[i] = i64ToSortable(data[i]);
+        out_indices[i] = @intCast(i);
+    }
+
+    var src_keys = keys;
+    var dst_keys = temp_keys;
+    var src_indices = out_indices;
+    var dst_indices = temp_indices;
+
+    // LSD radix sort: 8 passes for 64-bit keys
+    var pass: u8 = 0;
+    while (pass < 8) : (pass += 1) {
+        const shift: u6 = @intCast(pass * 8);
+        // Count occurrences for this digit
+        var counts: [256]usize = [_]usize{0} ** 256;
+        for (src_keys[0..len]) |key| {
+            const digit: usize = @intCast((key >> shift) & 0xFF);
+            counts[digit] += 1;
+        }
+
+        // Compute prefix sums
+        var offsets: [256]usize = undefined;
+        var total: usize = 0;
+        for (0..256) |i| {
+            offsets[i] = total;
+            total += counts[i];
+        }
+
+        // Distribute elements
+        for (0..len) |i| {
+            const key = src_keys[i];
+            const digit: usize = @intCast((key >> shift) & 0xFF);
+            const dst_pos = offsets[digit];
+            offsets[digit] += 1;
+
+            dst_keys[dst_pos] = key;
+            dst_indices[dst_pos] = src_indices[i];
+        }
+
+        // Swap buffers
+        const tmp_keys = src_keys;
+        src_keys = dst_keys;
+        dst_keys = tmp_keys;
+
+        const tmp_indices = src_indices;
+        src_indices = dst_indices;
+        dst_indices = tmp_indices;
+    }
+
+    // After 8 passes, result is in original buffers
+
+    // If descending, reverse
+    if (!ascending) {
+        var left: usize = 0;
+        var right: usize = len - 1;
+        while (left < right) {
+            const tmp = out_indices[left];
+            out_indices[left] = out_indices[right];
+            out_indices[right] = tmp;
+            left += 1;
+            right -= 1;
+        }
+    }
+}
+
+/// Radix sort for i32 argsort - O(n) complexity
+/// Uses LSD (Least Significant Digit) radix sort with sign bit flip
+pub fn argsortRadixI32(data: []const i32, out_indices: []u32, ascending: bool) void {
+    const len = @min(data.len, out_indices.len);
+    if (len == 0) return;
+
+    // For small arrays, use simple sort
+    if (len < 256) {
+        argsortSmallInt(i32, data, out_indices, ascending);
+        return;
+    }
+
+    const allocator = std.heap.c_allocator;
+
+    // Allocate working buffers
+    const keys = allocator.alloc(u32, len) catch {
+        argsortSmallInt(i32, data, out_indices, ascending);
+        return;
+    };
+    defer allocator.free(keys);
+
+    const temp_indices = allocator.alloc(u32, len) catch {
+        argsortSmallInt(i32, data, out_indices, ascending);
+        return;
+    };
+    defer allocator.free(temp_indices);
+
+    const temp_keys = allocator.alloc(u32, len) catch {
+        argsortSmallInt(i32, data, out_indices, ascending);
+        return;
+    };
+    defer allocator.free(temp_keys);
+
+    // Convert signed integers to sortable unsigned and initialize indices
+    for (0..len) |i| {
+        keys[i] = i32ToSortable(data[i]);
+        out_indices[i] = @intCast(i);
+    }
+
+    var src_keys = keys;
+    var dst_keys = temp_keys;
+    var src_indices = out_indices;
+    var dst_indices = temp_indices;
+
+    // LSD radix sort: 4 passes for 32-bit keys
+    var pass: u8 = 0;
+    while (pass < 4) : (pass += 1) {
+        const shift: u5 = @intCast(pass * 8);
+        // Count occurrences for this digit
+        var counts: [256]usize = [_]usize{0} ** 256;
+        for (src_keys[0..len]) |key| {
+            const digit: usize = @intCast((key >> shift) & 0xFF);
+            counts[digit] += 1;
+        }
+
+        // Compute prefix sums
+        var offsets: [256]usize = undefined;
+        var total: usize = 0;
+        for (0..256) |i| {
+            offsets[i] = total;
+            total += counts[i];
+        }
+
+        // Distribute elements
+        for (0..len) |i| {
+            const key = src_keys[i];
+            const digit: usize = @intCast((key >> shift) & 0xFF);
+            const dst_pos = offsets[digit];
+            offsets[digit] += 1;
+
+            dst_keys[dst_pos] = key;
+            dst_indices[dst_pos] = src_indices[i];
+        }
+
+        // Swap buffers
+        const tmp_keys = src_keys;
+        src_keys = dst_keys;
+        dst_keys = tmp_keys;
+
+        const tmp_indices = src_indices;
+        src_indices = dst_indices;
+        dst_indices = tmp_indices;
+    }
+
+    // After 4 passes, result is in original buffers
+
+    // If descending, reverse
+    if (!ascending) {
+        var left: usize = 0;
+        var right: usize = len - 1;
+        while (left < right) {
+            const tmp = out_indices[left];
+            out_indices[left] = out_indices[right];
+            out_indices[right] = tmp;
+            left += 1;
+            right -= 1;
+        }
+    }
+}
+
+/// Helper function for small integer arrays (fallback)
+fn argsortSmallInt(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
+    const len = @min(data.len, out_indices.len);
+
+    for (out_indices[0..len], 0..) |*idx, i| {
+        idx.* = @intCast(i);
+    }
+
+    if (ascending) {
+        std.mem.sort(u32, out_indices[0..len], data, struct {
+            fn lessThan(ctx: []const T, a: u32, b: u32) bool {
+                return ctx[a] < ctx[b];
+            }
+        }.lessThan);
+    } else {
+        std.mem.sort(u32, out_indices[0..len], data, struct {
+            fn lessThan(ctx: []const T, a: u32, b: u32) bool {
+                return ctx[a] > ctx[b];
+            }
+        }.lessThan);
     }
 }
 
@@ -995,27 +1239,23 @@ pub fn argsort(comptime T: type, data: []const T, out_indices: []u32, ascending:
     }
 }
 
-/// Argsort for integer types
+/// Argsort for integer types - uses O(n) radix sort for i64/i32
 pub fn argsortInt(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
     const len = @min(data.len, out_indices.len);
+    if (len == 0) return;
 
-    for (out_indices[0..len], 0..) |*idx, i| {
-        idx.* = @intCast(i);
+    // Use optimized radix sort for i64 and i32
+    if (T == i64) {
+        argsortRadixI64(data, out_indices, ascending);
+        return;
+    }
+    if (T == i32) {
+        argsortRadixI32(data, out_indices, ascending);
+        return;
     }
 
-    if (ascending) {
-        std.mem.sort(u32, out_indices[0..len], data, struct {
-            fn lessThan(ctx: []const T, a: u32, b: u32) bool {
-                return ctx[a] < ctx[b];
-            }
-        }.lessThan);
-    } else {
-        std.mem.sort(u32, out_indices[0..len], data, struct {
-            fn lessThan(ctx: []const T, a: u32, b: u32) bool {
-                return ctx[a] > ctx[b];
-            }
-        }.lessThan);
-    }
+    // Fallback for other integer types
+    argsortSmallInt(T, data, out_indices, ascending);
 }
 
 // ============================================================================
@@ -1108,4 +1348,91 @@ test "sorting - single element" {
 
     argsort(f64, &data, &indices, true);
     try std.testing.expectEqual(@as(u32, 0), indices[0]);
+}
+
+test "sorting - i64ToSortable preserves order" {
+    // Test that i64ToSortable preserves relative ordering
+    const values = [_]i64{ -1000, -1, 0, 1, 1000 };
+
+    for (0..values.len - 1) |i| {
+        const a = i64ToSortable(values[i]);
+        const b = i64ToSortable(values[i + 1]);
+        try std.testing.expect(a < b);
+    }
+}
+
+test "sorting - i64ToSortable edge cases" {
+    // Test min and max values
+    const min_val = i64ToSortable(std.math.minInt(i64));
+    const neg_one = i64ToSortable(-1);
+    const zero = i64ToSortable(0);
+    const one = i64ToSortable(1);
+    const max_val = i64ToSortable(std.math.maxInt(i64));
+
+    try std.testing.expect(min_val < neg_one);
+    try std.testing.expect(neg_one < zero);
+    try std.testing.expect(zero < one);
+    try std.testing.expect(one < max_val);
+}
+
+test "sorting - argsortRadixI64 ascending" {
+    const data = [_]i64{ 5, -2, 8, -10, 0, 3 };
+    var indices: [6]u32 = undefined;
+
+    argsortRadixI64(&data, &indices, true);
+
+    // Expected order: -10, -2, 0, 3, 5, 8
+    // Verify sorted order
+    for (0..5) |i| {
+        try std.testing.expect(data[indices[i]] <= data[indices[i + 1]]);
+    }
+}
+
+test "sorting - argsortRadixI64 descending" {
+    const data = [_]i64{ 5, -2, 8, -10, 0, 3 };
+    var indices: [6]u32 = undefined;
+
+    argsortRadixI64(&data, &indices, false);
+
+    // Verify sorted order (descending)
+    for (0..5) |i| {
+        try std.testing.expect(data[indices[i]] >= data[indices[i + 1]]);
+    }
+}
+
+test "sorting - argsortRadixI32 ascending" {
+    const data = [_]i32{ 5, -2, 8, -10, 0, 3 };
+    var indices: [6]u32 = undefined;
+
+    argsortRadixI32(&data, &indices, true);
+
+    // Verify sorted order
+    for (0..5) |i| {
+        try std.testing.expect(data[indices[i]] <= data[indices[i + 1]]);
+    }
+}
+
+test "sorting - argsortRadixI64 larger array" {
+    // Test with array larger than small threshold (256)
+    const allocator = std.testing.allocator;
+    const n: usize = 1000;
+
+    const data = try allocator.alloc(i64, n);
+    defer allocator.free(data);
+    const indices = try allocator.alloc(u32, n);
+    defer allocator.free(indices);
+
+    // Initialize with some pattern including negative numbers
+    var prng = std.Random.DefaultPrng.init(42);
+    const rng = prng.random();
+    for (data) |*d| {
+        d.* = rng.int(i64);
+    }
+
+    argsortRadixI64(data, indices, true);
+
+    // Verify sorted order
+    for (0..n - 1) |i| {
+        try std.testing.expect(data[indices[i]] <= data[indices[i + 1]]);
+    }
 }
