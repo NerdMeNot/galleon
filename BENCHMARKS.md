@@ -61,16 +61,19 @@ This document presents comprehensive benchmarks comparing Galleon with Polars an
 
 | Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
 |-----------|-------------|------------|------------|-------------------|
-| **Sort (float64)** | 21.9 ms | 6.4 ms | 85.3 ms | 3.4x slower |
-| **Sort (int64)** | 90.7 ms | 6.1 ms | 72.6 ms | 14.9x slower |
-| **Argsort (float64)** | 16.8 ms | 20.3 ms | 77.7 ms | **1.2x faster** |
+| **Sort (float64)** | 23.5 ms | 6.5 ms | 83.8 ms | 3.6x slower |
+| **Sort (int64)** | 24.0 ms | 6.0 ms | 72.3 ms | 4.0x slower |
+| **Argsort (float64)** | 17.7 ms | 19.9 ms | 76.4 ms | **1.1x faster** |
+| **Argsort (int64)** | 23.3 ms | - | - | - |
+
+> **Optimization Note**: I64 sort improved from 90.7ms to 24.0ms (3.8x faster) by implementing O(n) radix sort for integers.
 
 ### Join Operations (1M left × 500K right, 100K keys)
 
 | Operation | **Galleon** | **Polars** | **Pandas** | Galleon vs Polars |
 |-----------|-------------|------------|------------|-------------------|
-| **Inner Join** | 97.4 ms | 33.9 ms | 403.1 ms | 2.9x slower |
-| **Left Join** | 106.5 ms | 31.0 ms | 245.2 ms | 3.4x slower |
+| **Inner Join** | 111 ms | 25.2 ms | 310 ms | 4.4x slower |
+| **Left Join** | 106 ms | 36.1 ms | 217 ms | 2.9x slower |
 
 ### GroupBy Operations (1M rows, 100K groups)
 
