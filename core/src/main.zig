@@ -1418,6 +1418,126 @@ export fn galleon_parallel_inner_join_i64(
     return handle;
 }
 
+/// Check if i64 array is sorted (ascending)
+/// Returns true if sorted, false otherwise
+export fn galleon_is_sorted_i64(keys: [*]const i64, len: usize) bool {
+    return simd.joins.isSortedI64(keys[0..len]);
+}
+
+/// Radix inner join with inline keys - better cache performance
+export fn galleon_inner_join_radix_i64(
+    left_keys: [*]const i64,
+    left_len: usize,
+    right_keys: [*]const i64,
+    right_len: usize,
+) ?*InnerJoinResultHandle {
+    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
+    handle.result = simd.innerJoinI64Radix(
+        std.heap.c_allocator,
+        left_keys[0..left_len],
+        right_keys[0..right_len],
+    ) catch {
+        std.heap.c_allocator.destroy(handle);
+        return null;
+    };
+    return handle;
+}
+
+/// Sort-merge inner join - excellent cache locality
+export fn galleon_inner_join_sort_merge_i64(
+    left_keys: [*]const i64,
+    left_len: usize,
+    right_keys: [*]const i64,
+    right_len: usize,
+) ?*InnerJoinResultHandle {
+    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
+    handle.result = simd.innerJoinI64SortMerge(
+        std.heap.c_allocator,
+        left_keys[0..left_len],
+        right_keys[0..right_len],
+    ) catch {
+        std.heap.c_allocator.destroy(handle);
+        return null;
+    };
+    return handle;
+}
+
+/// Sort-merge left join - excellent cache locality
+export fn galleon_left_join_sort_merge_i64(
+    left_keys: [*]const i64,
+    left_len: usize,
+    right_keys: [*]const i64,
+    right_len: usize,
+) ?*LeftJoinResultHandle {
+    const handle = std.heap.c_allocator.create(LeftJoinResultHandle) catch return null;
+    handle.result = simd.leftJoinI64SortMerge(
+        std.heap.c_allocator,
+        left_keys[0..left_len],
+        right_keys[0..right_len],
+    ) catch {
+        std.heap.c_allocator.destroy(handle);
+        return null;
+    };
+    return handle;
+}
+
+/// Swiss Table inner join - SIMD control byte probing
+export fn galleon_inner_join_swiss_i64(
+    left_keys: [*]const i64,
+    left_len: usize,
+    right_keys: [*]const i64,
+    right_len: usize,
+) ?*InnerJoinResultHandle {
+    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
+    handle.result = simd.innerJoinI64Swiss(
+        std.heap.c_allocator,
+        left_keys[0..left_len],
+        right_keys[0..right_len],
+    ) catch {
+        std.heap.c_allocator.destroy(handle);
+        return null;
+    };
+    return handle;
+}
+
+/// Two-pass inner join with open-addressing hash table - pre-sized allocation
+export fn galleon_inner_join_two_pass_i64(
+    left_keys: [*]const i64,
+    left_len: usize,
+    right_keys: [*]const i64,
+    right_len: usize,
+) ?*InnerJoinResultHandle {
+    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
+    handle.result = simd.innerJoinI64TwoPass(
+        std.heap.c_allocator,
+        left_keys[0..left_len],
+        right_keys[0..right_len],
+    ) catch {
+        std.heap.c_allocator.destroy(handle);
+        return null;
+    };
+    return handle;
+}
+
+/// SIMD-accelerated inner join with inline keys
+export fn galleon_inner_join_simd_i64(
+    left_keys: [*]const i64,
+    left_len: usize,
+    right_keys: [*]const i64,
+    right_len: usize,
+) ?*InnerJoinResultHandle {
+    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
+    handle.result = simd.innerJoinI64Simd(
+        std.heap.c_allocator,
+        left_keys[0..left_len],
+        right_keys[0..right_len],
+    ) catch {
+        std.heap.c_allocator.destroy(handle);
+        return null;
+    };
+    return handle;
+}
+
 /// Aggregate sum f64 by group (uses group IDs from groupby result)
 export fn galleon_groupby_sum_f64(
     data: [*]const f64,

@@ -2,6 +2,7 @@ package galleon
 
 import (
 	"math/rand"
+	"sort"
 	"testing"
 )
 
@@ -186,6 +187,215 @@ func BenchmarkSortJoin_LeftJoin_1M(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		left.LeftJoin(right, On("id"))
+	}
+}
+
+// ============================================================================
+// Sort-Merge Join Benchmarks (alternative algorithm)
+// ============================================================================
+
+func BenchmarkSortJoin_SortMergeInner_100K(b *testing.B) {
+	left, right := makeJoinBenchData(100_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := SortMergeInnerJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumMatches
+		}
+	}
+}
+
+func BenchmarkSortJoin_SortMergeInner_1M(b *testing.B) {
+	left, right := makeJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := SortMergeInnerJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumMatches
+		}
+	}
+}
+
+func BenchmarkSortJoin_HashInner_1M(b *testing.B) {
+	left, right := makeJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := ParallelInnerJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumMatches
+		}
+	}
+}
+
+func BenchmarkSortJoin_RadixInner_1M(b *testing.B) {
+	left, right := makeJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := RadixInnerJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumMatches
+		}
+	}
+}
+
+func BenchmarkSortJoin_SwissInner_1M(b *testing.B) {
+	left, right := makeJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := SwissInnerJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumMatches
+		}
+	}
+}
+
+func BenchmarkSortJoin_TwoPassInner_1M(b *testing.B) {
+	left, right := makeJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := TwoPassInnerJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumMatches
+		}
+	}
+}
+
+func BenchmarkSortJoin_SimdInner_1M(b *testing.B) {
+	left, right := makeJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := SimdInnerJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumMatches
+		}
+	}
+}
+
+func BenchmarkSortJoin_SortMergeLeft_1M(b *testing.B) {
+	left, right := makeJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := SortMergeLeftJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumRows
+		}
+	}
+}
+
+func BenchmarkSortJoin_HashLeft_1M(b *testing.B) {
+	left, right := makeJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := ParallelLeftJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumRows
+		}
+	}
+}
+
+// makeSortedJoinBenchData creates pre-sorted DataFrames for join benchmarks
+// This shows the benefit of sorted detection in sort-merge join
+func makeSortedJoinBenchData(n int) (*DataFrame, *DataFrame) {
+	r := rand.New(rand.NewSource(42))
+	numKeys := n / 10
+
+	// Left DataFrame: n rows, sorted by id
+	leftIds := make([]int64, n)
+	leftVals := make([]float64, n)
+	for i := 0; i < n; i++ {
+		leftIds[i] = int64(i % numKeys)
+		leftVals[i] = r.NormFloat64()
+	}
+	// Sort left ids
+	sort.Slice(leftIds, func(i, j int) bool { return leftIds[i] < leftIds[j] })
+
+	// Right DataFrame: n/2 rows, sorted by id
+	rightN := n / 2
+	rightIds := make([]int64, rightN)
+	rightVals := make([]float64, rightN)
+	for i := 0; i < rightN; i++ {
+		rightIds[i] = int64(i % numKeys)
+		rightVals[i] = r.NormFloat64()
+	}
+	// Sort right ids
+	sort.Slice(rightIds, func(i, j int) bool { return rightIds[i] < rightIds[j] })
+
+	left, _ := NewDataFrame(
+		NewSeriesInt64("id", leftIds),
+		NewSeriesFloat64("left_val", leftVals),
+	)
+
+	right, _ := NewDataFrame(
+		NewSeriesInt64("id", rightIds),
+		NewSeriesFloat64("right_val", rightVals),
+	)
+
+	return left, right
+}
+
+func BenchmarkSortJoin_SortMergeInner_PreSorted_1M(b *testing.B) {
+	left, right := makeSortedJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := SortMergeInnerJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumMatches
+		}
+	}
+}
+
+func BenchmarkSortJoin_HashInner_PreSorted_1M(b *testing.B) {
+	left, right := makeSortedJoinBenchData(1_000_000)
+	leftKeys := left.ColumnByName("id").Int64()
+	rightKeys := right.ColumnByName("id").Int64()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := ParallelInnerJoinI64(leftKeys, rightKeys)
+		if result != nil {
+			_ = result.NumMatches
+		}
+	}
+}
+
+// BenchmarkSortJoin_AutoSelect_PreSorted tests automatic algorithm selection
+// For pre-sorted data, the system should automatically use sort-merge join
+func BenchmarkSortJoin_AutoSelect_PreSorted_1M(b *testing.B) {
+	left, right := makeSortedJoinBenchData(1_000_000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// This should automatically use sort-merge join
+		left.Join(right, On("id"))
+	}
+}
+
+// BenchmarkSortJoin_AutoSelect_Unsorted tests automatic algorithm selection
+// For unsorted data, the system should automatically use hash join
+func BenchmarkSortJoin_AutoSelect_Unsorted_1M(b *testing.B) {
+	left, right := makeJoinBenchData(1_000_000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// This should automatically use hash join
+		left.Join(right, On("id"))
 	}
 }
 

@@ -269,6 +269,17 @@ InnerJoinResultHandle* galleon_inner_join_e2e_i64(const int64_t* left_keys, size
                                                    const int64_t* right_keys, size_t right_len);
 InnerJoinResultHandle* galleon_parallel_inner_join_i64(const int64_t* left_keys, size_t left_len,
                                                         const int64_t* right_keys, size_t right_len);
+InnerJoinResultHandle* galleon_inner_join_radix_i64(const int64_t* left_keys, size_t left_len,
+                                                     const int64_t* right_keys, size_t right_len);
+bool galleon_is_sorted_i64(const int64_t* keys, size_t len);
+InnerJoinResultHandle* galleon_inner_join_sort_merge_i64(const int64_t* left_keys, size_t left_len,
+                                                          const int64_t* right_keys, size_t right_len);
+InnerJoinResultHandle* galleon_inner_join_swiss_i64(const int64_t* left_keys, size_t left_len,
+                                                     const int64_t* right_keys, size_t right_len);
+InnerJoinResultHandle* galleon_inner_join_two_pass_i64(const int64_t* left_keys, size_t left_len,
+                                                        const int64_t* right_keys, size_t right_len);
+InnerJoinResultHandle* galleon_inner_join_simd_i64(const int64_t* left_keys, size_t left_len,
+                                                    const int64_t* right_keys, size_t right_len);
 uint32_t galleon_inner_join_result_num_matches(const InnerJoinResultHandle* handle);
 const int32_t* galleon_inner_join_result_left_indices(const InnerJoinResultHandle* handle);
 const int32_t* galleon_inner_join_result_right_indices(const InnerJoinResultHandle* handle);
@@ -284,6 +295,8 @@ LeftJoinResultHandle* galleon_left_join_i64(const int64_t* left_keys, size_t lef
                                              const int64_t* right_keys, size_t right_len);
 LeftJoinResultHandle* galleon_parallel_left_join_i64(const int64_t* left_keys, size_t left_len,
                                                       const int64_t* right_keys, size_t right_len);
+LeftJoinResultHandle* galleon_left_join_sort_merge_i64(const int64_t* left_keys, size_t left_len,
+                                                        const int64_t* right_keys, size_t right_len);
 uint32_t galleon_left_join_result_num_rows(const LeftJoinResultHandle* handle);
 const int32_t* galleon_left_join_result_left_indices(const LeftJoinResultHandle* handle);
 const int32_t* galleon_left_join_result_right_indices(const LeftJoinResultHandle* handle);

@@ -192,6 +192,7 @@ pub const argsortInt = sorting.argsortInt;
 pub const argsortParallel = sorting.argsortParallel;
 pub const argsortRadixF64 = sorting.argsortRadixF64;
 pub const argsortRadixI64 = sorting.argsortRadixI64;
+pub const argsortRadixI64Parallel = sorting.argsortRadixI64Parallel;
 pub const argsortRadixI32 = sorting.argsortRadixI32;
 pub const argsortParallelMerge = sorting.argsortParallelMerge;
 
@@ -206,8 +207,15 @@ pub const innerJoinI64SinglePass = joins.innerJoinI64SinglePass;
 pub const innerJoinI64Swiss = joins.innerJoinI64Swiss;
 pub const parallelInnerJoinI64 = joins.parallelInnerJoinI64;
 pub const innerJoinI64LockFree = joins.innerJoinI64LockFree;
+pub const innerJoinI64Radix = joins.innerJoinI64Radix;
 pub const leftJoinI64 = joins.leftJoinI64;
 pub const parallelLeftJoinI64 = joins.parallelLeftJoinI64;
+pub const leftJoinI64Radix = joins.leftJoinI64Radix;
+pub const innerJoinI64SortMerge = joins.innerJoinI64SortMerge;
+pub const leftJoinI64SortMerge = joins.leftJoinI64SortMerge;
+pub const innerJoinI64TwoPass = joins.innerJoinI64TwoPass;
+pub const innerJoinI64Simd = joins.innerJoinI64Simd;
+pub const isSortedI64 = joins.isSortedI64;
 pub const parallelAggregateSumF64ByGroup = joins.parallelAggregateSumF64ByGroup;
 
 // ============================================================================

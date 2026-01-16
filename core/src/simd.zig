@@ -181,8 +181,14 @@ pub const innerJoinI64SinglePass = mod.innerJoinI64SinglePass;
 pub const innerJoinI64Swiss = mod.innerJoinI64Swiss;
 pub const parallelInnerJoinI64 = mod.parallelInnerJoinI64;
 pub const innerJoinI64LockFree = mod.innerJoinI64LockFree;
+pub const innerJoinI64Radix = mod.innerJoinI64Radix;
 pub const leftJoinI64 = mod.leftJoinI64;
 pub const parallelLeftJoinI64 = mod.parallelLeftJoinI64;
+pub const leftJoinI64Radix = mod.leftJoinI64Radix;
+pub const innerJoinI64SortMerge = mod.innerJoinI64SortMerge;
+pub const leftJoinI64SortMerge = mod.leftJoinI64SortMerge;
+pub const innerJoinI64TwoPass = mod.innerJoinI64TwoPass;
+pub const innerJoinI64Simd = mod.innerJoinI64Simd;
 pub const parallelAggregateSumF64ByGroup = mod.parallelAggregateSumF64ByGroup;
 
 // ============================================================================

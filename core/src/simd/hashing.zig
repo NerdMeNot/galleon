@@ -35,18 +35,18 @@ pub inline fn rapidHash32(val: u32) u64 {
     return rapidHash64(extended);
 }
 
-/// Fast integer hash using triple multiply-shift mixing
-/// Better distribution than single multiply-xorshift for join operations
-/// Uses Murmur3-style finalization for excellent bit avalanche
+/// Fast integer hash using xxHash-style mixing
+/// Two multiply-xorshift rounds for excellent distribution
+/// Faster than full wyhash but much better than single multiply
 pub inline fn fastIntHash(val: i64) u64 {
-    var x = @as(u64, @bitCast(val));
-    // Murmur3 64-bit finalization mix
-    x ^= x >> 33;
-    x *%= 0xFF51AFD7ED558CCD;
-    x ^= x >> 33;
-    x *%= 0xC4CEB9FE1A85EC53;
-    x ^= x >> 33;
-    return x;
+    var h = @as(u64, @bitCast(val));
+    // Round 1: multiply by prime, mix bits
+    h = h *% 0x9E3779B97F4A7C15;
+    h ^= h >> 33;
+    // Round 2: multiply by another prime, final mix
+    h = h *% 0xC2B2AE3D27D4EB4F;
+    h ^= h >> 29;
+    return h;
 }
 
 // ============================================================================
@@ -58,48 +58,43 @@ pub inline fn fastIntHash(val: i64) u64 {
 // Uses vectorized Murmur3 finalization for high throughput and excellent distribution
 // ============================================================================
 
-/// SIMD constants for vectorized hashing (Murmur3 finalization constants)
-const HASH_MULT: u64 = 0xFF51AFD7ED558CCD;
-const HASH_MIX: u64 = 0xC4CEB9FE1A85EC53;
+/// SIMD constants for vectorized hashing (xxHash-style primes)
+const HASH_MULT_A: u64 = 0x9E3779B97F4A7C15;
+const HASH_MULT_B: u64 = 0xC2B2AE3D27D4EB4F;
 
-/// SIMD hash for int64 column using vectorized multiply-xorshift
-/// Processes 4 u64 values at a time using SIMD vectors
+/// SIMD hash for int64 column using vectorized two-round mixing
+/// Matches fastIntHash for consistency
 pub fn hashInt64ColumnSIMD(data: []const i64, out_hashes: []u64) void {
     const len = @min(data.len, out_hashes.len);
     if (len == 0) return;
 
     // For 64-bit values, we can process 4 at a time efficiently
     const Vec4 = @Vector(4, u64);
-    const mult_vec: Vec4 = @splat(HASH_MULT);
-    const mix_vec: Vec4 = @splat(HASH_MIX);
+    const mult_a: Vec4 = @splat(HASH_MULT_A);
+    const mult_b: Vec4 = @splat(HASH_MULT_B);
 
     const aligned_len = len - (len % 4);
     var i: usize = 0;
 
-    // Process 4 elements at a time with SIMD (Murmur3 finalization)
+    // Process 4 elements at a time with SIMD (two-round xxHash-style)
     while (i < aligned_len) : (i += 4) {
         // Load 4 values (reinterpret i64 as u64)
-        var vals: Vec4 = @bitCast(data[i..][0..4].*);
+        var h: Vec4 = @bitCast(data[i..][0..4].*);
 
-        // Murmur3 64-bit finalization mix (3 rounds)
-        vals ^= vals >> @splat(33);
-        vals *%= mult_vec;
-        vals ^= vals >> @splat(33);
-        vals *%= mix_vec;
-        vals ^= vals >> @splat(33);
+        // Round 1
+        h = h *% mult_a;
+        h ^= h >> @splat(33);
+        // Round 2
+        h = h *% mult_b;
+        h ^= h >> @splat(29);
 
         // Store result
-        out_hashes[i..][0..4].* = vals;
+        out_hashes[i..][0..4].* = h;
     }
 
-    // Handle remainder with same mixing
+    // Handle remainder using the fast scalar hash
     while (i < len) : (i += 1) {
-        var h: u64 = @bitCast(data[i]);
-        h ^= h >> 33;
-        h *%= HASH_MULT;
-        h ^= h >> 33;
-        h *%= HASH_MIX;
-        out_hashes[i] = h ^ (h >> 33);
+        out_hashes[i] = fastIntHash(data[i]);
     }
 }
 
@@ -109,8 +104,7 @@ pub fn hashFloat64ColumnSIMD(data: []const f64, out_hashes: []u64) void {
     if (len == 0) return;
 
     const Vec4 = @Vector(4, u64);
-    const mult_vec: Vec4 = @splat(HASH_MULT);
-    const mix_vec: Vec4 = @splat(HASH_MIX);
+    const mult_vec: Vec4 = @splat(HASH_MULT_A);
 
     const aligned_len = len - (len % 4);
     var i: usize = 0;
@@ -119,32 +113,28 @@ pub fn hashFloat64ColumnSIMD(data: []const f64, out_hashes: []u64) void {
         // Load and bitcast f64 to u64
         const vals: Vec4 = @bitCast(data[i..][0..4].*);
 
-        const h1 = vals *% mult_vec;
-        const h2 = h1 ^ (h1 >> @splat(32));
-        const h3 = h2 *% mix_vec;
-        const result = h3 ^ (h3 >> @splat(32));
+        // Golden ratio hash: multiply then mix high/low bits
+        const h = vals *% mult_vec;
+        const result = h ^ (h >> @splat(32));
 
         out_hashes[i..][0..4].* = result;
     }
 
     while (i < len) : (i += 1) {
         const val: u64 = @bitCast(data[i]);
-        var h = val *% HASH_MULT;
-        h ^= h >> 32;
-        h *%= HASH_MIX;
+        const h = val *% HASH_MULT_A;
         out_hashes[i] = h ^ (h >> 32);
     }
 }
 
-/// SIMD hash for int32 column - processes 8 at a time
+/// SIMD hash for int32 column - processes 4 at a time
 pub fn hashInt32ColumnSIMD(data: []const i32, out_hashes: []u64) void {
     const len = @min(data.len, out_hashes.len);
     if (len == 0) return;
 
     // Process 4 at a time (32->64 bit expansion limits parallelism)
     const Vec4 = @Vector(4, u64);
-    const mult_vec: Vec4 = @splat(HASH_MULT);
-    const mix_vec: Vec4 = @splat(HASH_MIX);
+    const mult_vec: Vec4 = @splat(HASH_MULT_A);
 
     const aligned_len = len - (len % 4);
     var i: usize = 0;
@@ -155,19 +145,16 @@ pub fn hashInt32ColumnSIMD(data: []const i32, out_hashes: []u64) void {
         const vals_u32: @Vector(4, u32) = @bitCast(vals_i32);
         const vals: Vec4 = vals_u32;
 
-        const h1 = vals *% mult_vec;
-        const h2 = h1 ^ (h1 >> @splat(32));
-        const h3 = h2 *% mix_vec;
-        const result = h3 ^ (h3 >> @splat(32));
+        // Golden ratio hash: multiply then mix high/low bits
+        const h = vals *% mult_vec;
+        const result = h ^ (h >> @splat(32));
 
         out_hashes[i..][0..4].* = result;
     }
 
     while (i < len) : (i += 1) {
         const val: u64 = @as(u32, @bitCast(data[i]));
-        var h = val *% HASH_MULT;
-        h ^= h >> 32;
-        h *%= HASH_MIX;
+        const h = val *% HASH_MULT_A;
         out_hashes[i] = h ^ (h >> 32);
     }
 }
@@ -178,8 +165,7 @@ pub fn hashFloat32ColumnSIMD(data: []const f32, out_hashes: []u64) void {
     if (len == 0) return;
 
     const Vec4 = @Vector(4, u64);
-    const mult_vec: Vec4 = @splat(HASH_MULT);
-    const mix_vec: Vec4 = @splat(HASH_MIX);
+    const mult_vec: Vec4 = @splat(HASH_MULT_A);
 
     const aligned_len = len - (len % 4);
     var i: usize = 0;
@@ -189,19 +175,16 @@ pub fn hashFloat32ColumnSIMD(data: []const f32, out_hashes: []u64) void {
         const vals_u32: @Vector(4, u32) = @bitCast(vals_f32);
         const vals: Vec4 = vals_u32;
 
-        const h1 = vals *% mult_vec;
-        const h2 = h1 ^ (h1 >> @splat(32));
-        const h3 = h2 *% mix_vec;
-        const result = h3 ^ (h3 >> @splat(32));
+        // Golden ratio hash: multiply then mix high/low bits
+        const h = vals *% mult_vec;
+        const result = h ^ (h >> @splat(32));
 
         out_hashes[i..][0..4].* = result;
     }
 
     while (i < len) : (i += 1) {
         const val: u64 = @as(u32, @bitCast(data[i]));
-        var h = val *% HASH_MULT;
-        h ^= h >> 32;
-        h *%= HASH_MIX;
+        const h = val *% HASH_MULT_A;
         out_hashes[i] = h ^ (h >> 32);
     }
 }
@@ -212,7 +195,7 @@ pub fn combineHashesSIMD(hash1: []const u64, hash2: []const u64, out_hashes: []u
     if (len == 0) return;
 
     const Vec4 = @Vector(4, u64);
-    const mix_vec: Vec4 = @splat(HASH_MIX);
+    const mult_vec: Vec4 = @splat(HASH_MULT_A);
 
     const aligned_len = len - (len % 4);
     var i: usize = 0;
@@ -223,7 +206,7 @@ pub fn combineHashesSIMD(hash1: []const u64, hash2: []const u64, out_hashes: []u
 
         // Combine using XOR and mixing
         const combined = h1 ^ h2;
-        const h3 = combined *% mix_vec;
+        const h3 = combined *% mult_vec;
         const result = h3 ^ (h3 >> @splat(32));
 
         out_hashes[i..][0..4].* = result;
@@ -231,7 +214,7 @@ pub fn combineHashesSIMD(hash1: []const u64, hash2: []const u64, out_hashes: []u
 
     while (i < len) : (i += 1) {
         const combined = hash1[i] ^ hash2[i];
-        const h = combined *% HASH_MIX;
+        const h = combined *% HASH_MULT_A;
         out_hashes[i] = h ^ (h >> 32);
     }
 }

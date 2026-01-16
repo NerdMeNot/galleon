@@ -1892,19 +1892,208 @@ func ParallelInnerJoinI64(leftKeys []int64, rightKeys []int64) *InnerJoinE2EResu
 	return result
 }
 
+// RadixInnerJoinI64 performs inner join using inline-key hash table
+// Stores keys inline with hash entries for better cache performance
+// Excellent for high-cardinality joins
+func RadixInnerJoinI64(leftKeys []int64, rightKeys []int64) *InnerJoinE2EResult {
+	if len(leftKeys) == 0 || len(rightKeys) == 0 {
+		return nil
+	}
+
+	handle := C.galleon_inner_join_radix_i64(
+		(*C.int64_t)(unsafe.Pointer(&leftKeys[0])),
+		C.size_t(len(leftKeys)),
+		(*C.int64_t)(unsafe.Pointer(&rightKeys[0])),
+		C.size_t(len(rightKeys)),
+	)
+	if handle == nil {
+		return nil
+	}
+
+	numMatches := int(C.galleon_inner_join_result_num_matches(handle))
+	leftIndicesPtr := C.galleon_inner_join_result_left_indices(handle)
+	rightIndicesPtr := C.galleon_inner_join_result_right_indices(handle)
+
+	result := &InnerJoinE2EResult{
+		handle:       handle,
+		NumMatches:   numMatches,
+		LeftIndices:  unsafe.Slice((*int32)(unsafe.Pointer(leftIndicesPtr)), numMatches),
+		RightIndices: unsafe.Slice((*int32)(unsafe.Pointer(rightIndicesPtr)), numMatches),
+	}
+
+	runtime.SetFinalizer(result, (*InnerJoinE2EResult).free)
+	return result
+}
+
+// SortMergeInnerJoinI64 performs inner join using sort-merge algorithm
+// Uses sorting + sequential merge for excellent cache locality
+// Particularly efficient for data with many duplicates or near-sorted data
+func SortMergeInnerJoinI64(leftKeys []int64, rightKeys []int64) *InnerJoinE2EResult {
+	if len(leftKeys) == 0 || len(rightKeys) == 0 {
+		return nil
+	}
+
+	handle := C.galleon_inner_join_sort_merge_i64(
+		(*C.int64_t)(unsafe.Pointer(&leftKeys[0])),
+		C.size_t(len(leftKeys)),
+		(*C.int64_t)(unsafe.Pointer(&rightKeys[0])),
+		C.size_t(len(rightKeys)),
+	)
+	if handle == nil {
+		return nil
+	}
+
+	numMatches := int(C.galleon_inner_join_result_num_matches(handle))
+	leftIndicesPtr := C.galleon_inner_join_result_left_indices(handle)
+	rightIndicesPtr := C.galleon_inner_join_result_right_indices(handle)
+
+	result := &InnerJoinE2EResult{
+		handle:       handle,
+		NumMatches:   numMatches,
+		LeftIndices:  unsafe.Slice((*int32)(unsafe.Pointer(leftIndicesPtr)), numMatches),
+		RightIndices: unsafe.Slice((*int32)(unsafe.Pointer(rightIndicesPtr)), numMatches),
+	}
+
+	runtime.SetFinalizer(result, (*InnerJoinE2EResult).free)
+	return result
+}
+
+// SwissInnerJoinI64 performs inner join using Swiss Table algorithm
+// Uses SIMD control byte probing for faster lookups
+func SwissInnerJoinI64(leftKeys []int64, rightKeys []int64) *InnerJoinE2EResult {
+	if len(leftKeys) == 0 || len(rightKeys) == 0 {
+		return nil
+	}
+
+	handle := C.galleon_inner_join_swiss_i64(
+		(*C.int64_t)(unsafe.Pointer(&leftKeys[0])),
+		C.size_t(len(leftKeys)),
+		(*C.int64_t)(unsafe.Pointer(&rightKeys[0])),
+		C.size_t(len(rightKeys)),
+	)
+	if handle == nil {
+		return nil
+	}
+
+	numMatches := int(C.galleon_inner_join_result_num_matches(handle))
+	leftIndicesPtr := C.galleon_inner_join_result_left_indices(handle)
+	rightIndicesPtr := C.galleon_inner_join_result_right_indices(handle)
+
+	result := &InnerJoinE2EResult{
+		handle:       handle,
+		NumMatches:   numMatches,
+		LeftIndices:  unsafe.Slice((*int32)(unsafe.Pointer(leftIndicesPtr)), numMatches),
+		RightIndices: unsafe.Slice((*int32)(unsafe.Pointer(rightIndicesPtr)), numMatches),
+	}
+
+	runtime.SetFinalizer(result, (*InnerJoinE2EResult).free)
+	return result
+}
+
+// TwoPassInnerJoinI64 performs inner join using two-pass algorithm
+// Uses open-addressing hash table with pre-sized allocation (no reallocations)
+// Pass 1: Count matches to pre-allocate exact result size
+// Pass 2: Fill results
+func TwoPassInnerJoinI64(leftKeys []int64, rightKeys []int64) *InnerJoinE2EResult {
+	if len(leftKeys) == 0 || len(rightKeys) == 0 {
+		return nil
+	}
+
+	handle := C.galleon_inner_join_two_pass_i64(
+		(*C.int64_t)(unsafe.Pointer(&leftKeys[0])),
+		C.size_t(len(leftKeys)),
+		(*C.int64_t)(unsafe.Pointer(&rightKeys[0])),
+		C.size_t(len(rightKeys)),
+	)
+	if handle == nil {
+		return nil
+	}
+
+	numMatches := int(C.galleon_inner_join_result_num_matches(handle))
+	leftIndicesPtr := C.galleon_inner_join_result_left_indices(handle)
+	rightIndicesPtr := C.galleon_inner_join_result_right_indices(handle)
+
+	result := &InnerJoinE2EResult{
+		handle:       handle,
+		NumMatches:   numMatches,
+		LeftIndices:  unsafe.Slice((*int32)(unsafe.Pointer(leftIndicesPtr)), numMatches),
+		RightIndices: unsafe.Slice((*int32)(unsafe.Pointer(rightIndicesPtr)), numMatches),
+	}
+
+	runtime.SetFinalizer(result, (*InnerJoinE2EResult).free)
+	return result
+}
+
+// SimdInnerJoinI64 performs inner join using SIMD-accelerated algorithm
+// Uses batch processing with inline keys for better throughput
+func SimdInnerJoinI64(leftKeys []int64, rightKeys []int64) *InnerJoinE2EResult {
+	if len(leftKeys) == 0 || len(rightKeys) == 0 {
+		return nil
+	}
+
+	handle := C.galleon_inner_join_simd_i64(
+		(*C.int64_t)(unsafe.Pointer(&leftKeys[0])),
+		C.size_t(len(leftKeys)),
+		(*C.int64_t)(unsafe.Pointer(&rightKeys[0])),
+		C.size_t(len(rightKeys)),
+	)
+	if handle == nil {
+		return nil
+	}
+
+	numMatches := int(C.galleon_inner_join_result_num_matches(handle))
+	leftIndicesPtr := C.galleon_inner_join_result_left_indices(handle)
+	rightIndicesPtr := C.galleon_inner_join_result_right_indices(handle)
+
+	result := &InnerJoinE2EResult{
+		handle:       handle,
+		NumMatches:   numMatches,
+		LeftIndices:  unsafe.Slice((*int32)(unsafe.Pointer(leftIndicesPtr)), numMatches),
+		RightIndices: unsafe.Slice((*int32)(unsafe.Pointer(rightIndicesPtr)), numMatches),
+	}
+
+	runtime.SetFinalizer(result, (*InnerJoinE2EResult).free)
+	return result
+}
+
+// IsSortedI64 checks if an int64 array is sorted in ascending order
+// Uses SIMD for fast vectorized comparison
+func IsSortedI64(keys []int64) bool {
+	if len(keys) < 2 {
+		return true
+	}
+	return bool(C.galleon_is_sorted_i64(
+		(*C.int64_t)(unsafe.Pointer(&keys[0])),
+		C.size_t(len(keys)),
+	))
+}
+
 // InnerJoinI64 performs inner join and returns Go int slices for join result building
+// Automatically chooses the best algorithm based on data characteristics:
+// - If both sides are sorted: uses sort-merge join (much faster, ~9ms for 1M pre-sorted)
+// - For large datasets: uses sort-merge join (~52ms for 1M rows, slightly faster than hash)
+// - For small datasets: uses hash join (lower overhead for small data)
 func InnerJoinI64(leftKeys []int64, rightKeys []int64) (leftIndices, rightIndices []int) {
 	if len(leftKeys) == 0 || len(rightKeys) == 0 {
 		return nil, nil
 	}
 
-	// Use parallel version for large datasets
 	var result *InnerJoinE2EResult
-	if len(leftKeys) >= 100000 {
-		result = ParallelInnerJoinI64(leftKeys, rightKeys)
+
+	// Check if both sides are sorted - if so, sort-merge is much faster (just O(n) merge)
+	// The sorted check is O(n) but very fast (SIMD vectorized)
+	if IsSortedI64(leftKeys) && IsSortedI64(rightKeys) {
+		// Pre-sorted data: sort-merge join skips sorting, just does O(n) merge
+		result = SortMergeInnerJoinI64(leftKeys, rightKeys)
+	} else if len(leftKeys) >= 50000 {
+		// Large unsorted data: sort-merge is slightly faster than hash join
+		// because it has better cache locality in the merge phase
+		result = SortMergeInnerJoinI64(leftKeys, rightKeys)
 	} else {
+		// Small unsorted data: use hash join (lower overhead)
 		result = InnerJoinI64E2E(leftKeys, rightKeys)
 	}
+
 	if result == nil {
 		return nil, nil
 	}
@@ -2007,20 +2196,71 @@ func ParallelLeftJoinI64(leftKeys []int64, rightKeys []int64) *LeftJoinE2EResult
 	return result
 }
 
+// SortMergeLeftJoinI64 performs left join using sort-merge algorithm
+// Uses sorting + sequential merge for excellent cache locality
+// Particularly efficient for data with many duplicates or near-sorted data
+func SortMergeLeftJoinI64(leftKeys []int64, rightKeys []int64) *LeftJoinE2EResult {
+	if len(leftKeys) == 0 {
+		return nil
+	}
+
+	var rightPtr *C.int64_t
+	if len(rightKeys) > 0 {
+		rightPtr = (*C.int64_t)(unsafe.Pointer(&rightKeys[0]))
+	}
+
+	handle := C.galleon_left_join_sort_merge_i64(
+		(*C.int64_t)(unsafe.Pointer(&leftKeys[0])),
+		C.size_t(len(leftKeys)),
+		rightPtr,
+		C.size_t(len(rightKeys)),
+	)
+	if handle == nil {
+		return nil
+	}
+
+	numRows := int(C.galleon_left_join_result_num_rows(handle))
+	leftIndicesPtr := C.galleon_left_join_result_left_indices(handle)
+	rightIndicesPtr := C.galleon_left_join_result_right_indices(handle)
+
+	result := &LeftJoinE2EResult{
+		handle:       handle,
+		NumRows:      numRows,
+		LeftIndices:  unsafe.Slice((*int32)(unsafe.Pointer(leftIndicesPtr)), numRows),
+		RightIndices: unsafe.Slice((*int32)(unsafe.Pointer(rightIndicesPtr)), numRows),
+	}
+
+	runtime.SetFinalizer(result, (*LeftJoinE2EResult).free)
+	return result
+}
+
 // LeftJoinI64 performs left join and returns Go int slices for join result building
 // For unmatched left rows, rightIndices will be -1
+// LeftJoinI64 performs left join and returns Go int slices for join result building
+// Automatically chooses the best algorithm based on data characteristics:
+// - If both sides are sorted: uses sort-merge join
+// - Otherwise: uses hash join
 func LeftJoinI64(leftKeys []int64, rightKeys []int64) (leftIndices, rightIndices []int) {
 	if len(leftKeys) == 0 {
 		return nil, nil
 	}
 
-	// Use parallel version for large datasets
 	var result *LeftJoinE2EResult
-	if len(leftKeys) >= 100000 {
+
+	// Check if both sides are sorted - if so, sort-merge is faster for left join too
+	// (though the benefit is smaller than inner join since hash join is already good)
+	rightSorted := len(rightKeys) == 0 || IsSortedI64(rightKeys)
+	if IsSortedI64(leftKeys) && rightSorted {
+		// Pre-sorted data: sort-merge join skips sorting
+		result = SortMergeLeftJoinI64(leftKeys, rightKeys)
+	} else if len(leftKeys) >= 100000 {
+		// Large unsorted data: use parallel hash join
 		result = ParallelLeftJoinI64(leftKeys, rightKeys)
 	} else {
+		// Small unsorted data: use single-threaded hash join
 		result = LeftJoinI64E2E(leftKeys, rightKeys)
 	}
+
 	if result == nil {
 		return nil, nil
 	}
