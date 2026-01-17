@@ -1122,75 +1122,6 @@ func TestComputeGroupIDs(t *testing.T) {
 }
 
 // ============================================================================
-// Filter Pool Tests
-// ============================================================================
-
-func TestFilterMaskGreaterThanF64Pooled(t *testing.T) {
-	data := []float64{1.0, 5.0, 2.0, 8.0, 3.0}
-	mask := FilterMaskGreaterThanF64Pooled(data, 3.0)
-	defer mask.Release()
-
-	if mask == nil {
-		t.Fatal("Expected non-nil mask")
-	}
-
-	count := 0
-	for _, v := range mask.Data {
-		if v {
-			count++
-		}
-	}
-	if count != 2 {
-		t.Errorf("Expected 2 true values, got %d", count)
-	}
-}
-
-func TestFilterGreaterThanF64Pooled(t *testing.T) {
-	data := []float64{1.0, 5.0, 2.0, 8.0, 3.0}
-	result := FilterGreaterThanF64Pooled(data, 3.0)
-	defer result.Release()
-
-	if result == nil {
-		t.Fatal("Expected non-nil result")
-	}
-	if len(result.Data) != 2 {
-		t.Errorf("Expected 2 indices, got %d", len(result.Data))
-	}
-}
-
-// ============================================================================
-// Join Tests
-// ============================================================================
-
-func TestInnerJoinI64(t *testing.T) {
-	leftKeys := []int64{1, 2, 3, 4, 5}
-	rightKeys := []int64{2, 4, 6}
-
-	leftIndices, rightIndices := InnerJoinI64(leftKeys, rightKeys)
-
-	// Should match: (1, 0) for key 2, (3, 1) for key 4
-	if len(leftIndices) != 2 || len(rightIndices) != 2 {
-		t.Errorf("Expected 2 matches, got left=%d, right=%d",
-			len(leftIndices), len(rightIndices))
-	}
-}
-
-func TestLeftJoinI64(t *testing.T) {
-	leftKeys := []int64{1, 2, 3}
-	rightKeys := []int64{2, 4}
-
-	leftIndices, rightIndices := LeftJoinI64(leftKeys, rightKeys)
-
-	// All left rows should be present
-	if len(leftIndices) != 3 {
-		t.Errorf("Expected 3 left indices, got %d", len(leftIndices))
-	}
-	if len(rightIndices) != 3 {
-		t.Errorf("Expected 3 right indices, got %d", len(rightIndices))
-	}
-}
-
-// ============================================================================
 // Additional Tests for Coverage
 // ============================================================================
 
@@ -1339,46 +1270,6 @@ func TestColumnBoolCounts(t *testing.T) {
 }
 
 // ============================================================================
-// BuildJoinHashTable and ProbeJoinHashTable Tests
-// ============================================================================
-
-func TestBuildAndProbeJoinHashTable(t *testing.T) {
-	// Build hash table
-	buildHashes := []uint64{100, 200, 300, 400}
-	tableSize := uint32(8)
-	table := make([]int32, tableSize)
-	next := make([]int32, len(buildHashes))
-
-	BuildJoinHashTable(buildHashes, table, next, tableSize)
-
-	// Verify table was built (not all -1)
-	foundEntry := false
-	for _, v := range table {
-		if v != -1 {
-			foundEntry = true
-			break
-		}
-	}
-	if !foundEntry {
-		t.Error("BuildJoinHashTable did not populate table")
-	}
-
-	// Probe hash table
-	probeHashes := []uint64{100, 200, 500} // 100 and 200 should match
-	probeKeys := []int64{1, 2, 5}
-	buildKeys := []int64{1, 2, 3, 4}
-	outProbe := make([]int32, 10)
-	outBuild := make([]int32, 10)
-
-	matches := ProbeJoinHashTable(probeHashes, probeKeys, buildKeys, table, next, tableSize, outProbe, outBuild, 10)
-
-	// Should find matches for hash 100 (key 1) and hash 200 (key 2)
-	if matches < 2 {
-		t.Errorf("ProbeJoinHashTable matches = %d, want at least 2", matches)
-	}
-}
-
-// ============================================================================
 // ComputeGroupIDsWithKeys Tests
 // ============================================================================
 
@@ -1495,82 +1386,6 @@ func TestGroupByMultiAggE2E_Extended(t *testing.T) {
 	}
 	if len(result.Counts) != int(result.NumGroups) {
 		t.Errorf("Counts length = %d, want %d", len(result.Counts), result.NumGroups)
-	}
-}
-
-// ============================================================================
-// InnerJoinI64E2E Tests
-// ============================================================================
-
-func TestInnerJoinI64E2E(t *testing.T) {
-	leftKeys := []int64{1, 2, 3, 4, 5}
-	rightKeys := []int64{2, 4, 6, 8}
-
-	result := InnerJoinI64E2E(leftKeys, rightKeys)
-	if result == nil {
-		t.Fatal("InnerJoinI64E2E returned nil")
-	}
-
-	// Keys 2 and 4 should match
-	if result.NumMatches < 2 {
-		t.Errorf("NumMatches = %d, want at least 2", result.NumMatches)
-	}
-}
-
-// ============================================================================
-// LeftJoinI64E2E Tests
-// ============================================================================
-
-func TestLeftJoinI64E2E(t *testing.T) {
-	leftKeys := []int64{1, 2, 3}
-	rightKeys := []int64{2, 4, 6}
-
-	result := LeftJoinI64E2E(leftKeys, rightKeys)
-	if result == nil {
-		t.Fatal("LeftJoinI64E2E returned nil")
-	}
-
-	// All left keys should be present
-	if result.NumRows != 3 {
-		t.Errorf("NumRows = %d, want 3", result.NumRows)
-	}
-}
-
-// ============================================================================
-// ParallelInnerJoinI64 Tests
-// ============================================================================
-
-func TestParallelInnerJoinI64(t *testing.T) {
-	leftKeys := []int64{1, 2, 3, 4, 5}
-	rightKeys := []int64{2, 4, 6}
-
-	result := ParallelInnerJoinI64(leftKeys, rightKeys)
-	if result == nil {
-		t.Fatal("ParallelInnerJoinI64 returned nil")
-	}
-
-	// Keys 2 and 4 should match
-	if result.NumMatches < 2 {
-		t.Errorf("NumMatches = %d, want at least 2", result.NumMatches)
-	}
-}
-
-// ============================================================================
-// ParallelLeftJoinI64 Tests
-// ============================================================================
-
-func TestParallelLeftJoinI64(t *testing.T) {
-	leftKeys := []int64{1, 2, 3}
-	rightKeys := []int64{2, 4}
-
-	result := ParallelLeftJoinI64(leftKeys, rightKeys)
-	if result == nil {
-		t.Fatal("ParallelLeftJoinI64 returned nil")
-	}
-
-	// All left keys should be present
-	if result.NumRows != 3 {
-		t.Errorf("NumRows = %d, want 3", result.NumRows)
 	}
 }
 

@@ -5,6 +5,8 @@ A high-performance DataFrame library for Go, powered by Zig SIMD operations.
 [![Go Reference](https://pkg.go.dev/badge/github.com/NerdMeNot/galleon/go.svg)](https://pkg.go.dev/github.com/NerdMeNot/galleon/go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+> **Note**: This project is under active development and is not yet recommended for production use. APIs may change, and some features are still being optimized. Contributions and feedback are welcome!
+
 ## Overview
 
 Galleon combines Go's developer ergonomics with Zig's low-level SIMD capabilities to deliver high-performance DataFrame operations. It provides a Polars-inspired API for data manipulation, aggregation, joins, and I/O operations.

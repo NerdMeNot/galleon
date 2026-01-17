@@ -20,13 +20,11 @@ const VECTOR_WIDTH = core.VECTOR_WIDTH;
 pub fn lag(comptime T: type, data: []const T, offset: usize, default: T, out: []T) void {
     if (data.len == 0 or out.len < data.len) return;
 
-    // First `offset` positions get default
+    // First `offset` positions get default (SIMD-optimized via @memset)
     const fill_end = @min(offset, data.len);
-    for (out[0..fill_end]) |*o| {
-        o.* = default;
-    }
+    @memset(out[0..fill_end], default);
 
-    // Rest get shifted values
+    // Rest get shifted values (SIMD-optimized via @memcpy)
     if (offset < data.len) {
         @memcpy(out[offset..data.len], data[0 .. data.len - offset]);
     }
@@ -37,16 +35,14 @@ pub fn lag(comptime T: type, data: []const T, offset: usize, default: T, out: []
 pub fn lead(comptime T: type, data: []const T, offset: usize, default: T, out: []T) void {
     if (data.len == 0 or out.len < data.len) return;
 
-    // Main data shifted back
+    // Main data shifted back (SIMD-optimized via @memcpy)
     if (offset < data.len) {
         @memcpy(out[0 .. data.len - offset], data[offset..data.len]);
     }
 
-    // Last `offset` positions get default
+    // Last `offset` positions get default (SIMD-optimized via @memset)
     const fill_start = if (offset < data.len) data.len - offset else 0;
-    for (out[fill_start..data.len]) |*o| {
-        o.* = default;
-    }
+    @memset(out[fill_start..data.len], default);
 }
 
 // ============================================================================

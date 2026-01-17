@@ -1,883 +1,745 @@
 package galleon
 
+/*
+#include "galleon.h"
+*/
+import "C"
+
 import (
-	"fmt"
-	"reflect"
-	"sort"
-	"sync"
+	"runtime"
+	"unsafe"
 )
 
-// DataFrame represents a collection of named columns (Series)
+// DataFrame represents a DataFrame backed by Arrow columns.
+// All columns are Series stored in Zig memory with SIMD operations.
 type DataFrame struct {
-	columns []*Series
-	schema  *Schema
-	height  int // number of rows
+	columns  map[string]*Series
+	colOrder []string // Preserve insertion order
 }
 
-// NewDataFrame creates a new DataFrame from a slice of Series
-func NewDataFrame(columns ...*Series) (*DataFrame, error) {
-	if len(columns) == 0 {
-		return &DataFrame{
-			columns: nil,
-			schema:  &Schema{names: []string{}, dtypes: []DType{}},
-			height:  0,
-		}, nil
-	}
+// ============================================================================
+// Creation
+// ============================================================================
 
-	// Validate all columns have the same length
-	height := columns[0].Len()
-	names := make([]string, len(columns))
-	dtypes := make([]DType, len(columns))
-
-	for i, col := range columns {
-		if col.Len() != height {
-			return nil, fmt.Errorf("column '%s' has length %d, expected %d", col.Name(), col.Len(), height)
-		}
-		names[i] = col.Name()
-		dtypes[i] = col.DType()
-	}
-
-	schema, err := NewSchema(names, dtypes)
-	if err != nil {
-		return nil, err
-	}
-
+// NewDataFrame creates an empty DataFrame.
+func NewDataFrame() *DataFrame {
 	return &DataFrame{
-		columns: columns,
-		schema:  schema,
-		height:  height,
-	}, nil
+		columns:  make(map[string]*Series),
+		colOrder: make([]string, 0),
+	}
 }
 
-// FromRecords creates a DataFrame from a slice of maps.
-// Each map represents a row, with keys as column names.
-// All maps should have the same keys for best results.
-// Type inference: int/int64 -> Int64, float64 -> Float64, string -> String, bool -> Bool
-func FromRecords(records []map[string]interface{}) (*DataFrame, error) {
-	if len(records) == 0 {
-		return NewDataFrame()
+// AddColumn adds a column to the DataFrame.
+// If a column with the same name exists, it is replaced.
+// Returns the DataFrame for method chaining.
+func (df *DataFrame) AddColumn(series *Series) *DataFrame {
+	if series == nil {
+		return df
 	}
 
-	// Collect all unique column names from all records
-	colSet := make(map[string]bool)
-	for _, record := range records {
-		for key := range record {
-			colSet[key] = true
-		}
+	name := series.Name()
+
+	// Check if column already exists
+	if _, exists := df.columns[name]; !exists {
+		df.colOrder = append(df.colOrder, name)
 	}
 
-	// Sort column names for deterministic ordering
-	colNames := make([]string, 0, len(colSet))
-	for name := range colSet {
-		colNames = append(colNames, name)
-	}
-	sort.Strings(colNames)
-
-	// Infer types from first non-nil value in each column
-	colTypes := make(map[string]DType)
-	for _, name := range colNames {
-		for _, record := range records {
-			if val, ok := record[name]; ok && val != nil {
-				colTypes[name] = inferTypeFromValue(val)
-				break
-			}
-		}
-		// Default to String if all nil
-		if _, ok := colTypes[name]; !ok {
-			colTypes[name] = String
-		}
-	}
-
-	// Build columns
-	numRows := len(records)
-	columns := make([]*Series, len(colNames))
-
-	for i, name := range colNames {
-		dtype := colTypes[name]
-		switch dtype {
-		case Float64:
-			data := make([]float64, numRows)
-			for j, record := range records {
-				if val, ok := record[name]; ok && val != nil {
-					data[j] = convertToFloat64(val)
-				}
-			}
-			columns[i] = NewSeriesFloat64(name, data)
-		case Int64:
-			data := make([]int64, numRows)
-			for j, record := range records {
-				if val, ok := record[name]; ok && val != nil {
-					data[j] = convertToInt64(val)
-				}
-			}
-			columns[i] = NewSeriesInt64(name, data)
-		case Bool:
-			data := make([]bool, numRows)
-			for j, record := range records {
-				if val, ok := record[name]; ok && val != nil {
-					data[j] = convertToBool(val)
-				}
-			}
-			columns[i] = NewSeriesBool(name, data)
-		default: // String
-			data := make([]string, numRows)
-			for j, record := range records {
-				if val, ok := record[name]; ok && val != nil {
-					data[j] = convertToString(val)
-				}
-			}
-			columns[i] = NewSeriesString(name, data)
-		}
-	}
-
-	return NewDataFrame(columns...)
+	df.columns[name] = series
+	return df
 }
 
-// FromStructs creates a DataFrame from a slice of structs.
-// Uses reflection to extract field names and values.
-// Exported fields become columns, field names become column names.
-// Supports struct tags: `galleon:"column_name"` to override column names.
-func FromStructs(structs interface{}) (*DataFrame, error) {
-	v := reflect.ValueOf(structs)
-	if v.Kind() != reflect.Slice {
-		return nil, fmt.Errorf("FromStructs requires a slice, got %s", v.Kind())
+// FromColumns creates an DataFrame from multiple Series.
+// All series must have the same length.
+func FromColumns(series ...*Series) *DataFrame {
+	df := NewDataFrame()
+
+	if len(series) == 0 {
+		return df
 	}
 
-	if v.Len() == 0 {
-		return NewDataFrame()
-	}
-
-	// Get the element type
-	elemType := v.Type().Elem()
-	if elemType.Kind() == reflect.Ptr {
-		elemType = elemType.Elem()
-	}
-	if elemType.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("FromStructs requires a slice of structs, got slice of %s", elemType.Kind())
-	}
-
-	// Extract field info
-	type fieldInfo struct {
-		name    string // column name
-		index   int    // struct field index
-		kind    reflect.Kind
-		dtype   DType
-	}
-
-	var fields []fieldInfo
-	for i := 0; i < elemType.NumField(); i++ {
-		field := elemType.Field(i)
-		if !field.IsExported() {
+	// Verify all series have the same length
+	expectedLen := series[0].Len()
+	for _, s := range series {
+		if s == nil {
 			continue
 		}
-
-		// Get column name from tag or field name
-		colName := field.Name
-		if tag := field.Tag.Get("galleon"); tag != "" {
-			if tag == "-" {
-				continue // Skip this field
-			}
-			colName = tag
-		}
-
-		dtype := reflectKindToDType(field.Type.Kind())
-		fields = append(fields, fieldInfo{
-			name:  colName,
-			index: i,
-			kind:  field.Type.Kind(),
-			dtype: dtype,
-		})
-	}
-
-	if len(fields) == 0 {
-		return nil, fmt.Errorf("no exported fields found in struct")
-	}
-
-	// Build columns
-	numRows := v.Len()
-	columns := make([]*Series, len(fields))
-
-	for i, f := range fields {
-		switch f.dtype {
-		case Float64:
-			data := make([]float64, numRows)
-			for j := 0; j < numRows; j++ {
-				elem := v.Index(j)
-				if elem.Kind() == reflect.Ptr {
-					elem = elem.Elem()
-				}
-				data[j] = elem.Field(f.index).Float()
-			}
-			columns[i] = NewSeriesFloat64(f.name, data)
-		case Float32:
-			data := make([]float32, numRows)
-			for j := 0; j < numRows; j++ {
-				elem := v.Index(j)
-				if elem.Kind() == reflect.Ptr {
-					elem = elem.Elem()
-				}
-				data[j] = float32(elem.Field(f.index).Float())
-			}
-			columns[i] = NewSeriesFloat32(f.name, data)
-		case Int64:
-			data := make([]int64, numRows)
-			for j := 0; j < numRows; j++ {
-				elem := v.Index(j)
-				if elem.Kind() == reflect.Ptr {
-					elem = elem.Elem()
-				}
-				data[j] = elem.Field(f.index).Int()
-			}
-			columns[i] = NewSeriesInt64(f.name, data)
-		case Int32:
-			data := make([]int32, numRows)
-			for j := 0; j < numRows; j++ {
-				elem := v.Index(j)
-				if elem.Kind() == reflect.Ptr {
-					elem = elem.Elem()
-				}
-				data[j] = int32(elem.Field(f.index).Int())
-			}
-			columns[i] = NewSeriesInt32(f.name, data)
-		case UInt64:
-			data := make([]int64, numRows) // Store as int64
-			for j := 0; j < numRows; j++ {
-				elem := v.Index(j)
-				if elem.Kind() == reflect.Ptr {
-					elem = elem.Elem()
-				}
-				data[j] = int64(elem.Field(f.index).Uint())
-			}
-			columns[i] = NewSeriesInt64(f.name, data)
-		case UInt32:
-			data := make([]int32, numRows) // Store as int32
-			for j := 0; j < numRows; j++ {
-				elem := v.Index(j)
-				if elem.Kind() == reflect.Ptr {
-					elem = elem.Elem()
-				}
-				data[j] = int32(elem.Field(f.index).Uint())
-			}
-			columns[i] = NewSeriesInt32(f.name, data)
-		case Bool:
-			data := make([]bool, numRows)
-			for j := 0; j < numRows; j++ {
-				elem := v.Index(j)
-				if elem.Kind() == reflect.Ptr {
-					elem = elem.Elem()
-				}
-				data[j] = elem.Field(f.index).Bool()
-			}
-			columns[i] = NewSeriesBool(f.name, data)
-		default: // String
-			data := make([]string, numRows)
-			for j := 0; j < numRows; j++ {
-				elem := v.Index(j)
-				if elem.Kind() == reflect.Ptr {
-					elem = elem.Elem()
-				}
-				data[j] = elem.Field(f.index).String()
-			}
-			columns[i] = NewSeriesString(f.name, data)
+		if s.Len() != expectedLen {
+			return nil // Length mismatch
 		}
 	}
 
-	return NewDataFrame(columns...)
-}
-
-// Helper functions for type inference and conversion (FromRecords/FromStructs)
-
-func inferTypeFromValue(val interface{}) DType {
-	switch val.(type) {
-	case float64, float32:
-		return Float64
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-		return Int64
-	case bool:
-		return Bool
-	default:
-		return String
+	for _, s := range series {
+		if s != nil {
+			df.AddColumn(s)
+		}
 	}
+
+	return df
 }
 
-func convertToFloat64(val interface{}) float64 {
-	switch v := val.(type) {
-	case float64:
-		return v
-	case float32:
-		return float64(v)
-	case int:
-		return float64(v)
-	case int64:
-		return float64(v)
-	case int32:
-		return float64(v)
-	default:
-		return 0
+// FromMapF64 creates an DataFrame from a map of float64 slices.
+// All slices must have the same length.
+func FromMapF64(data map[string][]float64) *DataFrame {
+	df := NewDataFrame()
+
+	if len(data) == 0 {
+		return df
 	}
-}
 
-func convertToInt64(val interface{}) int64 {
-	switch v := val.(type) {
-	case int64:
-		return v
-	case int:
-		return int64(v)
-	case int32:
-		return int64(v)
-	case float64:
-		return int64(v)
-	default:
-		return 0
+	// Verify all slices have the same length
+	var expectedLen int
+	first := true
+	for _, values := range data {
+		if first {
+			expectedLen = len(values)
+			first = false
+		} else if len(values) != expectedLen {
+			return nil // Length mismatch
+		}
 	}
-}
 
-func convertToBool(val interface{}) bool {
-	if b, ok := val.(bool); ok {
-		return b
+	for name, values := range data {
+		series := NewSeriesF64(name, values)
+		df.AddColumn(series)
 	}
-	return false
+
+	return df
 }
 
-func convertToString(val interface{}) string {
-	if s, ok := val.(string); ok {
-		return s
+// FromMapI64 creates an DataFrame from a map of int64 slices.
+// All slices must have the same length.
+func FromMapI64(data map[string][]int64) *DataFrame {
+	df := NewDataFrame()
+
+	if len(data) == 0 {
+		return df
 	}
-	return fmt.Sprintf("%v", val)
-}
 
-func reflectKindToDType(k reflect.Kind) DType {
-	switch k {
-	case reflect.Float64:
-		return Float64
-	case reflect.Float32:
-		return Float32
-	case reflect.Int64, reflect.Int:
-		return Int64
-	case reflect.Int32, reflect.Int16, reflect.Int8:
-		return Int32
-	case reflect.Uint64, reflect.Uint:
-		return UInt64
-	case reflect.Uint32, reflect.Uint16, reflect.Uint8:
-		return UInt32
-	case reflect.Bool:
-		return Bool
-	default:
-		return String
+	// Verify all slices have the same length
+	var expectedLen int
+	first := true
+	for _, values := range data {
+		if first {
+			expectedLen = len(values)
+			first = false
+		} else if len(values) != expectedLen {
+			return nil // Length mismatch
+		}
 	}
+
+	for name, values := range data {
+		series := NewSeriesI64(name, values)
+		df.AddColumn(series)
+	}
+
+	return df
 }
 
-// Height returns the number of rows
+// ============================================================================
+// Access
+// ============================================================================
+
+// Column returns the Series with the given name, or nil if not found.
+func (df *DataFrame) Column(name string) *Series {
+	return df.columns[name]
+}
+
+// ColumnNames returns the names of all columns in insertion order.
+func (df *DataFrame) ColumnNames() []string {
+	result := make([]string, len(df.colOrder))
+	copy(result, df.colOrder)
+	return result
+}
+
+// Height returns the number of rows in the DataFrame.
+// Returns 0 for an empty DataFrame.
 func (df *DataFrame) Height() int {
-	return df.height
+	if len(df.columns) == 0 {
+		return 0
+	}
+	// All columns have the same length, so just return the first one's length
+	for _, col := range df.columns {
+		return col.Len()
+	}
+	return 0
 }
 
-// Width returns the number of columns
+// Width returns the number of columns in the DataFrame.
 func (df *DataFrame) Width() int {
 	return len(df.columns)
 }
 
-// Shape returns (height, width)
-func (df *DataFrame) Shape() (int, int) {
-	return df.height, len(df.columns)
-}
+// ============================================================================
+// Selection
+// ============================================================================
 
-// Schema returns the DataFrame schema
-func (df *DataFrame) Schema() *Schema {
-	return df.schema
-}
+// Select returns a new DataFrame with only the specified columns.
+// Columns that don't exist are silently ignored.
+func (df *DataFrame) Select(columns ...string) *DataFrame {
+	result := NewDataFrame()
 
-// Columns returns a copy of the column names
-func (df *DataFrame) Columns() []string {
-	return df.schema.Names()
-}
-
-// Column returns the Series at the given index
-func (df *DataFrame) Column(index int) *Series {
-	if index < 0 || index >= len(df.columns) {
-		return nil
-	}
-	return df.columns[index]
-}
-
-// ColumnByName returns the Series with the given name
-func (df *DataFrame) ColumnByName(name string) *Series {
-	idx, ok := df.schema.GetIndex(name)
-	if !ok {
-		return nil
-	}
-	return df.columns[idx]
-}
-
-// Select returns a new DataFrame with columns computed from expressions.
-// This is the unified API matching LazyFrame.Select.
-//
-// Example:
-//
-//	df.Select(Col("a"), Col("b").Mul(Lit(2)).Alias("double_b"))
-func (df *DataFrame) Select(exprs ...Expr) (*DataFrame, error) {
-	if len(exprs) == 0 {
-		return NewDataFrame()
-	}
-
-	columns := make([]*Series, 0, len(exprs))
-	for _, expr := range exprs {
-		// Handle * (all columns) specially
-		if _, ok := expr.(*allColsExpr); ok {
-			for _, col := range df.columns {
-				columns = append(columns, col)
-			}
-			continue
+	for _, name := range columns {
+		if series, exists := df.columns[name]; exists {
+			result.columns[name] = series
+			result.colOrder = append(result.colOrder, name)
 		}
-
-		col, err := evaluateExpr(expr, df)
-		if err != nil {
-			return nil, fmt.Errorf("select error: %w", err)
-		}
-		columns = append(columns, col)
 	}
 
-	return NewDataFrame(columns...)
+	return result
 }
 
-// SelectColumns returns a new DataFrame with only the specified columns by name.
-// This is a convenience method; prefer Select(Col("a"), Col("b")) for consistency.
-//
-// Deprecated: Use Select(Col("a"), Col("b")) instead.
-func (df *DataFrame) SelectColumns(names ...string) (*DataFrame, error) {
-	cols := make([]*Series, 0, len(names))
-	for _, name := range names {
-		col := df.ColumnByName(name)
-		if col == nil {
-			return nil, fmt.Errorf("column '%s' not found", name)
-		}
-		cols = append(cols, col)
-	}
-	return NewDataFrame(cols...)
-}
-
-// Drop returns a new DataFrame without the specified columns
-func (df *DataFrame) Drop(names ...string) (*DataFrame, error) {
-	dropSet := make(map[string]bool, len(names))
-	for _, name := range names {
+// Drop returns a new DataFrame without the specified columns.
+func (df *DataFrame) Drop(columns ...string) *DataFrame {
+	// Create a set of columns to drop
+	dropSet := make(map[string]bool)
+	for _, name := range columns {
 		dropSet[name] = true
 	}
 
-	cols := make([]*Series, 0, len(df.columns))
-	for _, col := range df.columns {
-		if !dropSet[col.Name()] {
-			cols = append(cols, col)
+	result := NewDataFrame()
+
+	for _, name := range df.colOrder {
+		if !dropSet[name] {
+			result.columns[name] = df.columns[name]
+			result.colOrder = append(result.colOrder, name)
 		}
 	}
-	return NewDataFrame(cols...)
-}
 
-// Head returns a new DataFrame with the first n rows
-func (df *DataFrame) Head(n int) *DataFrame {
-	if n <= 0 || df.height == 0 {
-		return &DataFrame{
-			columns: nil,
-			schema:  df.schema,
-			height:  0,
-		}
-	}
-	if n > df.height {
-		n = df.height
-	}
-
-	// Build columns in parallel for large DataFrames
-	cols := ParallelBuildColumns(len(df.columns), func(colIdx int) *Series {
-		return df.columns[colIdx].Head(n)
-	})
-
-	result, _ := NewDataFrame(cols...)
 	return result
 }
 
-// Tail returns a new DataFrame with the last n rows
-func (df *DataFrame) Tail(n int) *DataFrame {
-	if n <= 0 || df.height == 0 {
-		return &DataFrame{
-			columns: nil,
-			schema:  df.schema,
-			height:  0,
+// ============================================================================
+// Operations
+// ============================================================================
+
+// Filter returns a new DataFrame with rows where mask is true.
+// The mask length must match the DataFrame height.
+func (df *DataFrame) Filter(mask []bool) *DataFrame {
+	if len(mask) != df.Height() {
+		return nil
+	}
+
+	result := NewDataFrame()
+
+	for _, name := range df.colOrder {
+		col := df.columns[name]
+		filtered := col.Filter(mask)
+		if filtered == nil {
+			return nil
 		}
-	}
-	if n > df.height {
-		n = df.height
+		result.columns[name] = filtered
+		result.colOrder = append(result.colOrder, name)
 	}
 
-	// Build columns in parallel for large DataFrames
-	cols := ParallelBuildColumns(len(df.columns), func(colIdx int) *Series {
-		return df.columns[colIdx].Tail(n)
-	})
-
-	result, _ := NewDataFrame(cols...)
 	return result
 }
 
-// Filter returns a new DataFrame with only rows where the predicate is true.
-// This is the unified API matching LazyFrame.Filter.
-//
-// Example:
-//
-//	df.Filter(Col("age").Gt(Lit(30)))
-//	df.Filter(Col("active").Eq(Lit(true)))
-func (df *DataFrame) Filter(predicate Expr) (*DataFrame, error) {
-	mask, err := evaluatePredicate(predicate, df)
-	if err != nil {
-		return nil, fmt.Errorf("filter error: %w", err)
+// Sort returns a new DataFrame sorted by the specified column.
+// Uses a single CGO call to sort + gather all columns in Zig for maximum efficiency.
+func (df *DataFrame) Sort(column string, ascending bool) *DataFrame {
+	sortCol := df.columns[column]
+	if sortCol == nil {
+		return nil
 	}
-	return df.FilterByMask(mask)
+
+	// Handle empty DataFrame
+	if sortCol.Len() == 0 {
+		return df.Clone()
+	}
+
+	// Collect all column handles for the single CGO call
+	cols := make([]unsafe.Pointer, len(df.colOrder))
+	for i, name := range df.colOrder {
+		cols[i] = df.columns[name].handle
+	}
+
+	// Single CGO call: argsort + gather all columns
+	sortResult := C.galleon_sort_dataframe_full(
+		(*C.ManagedArrowArray)(sortCol.handle),
+		(**C.ManagedArrowArray)(unsafe.Pointer(&cols[0])),
+		C.size_t(len(cols)),
+		C.bool(ascending),
+	)
+
+	if sortResult == nil {
+		return nil
+	}
+	defer C.galleon_sort_result_destroy_struct(sortResult)
+
+	// Build result DataFrame from sorted columns
+	result := NewDataFrame()
+	numRows := int(C.galleon_sort_result_num_rows(sortResult))
+
+	for i, name := range df.colOrder {
+		colHandle := C.galleon_sort_result_take_column(sortResult, C.size_t(i))
+		if colHandle == nil {
+			return nil
+		}
+
+		series := &Series{
+			handle: unsafe.Pointer(colHandle),
+			name:   name,
+			dtype:  df.columns[name].dtype,
+			length: numRows,
+		}
+		runtime.SetFinalizer(series, func(s *Series) {
+			s.Release()
+		})
+
+		result.columns[name] = series
+		result.colOrder = append(result.colOrder, name)
+	}
+
+	return result
 }
 
-// FilterByMask returns a new DataFrame with only rows where mask is true.
-// This is a lower-level method; prefer Filter(predicate) for consistency.
-func (df *DataFrame) FilterByMask(mask []byte) (*DataFrame, error) {
-	if len(mask) != df.height {
-		return nil, fmt.Errorf("mask length %d doesn't match DataFrame height %d", len(mask), df.height)
+// Rename returns a new DataFrame with a column renamed.
+func (df *DataFrame) Rename(oldName, newName string) *DataFrame {
+	if _, exists := df.columns[oldName]; !exists {
+		return df // Column doesn't exist, return unchanged
 	}
 
-	// Count matching rows using Zig
-	count := CountMaskTrue(mask)
+	result := NewDataFrame()
 
-	if count == 0 {
-		return NewDataFrame()
+	for _, name := range df.colOrder {
+		col := df.columns[name]
+		if name == oldName {
+			// Create a new series with the new name
+			renamed := renameSeries(col, newName)
+			result.columns[newName] = renamed
+			result.colOrder = append(result.colOrder, newName)
+		} else {
+			result.columns[name] = col
+			result.colOrder = append(result.colOrder, name)
+		}
 	}
 
-	// Build indices array using Zig
-	indicesU32 := make([]uint32, count)
-	actualCount := IndicesFromMask(mask, indicesU32)
-	if actualCount != count {
-		indicesU32 = indicesU32[:actualCount]
-	}
-
-	// Convert to int indices for compatibility
-	indices := make([]int, len(indicesU32))
-	for i, idx := range indicesU32 {
-		indices[i] = int(idx)
-	}
-
-	// Build columns in parallel
-	cols := ParallelBuildColumns(len(df.columns), func(colIdx int) *Series {
-		col := df.columns[colIdx]
-		return filterColumnByIndices(col, indices)
-	})
-
-	return NewDataFrame(cols...)
+	return result
 }
 
-// filterColumnByIndices filters a column by row indices
-func filterColumnByIndices(col *Series, indices []int) *Series {
-	count := len(indices)
-	switch col.DType() {
+// renameSeries creates a copy of the series with a new name.
+func renameSeries(s *Series, newName string) *Series {
+	switch s.DType() {
 	case Float64:
-		data := col.Float64()
-		newData := make([]float64, count)
-		for i, idx := range indices {
-			newData[i] = data[idx]
+		if s.HasNulls() {
+			values := s.ToFloat64()
+			valid := make([]bool, s.Len())
+			for i := 0; i < s.Len(); i++ {
+				valid[i] = s.IsValid(i)
+			}
+			return NewSeriesF64WithNulls(newName, values, valid)
 		}
-		return NewSeriesFloat64(col.Name(), newData)
-	case Float32:
-		data := col.Float32()
-		newData := make([]float32, count)
-		for i, idx := range indices {
-			newData[i] = data[idx]
-		}
-		return NewSeriesFloat32(col.Name(), newData)
+		return NewSeriesF64(newName, s.ToFloat64())
+
 	case Int64:
-		data := col.Int64()
-		newData := make([]int64, count)
-		for i, idx := range indices {
-			newData[i] = data[idx]
+		if s.HasNulls() {
+			values := s.ToInt64()
+			valid := make([]bool, s.Len())
+			for i := 0; i < s.Len(); i++ {
+				valid[i] = s.IsValid(i)
+			}
+			return NewSeriesI64WithNulls(newName, values, valid)
 		}
-		return NewSeriesInt64(col.Name(), newData)
-	case Int32:
-		data := col.Int32()
-		newData := make([]int32, count)
-		for i, idx := range indices {
-			newData[i] = data[idx]
-		}
-		return NewSeriesInt32(col.Name(), newData)
-	case Bool:
-		data := col.Bool()
-		newData := make([]bool, count)
-		for i, idx := range indices {
-			newData[i] = data[idx]
-		}
-		return NewSeriesBool(col.Name(), newData)
-	case String:
-		data := col.Strings()
-		newData := make([]string, count)
-		for i, idx := range indices {
-			newData[i] = data[idx]
-		}
-		return NewSeriesString(col.Name(), newData)
+		return NewSeriesI64(newName, s.ToInt64())
+
 	default:
 		return nil
 	}
 }
 
-// FilterByIndices returns a new DataFrame with only the specified row indices
-func (df *DataFrame) FilterByIndices(indices []uint32) (*DataFrame, error) {
-	if len(indices) == 0 {
-		return NewDataFrame()
+// WithColumn returns a new DataFrame with the column added or replaced.
+// If a column with the same name exists, it is replaced.
+// The series length must match the DataFrame height (unless DataFrame is empty).
+func (df *DataFrame) WithColumn(series *Series) *DataFrame {
+	if series == nil {
+		return df
 	}
 
-	// Convert to int indices
-	intIndices := make([]int, len(indices))
-	for i, idx := range indices {
-		intIndices[i] = int(idx)
-	}
-
-	// Validate indices
-	for _, idx := range intIndices {
-		if idx >= df.height {
-			return nil, fmt.Errorf("index %d out of bounds for DataFrame with height %d", idx, df.height)
-		}
-	}
-
-	// Build columns in parallel
-	cols := ParallelBuildColumns(len(df.columns), func(colIdx int) *Series {
-		return filterColumnByIndices(df.columns[colIdx], intIndices)
-	})
-
-	return NewDataFrame(cols...)
-}
-
-// SortBy returns a new DataFrame sorted by the specified column
-func (df *DataFrame) SortBy(column string, ascending bool) (*DataFrame, error) {
-	col := df.ColumnByName(column)
-	if col == nil {
-		return nil, fmt.Errorf("column '%s' not found", column)
-	}
-
-	indices := col.Argsort(ascending)
-	if indices == nil {
-		return nil, fmt.Errorf("cannot sort column '%s'", column)
-	}
-
-	return df.FilterByIndices(indices)
-}
-
-// WithColumn returns a new DataFrame with an additional or replaced column.
-// The expression is evaluated and the result is assigned to the given column name.
-// This is the unified API matching LazyFrame.WithColumn.
-//
-// Example:
-//
-//	df.WithColumn("double_x", Col("x").Mul(Lit(2)))
-func (df *DataFrame) WithColumn(name string, expr Expr) (*DataFrame, error) {
-	// Evaluate the expression
-	col, err := evaluateExpr(expr, df)
-	if err != nil {
-		return nil, fmt.Errorf("with_column error: %w", err)
-	}
-
-	// Rename to the target name
-	col = col.Rename(name)
-
-	// Use the series-based implementation
-	return df.WithColumnSeries(col)
-}
-
-// WithColumnSeries returns a new DataFrame with an additional or replaced column.
-// This is a lower-level method that takes a pre-built Series.
-//
-// Deprecated: Use WithColumn(name, expr) instead for consistency with LazyFrame.
-func (df *DataFrame) WithColumnSeries(col *Series) (*DataFrame, error) {
-	if col.Len() != df.height && df.height > 0 {
-		return nil, fmt.Errorf("column '%s' has length %d, expected %d", col.Name(), col.Len(), df.height)
-	}
-
-	// Check if column already exists
-	idx, exists := df.schema.GetIndex(col.Name())
-
-	cols := make([]*Series, len(df.columns))
-	copy(cols, df.columns)
-
-	if exists {
-		cols[idx] = col
-	} else {
-		cols = append(cols, col)
-	}
-
-	return NewDataFrame(cols...)
-}
-
-// Rename returns a new DataFrame with a column renamed
-func (df *DataFrame) Rename(oldName, newName string) (*DataFrame, error) {
-	idx, ok := df.schema.GetIndex(oldName)
-	if !ok {
-		return nil, fmt.Errorf("column '%s' not found", oldName)
-	}
-
-	cols := make([]*Series, len(df.columns))
-	for i, col := range df.columns {
-		if i == idx {
-			cols[i] = col.Rename(newName)
-		} else {
-			cols[i] = col
-		}
-	}
-
-	return NewDataFrame(cols...)
-}
-
-// Describe returns summary statistics for all numeric columns
-func (df *DataFrame) Describe() map[string]map[string]float64 {
-	// Find numeric columns
-	var numericCols []*Series
-	for _, col := range df.columns {
-		if col.DType().IsNumeric() {
-			numericCols = append(numericCols, col)
-		}
-	}
-
-	if len(numericCols) == 0 {
+	// If DataFrame is not empty, verify length matches
+	if df.Height() > 0 && series.Len() != df.Height() {
 		return nil
 	}
 
-	// Compute stats in parallel
-	cfg := globalConfig
-	result := make(map[string]map[string]float64, len(numericCols))
-	var mu sync.Mutex
+	result := NewDataFrame()
+	name := series.Name()
 
-	if cfg.shouldParallelize(df.height) && len(numericCols) > 1 {
-		var wg sync.WaitGroup
-		for _, col := range numericCols {
-			wg.Add(1)
-			go func(c *Series) {
-				defer wg.Done()
-				stats := c.Describe()
-				mu.Lock()
-				result[c.Name()] = stats
-				mu.Unlock()
-			}(col)
+	// Copy existing columns
+	for _, colName := range df.colOrder {
+		if colName != name {
+			result.columns[colName] = df.columns[colName]
+			result.colOrder = append(result.colOrder, colName)
 		}
-		wg.Wait()
+	}
+
+	// Add/replace the column
+	if _, exists := df.columns[name]; exists {
+		// Insert at the same position
+		newOrder := make([]string, 0, len(df.colOrder))
+		for _, colName := range df.colOrder {
+			if colName == name {
+				newOrder = append(newOrder, name)
+			} else {
+				newOrder = append(newOrder, colName)
+			}
+		}
+		result.colOrder = newOrder
 	} else {
-		for _, col := range numericCols {
-			result[col.Name()] = col.Describe()
-		}
+		result.colOrder = append(result.colOrder, name)
+	}
+	result.columns[name] = series
+
+	return result
+}
+
+// Head returns a new DataFrame with the first n rows.
+func (df *DataFrame) Head(n int) *DataFrame {
+	if n <= 0 {
+		return NewDataFrame()
+	}
+	if n > df.Height() {
+		n = df.Height()
+	}
+
+	result := NewDataFrame()
+
+	for _, name := range df.colOrder {
+		col := df.columns[name]
+		result.columns[name] = col.Head(n)
+		result.colOrder = append(result.colOrder, name)
 	}
 
 	return result
 }
 
-// String returns a string representation of the DataFrame using global display settings.
-// Use StringWithConfig for custom display options.
-func (df *DataFrame) String() string {
-	return df.StringWithConfig(GetDisplayConfig())
+// Tail returns a new DataFrame with the last n rows.
+func (df *DataFrame) Tail(n int) *DataFrame {
+	if n <= 0 {
+		return NewDataFrame()
+	}
+	if n > df.Height() {
+		n = df.Height()
+	}
+
+	result := NewDataFrame()
+
+	for _, name := range df.colOrder {
+		col := df.columns[name]
+		result.columns[name] = col.Tail(n)
+		result.colOrder = append(result.colOrder, name)
+	}
+
+	return result
 }
 
-// ============================================================================
-// ChunkedColumn Support
-// ============================================================================
-
-// HasChunkedColumns returns true if any column uses chunked storage.
-func (df *DataFrame) HasChunkedColumns() bool {
-	for _, col := range df.columns {
-		if col.IsChunked() {
-			return true
-		}
+// Slice returns a new DataFrame with rows from start to end (exclusive).
+func (df *DataFrame) Slice(start, end int) *DataFrame {
+	if start < 0 {
+		start = 0
 	}
-	return false
-}
-
-// ChunkedColumnNames returns the names of columns that use chunked storage.
-func (df *DataFrame) ChunkedColumnNames() []string {
-	var names []string
-	for _, col := range df.columns {
-		if col.IsChunked() {
-			names = append(names, col.Name())
-		}
+	if end > df.Height() {
+		end = df.Height()
 	}
-	return names
-}
-
-// ToChunked returns a new DataFrame with all Float64 columns converted to chunked storage.
-// Chunked storage provides better cache performance for large datasets (>100K rows).
-// Non-Float64 columns are copied as-is.
-func (df *DataFrame) ToChunked() (*DataFrame, error) {
-	if df.height == 0 {
-		return df, nil
-	}
-
-	newCols := make([]*Series, len(df.columns))
-	for i, col := range df.columns {
-		if col.DType() == Float64 && !col.IsChunked() {
-			// Convert Float64 to chunked
-			data := col.Float64()
-			if data != nil {
-				newCols[i] = NewSeriesFloat64Chunked(col.Name(), data)
-				if newCols[i] == nil {
-					return nil, fmt.Errorf("failed to create chunked column for '%s'", col.Name())
-				}
-			} else {
-				newCols[i] = col
-			}
-		} else {
-			// Keep as-is (already chunked or non-Float64)
-			newCols[i] = col
-		}
-	}
-
-	return NewDataFrame(newCols...)
-}
-
-// ToFlat returns a new DataFrame with all chunked columns converted to flat storage.
-// This is the inverse of ToChunked.
-func (df *DataFrame) ToFlat() (*DataFrame, error) {
-	if df.height == 0 {
-		return df, nil
-	}
-
-	newCols := make([]*Series, len(df.columns))
-	for i, col := range df.columns {
-		if col.IsChunked() && col.DType() == Float64 {
-			// Convert chunked to flat
-			data := col.Float64() // This materializes the chunked data
-			if data != nil {
-				newCols[i] = NewSeriesFloat64(col.Name(), data)
-				if newCols[i] == nil {
-					return nil, fmt.Errorf("failed to create flat column for '%s'", col.Name())
-				}
-			} else {
-				newCols[i] = col
-			}
-		} else {
-			newCols[i] = col
-		}
-	}
-
-	return NewDataFrame(newCols...)
-}
-
-// NewDataFrameChunked creates a new DataFrame from columns, converting Float64 columns to chunked storage.
-// This is equivalent to NewDataFrame(...).ToChunked() but more efficient.
-func NewDataFrameChunked(columns ...*Series) (*DataFrame, error) {
-	if len(columns) == 0 {
+	if start >= end {
 		return NewDataFrame()
 	}
 
-	// Convert Float64 columns to chunked
-	chunkedCols := make([]*Series, len(columns))
-	for i, col := range columns {
-		if col.DType() == Float64 && !col.IsChunked() {
-			data := col.Float64()
-			if data != nil {
-				chunkedCols[i] = NewSeriesFloat64Chunked(col.Name(), data)
-				if chunkedCols[i] == nil {
-					return nil, fmt.Errorf("failed to create chunked column for '%s'", col.Name())
-				}
-			} else {
-				chunkedCols[i] = col
-			}
-		} else {
-			chunkedCols[i] = col
-		}
+	result := NewDataFrame()
+
+	for _, name := range df.colOrder {
+		col := df.columns[name]
+		result.columns[name] = col.Slice(start, end)
+		result.colOrder = append(result.colOrder, name)
 	}
 
-	return NewDataFrame(chunkedCols...)
+	return result
+}
+
+// Clone creates a shallow copy of the DataFrame.
+// The underlying Series are shared, not copied.
+func (df *DataFrame) Clone() *DataFrame {
+	result := NewDataFrame()
+
+	for _, name := range df.colOrder {
+		result.columns[name] = df.columns[name]
+		result.colOrder = append(result.colOrder, name)
+	}
+
+	return result
+}
+
+// ============================================================================
+// Join Operations
+// ============================================================================
+
+// InnerJoin performs an inner join between two DataFrames on the specified key columns.
+// Only rows where keys match in both DataFrames are included in the result.
+// The result contains all columns from both DataFrames (with right columns suffixed if names conflict).
+// This uses a single CGO call to do join + materialize in Zig for maximum performance.
+func InnerJoin(left, right *DataFrame, leftOn, rightOn string) *DataFrame {
+	leftKey := left.Column(leftOn)
+	rightKey := right.Column(rightOn)
+
+	if leftKey == nil || rightKey == nil {
+		return nil
+	}
+
+	// Both keys must be Int64 for now
+	if leftKey.DType() != Int64 || rightKey.DType() != Int64 {
+		return nil
+	}
+
+	// Collect column handles for CGO call
+	leftCols := make([]unsafe.Pointer, len(left.colOrder))
+	for i, name := range left.colOrder {
+		leftCols[i] = left.columns[name].handle
+	}
+
+	rightCols := make([]unsafe.Pointer, len(right.colOrder))
+	for i, name := range right.colOrder {
+		rightCols[i] = right.columns[name].handle
+	}
+
+	// Single CGO call: join + materialize all columns
+	joinResult := C.galleon_inner_join_full(
+		(*C.ManagedArrowArray)(leftKey.handle),
+		(*C.ManagedArrowArray)(rightKey.handle),
+		(**C.ManagedArrowArray)(unsafe.Pointer(&leftCols[0])),
+		C.size_t(len(leftCols)),
+		(**C.ManagedArrowArray)(unsafe.Pointer(&rightCols[0])),
+		C.size_t(len(rightCols)),
+	)
+
+	if joinResult == nil {
+		return nil
+	}
+	// Use destroy_struct at end since we take ownership of columns
+	defer C.galleon_full_join_result_destroy_struct(joinResult)
+
+	numRows := int(C.galleon_full_join_result_num_rows(joinResult))
+	if numRows == 0 {
+		return NewDataFrame()
+	}
+
+	// Build result DataFrame from result columns
+	result := NewDataFrame()
+	colIdx := 0
+
+	// Add left columns (take ownership)
+	for _, name := range left.colOrder {
+		colHandle := C.galleon_full_join_result_take_column(joinResult, C.size_t(colIdx))
+		if colHandle == nil {
+			return nil
+		}
+		series := seriesFromHandle(unsafe.Pointer(colHandle), name, left.columns[name].DType(), numRows)
+		result.columns[name] = series
+		result.colOrder = append(result.colOrder, name)
+		colIdx++
+	}
+
+	// Add right columns, handling name conflicts (take ownership)
+	for _, name := range right.colOrder {
+		colHandle := C.galleon_full_join_result_take_column(joinResult, C.size_t(colIdx))
+		if colHandle == nil {
+			return nil
+		}
+
+		finalName := name
+		if _, exists := result.columns[name]; exists {
+			finalName = name + "_right"
+		}
+
+		series := seriesFromHandle(unsafe.Pointer(colHandle), finalName, right.columns[name].DType(), numRows)
+		result.columns[finalName] = series
+		result.colOrder = append(result.colOrder, finalName)
+		colIdx++
+	}
+
+	return result
+}
+
+// LeftJoin performs a left join between two DataFrames on the specified key columns.
+// All rows from the left DataFrame are included; unmatched rows have null values for right columns.
+// This uses a single CGO call to do join + materialize in Zig for maximum performance.
+func LeftJoin(left, right *DataFrame, leftOn, rightOn string) *DataFrame {
+	leftKey := left.Column(leftOn)
+	rightKey := right.Column(rightOn)
+
+	if leftKey == nil || rightKey == nil {
+		return nil
+	}
+
+	// Both keys must be Int64 for now
+	if leftKey.DType() != Int64 || rightKey.DType() != Int64 {
+		return nil
+	}
+
+	// Collect column handles for CGO call
+	leftCols := make([]unsafe.Pointer, len(left.colOrder))
+	for i, name := range left.colOrder {
+		leftCols[i] = left.columns[name].handle
+	}
+
+	rightCols := make([]unsafe.Pointer, len(right.colOrder))
+	for i, name := range right.colOrder {
+		rightCols[i] = right.columns[name].handle
+	}
+
+	// Single CGO call: join + materialize all columns
+	joinResult := C.galleon_left_join_full(
+		(*C.ManagedArrowArray)(leftKey.handle),
+		(*C.ManagedArrowArray)(rightKey.handle),
+		(**C.ManagedArrowArray)(unsafe.Pointer(&leftCols[0])),
+		C.size_t(len(leftCols)),
+		(**C.ManagedArrowArray)(unsafe.Pointer(&rightCols[0])),
+		C.size_t(len(rightCols)),
+	)
+
+	if joinResult == nil {
+		return nil
+	}
+	// Use destroy_struct at end since we take ownership of columns
+	defer C.galleon_full_join_result_destroy_struct(joinResult)
+
+	numRows := int(C.galleon_full_join_result_num_rows(joinResult))
+	if numRows == 0 {
+		return NewDataFrame()
+	}
+
+	// Build result DataFrame from result columns
+	result := NewDataFrame()
+	colIdx := 0
+
+	// Add left columns (take ownership)
+	for _, name := range left.colOrder {
+		colHandle := C.galleon_full_join_result_take_column(joinResult, C.size_t(colIdx))
+		if colHandle == nil {
+			return nil
+		}
+		series := seriesFromHandle(unsafe.Pointer(colHandle), name, left.columns[name].DType(), numRows)
+		result.columns[name] = series
+		result.colOrder = append(result.colOrder, name)
+		colIdx++
+	}
+
+	// Add right columns, handling name conflicts (take ownership)
+	for _, name := range right.colOrder {
+		colHandle := C.galleon_full_join_result_take_column(joinResult, C.size_t(colIdx))
+		if colHandle == nil {
+			return nil
+		}
+
+		finalName := name
+		if _, exists := result.columns[name]; exists {
+			finalName = name + "_right"
+		}
+
+		series := seriesFromHandle(unsafe.Pointer(colHandle), finalName, right.columns[name].DType(), numRows)
+		result.columns[finalName] = series
+		result.colOrder = append(result.colOrder, finalName)
+		colIdx++
+	}
+
+	return result
+}
+
+// seriesFromHandle creates a Series from a Zig-managed handle.
+// The handle ownership is transferred to the Series.
+func seriesFromHandle(handle unsafe.Pointer, name string, dtype DType, length int) *Series {
+	s := &Series{
+		handle: handle,
+		name:   name,
+		dtype:  dtype,
+		length: length,
+	}
+	runtime.SetFinalizer(s, func(s *Series) {
+		s.Release()
+	})
+	return s
+}
+
+// gatherSeriesByInt32 creates a new series by gathering elements at the given int32 indices.
+// Uses SIMD-accelerated gather via CGO for better performance.
+func gatherSeriesByInt32(s *Series, indices []int32) *Series {
+	switch s.DType() {
+	case Float64:
+		values := s.ToFloat64()
+		newValues := make([]float64, len(indices))
+		GatherF64(values, indices, newValues)
+
+		if s.HasNulls() {
+			valid := make([]bool, len(indices))
+			for i, idx := range indices {
+				valid[i] = s.IsValid(int(idx))
+			}
+			return NewSeriesF64WithNulls(s.Name(), newValues, valid)
+		}
+		return NewSeriesF64(s.Name(), newValues)
+
+	case Int64:
+		values := s.ToInt64()
+		newValues := make([]int64, len(indices))
+		GatherI64(values, indices, newValues)
+
+		if s.HasNulls() {
+			valid := make([]bool, len(indices))
+			for i, idx := range indices {
+				valid[i] = s.IsValid(int(idx))
+			}
+			return NewSeriesI64WithNulls(s.Name(), newValues, valid)
+		}
+		return NewSeriesI64(s.Name(), newValues)
+
+	default:
+		return nil
+	}
+}
+
+// gatherSeriesByInt32WithNull creates a new series by gathering elements at the given int32 indices.
+// Index -1 means null (for left join unmatched rows).
+// Uses SIMD-accelerated gather via CGO for better performance.
+func gatherSeriesByInt32WithNull(s *Series, indices []int32) *Series {
+	switch s.DType() {
+	case Float64:
+		values := s.ToFloat64()
+		newValues := make([]float64, len(indices))
+		// CGO gather handles -1 indices (sets to 0)
+		GatherF64(values, indices, newValues)
+
+		// Build validity bitmap
+		valid := make([]bool, len(indices))
+		hasSourceNulls := s.HasNulls()
+		for i, idx := range indices {
+			if idx < 0 {
+				valid[i] = false
+			} else if hasSourceNulls {
+				valid[i] = s.IsValid(int(idx))
+			} else {
+				valid[i] = true
+			}
+		}
+		return NewSeriesF64WithNulls(s.Name(), newValues, valid)
+
+	case Int64:
+		values := s.ToInt64()
+		newValues := make([]int64, len(indices))
+		// CGO gather handles -1 indices (sets to 0)
+		GatherI64(values, indices, newValues)
+
+		// Build validity bitmap
+		valid := make([]bool, len(indices))
+		hasSourceNulls := s.HasNulls()
+		for i, idx := range indices {
+			if idx < 0 {
+				valid[i] = false
+			} else if hasSourceNulls {
+				valid[i] = s.IsValid(int(idx))
+			} else {
+				valid[i] = true
+			}
+		}
+		return NewSeriesI64WithNulls(s.Name(), newValues, valid)
+
+	default:
+		return nil
+	}
 }

@@ -1,5 +1,5 @@
 const std = @import("std");
-const blitz = @import("../blitz/mod.zig");
+const blitz = @import("../blitz.zig");
 const core = @import("core.zig");
 
 const VECTOR_WIDTH = core.VECTOR_WIDTH;

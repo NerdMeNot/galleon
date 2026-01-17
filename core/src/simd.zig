@@ -163,33 +163,45 @@ pub const aggregateMinByGroup = mod.aggregateMinByGroup;
 pub const aggregateMaxByGroup = mod.aggregateMaxByGroup;
 pub const countByGroup = mod.countByGroup;
 
-// Re-export sorting functions
-pub const argsort = mod.argsort;
-pub const argsortInt = mod.argsortInt;
-pub const argsortParallel = mod.argsortParallel;
-pub const argsortRadixF64 = mod.argsortRadixF64;
-pub const argsortParallelMerge = mod.argsortParallelMerge;
+// Re-export sorting functions (64-bit optimized radix sort)
+pub const argsortF64 = mod.argsortF64;
+pub const argsortI64 = mod.argsortI64;
+pub const sortF64 = mod.sortF64;
+pub const sortI64 = mod.sortI64;
+
+// Re-export sorting functions (32-bit using std.sort)
+pub const argsortI32 = mod.argsortI32;
+pub const argsortF32 = mod.argsortF32;
+pub const sortI32 = mod.sortI32;
+pub const sortF32 = mod.sortF32;
+
+// Re-export sorting functions (unsigned integers)
+pub const argsortU64 = mod.argsortU64;
+pub const argsortU32 = mod.argsortU32;
+
+// Key conversion utilities
+pub const floatToSortable = mod.floatToSortable;
+pub const i64ToSortable = mod.i64ToSortable;
+pub const isSortedI64Keys = mod.isSortedI64Keys;
+
+// Parallel gather functions
+pub const gatherF64Parallel = mod.gatherF64Parallel;
+pub const gatherI64Parallel = mod.gatherI64Parallel;
 
 // Re-export join types and functions
 pub const InnerJoinResult = mod.InnerJoinResult;
 pub const LeftJoinResult = mod.LeftJoinResult;
-pub const SwissJoinTable = mod.SwissJoinTable;
-pub const buildJoinHashTable = mod.buildJoinHashTable;
-pub const probeJoinHashTable = mod.probeJoinHashTable;
 pub const innerJoinI64 = mod.innerJoinI64;
-pub const innerJoinI64SinglePass = mod.innerJoinI64SinglePass;
-pub const innerJoinI64Swiss = mod.innerJoinI64Swiss;
 pub const parallelInnerJoinI64 = mod.parallelInnerJoinI64;
-pub const innerJoinI64LockFree = mod.innerJoinI64LockFree;
-pub const innerJoinI64Radix = mod.innerJoinI64Radix;
 pub const leftJoinI64 = mod.leftJoinI64;
 pub const parallelLeftJoinI64 = mod.parallelLeftJoinI64;
-pub const leftJoinI64Radix = mod.leftJoinI64Radix;
-pub const innerJoinI64SortMerge = mod.innerJoinI64SortMerge;
-pub const leftJoinI64SortMerge = mod.leftJoinI64SortMerge;
-pub const innerJoinI64TwoPass = mod.innerJoinI64TwoPass;
-pub const innerJoinI64Simd = mod.innerJoinI64Simd;
-pub const parallelAggregateSumF64ByGroup = mod.parallelAggregateSumF64ByGroup;
+
+// SwissTable-based joins (SIMD-accelerated)
+pub const JoinSwissTable = mod.JoinSwissTable;
+pub const innerJoinSwiss = mod.innerJoinSwiss;
+pub const leftJoinSwiss = mod.leftJoinSwiss;
+pub const parallelInnerJoinSwiss = mod.parallelInnerJoinSwiss;
+pub const parallelLeftJoinSwiss = mod.parallelLeftJoinSwiss;
 
 // ============================================================================
 // Tests - run all submodule tests

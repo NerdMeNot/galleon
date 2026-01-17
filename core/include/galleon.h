@@ -107,8 +107,15 @@ void galleon_filter_mask_gt_f64(const double* data, size_t len, double threshold
 void galleon_filter_mask_u8_gt_f64(const double* data, size_t len, double threshold,
                                    uint8_t* out_mask);
 
-// Float64 Sort Operations
+// Float64 Sort Operations (optimized 11-bit LSD radix sort)
 void galleon_argsort_f64(const double* data, size_t len, uint32_t* out_indices, bool ascending);
+void galleon_argsort_i64(const int64_t* data, size_t len, uint32_t* out_indices, bool ascending);
+void galleon_sort_f64(const double* data, size_t len, double* out, bool ascending);
+void galleon_sort_i64(const int64_t* data, size_t len, int64_t* out, bool ascending);
+
+// Parallel Gather (for applying sort indices to data)
+void galleon_gather_f64_parallel(const double* src, size_t src_len, const uint32_t* indices, size_t indices_len, double* dst);
+void galleon_gather_i64_parallel(const int64_t* src, size_t src_len, const uint32_t* indices, size_t indices_len, int64_t* dst);
 
 // ============================================================================
 // Float32 Column Operations
@@ -163,9 +170,6 @@ void galleon_filter_gt_i64(const int64_t* data, size_t len, int64_t threshold,
                            uint32_t* out_indices, size_t* out_count);
 void galleon_filter_mask_u8_gt_i64(const int64_t* data, size_t len, int64_t threshold,
                                    uint8_t* out_mask);
-
-// Int64 Sort Operations
-void galleon_argsort_i64(const int64_t* data, size_t len, uint32_t* out_indices, bool ascending);
 
 // ============================================================================
 // Int32 Column Operations
@@ -249,58 +253,6 @@ void galleon_gather_i32(const int32_t* src, size_t src_len, const int32_t* indic
                         int32_t* dst, size_t dst_len);
 void galleon_gather_f32(const float* src, size_t src_len, const int32_t* indices,
                         float* dst, size_t dst_len);
-
-void galleon_build_join_hash_table(const uint64_t* hashes, size_t hashes_len,
-                                   int32_t* table, int32_t* next, uint32_t table_size);
-
-uint32_t galleon_probe_join_hash_table(const uint64_t* probe_hashes, const int64_t* probe_keys,
-                                       size_t probe_len, const int64_t* build_keys, size_t build_len,
-                                       const int32_t* table, const int32_t* next, uint32_t table_size,
-                                       int32_t* out_probe_indices, int32_t* out_build_indices,
-                                       uint32_t max_matches);
-
-// ============================================================================
-// End-to-End Inner Join
-// ============================================================================
-
-typedef struct InnerJoinResultHandle InnerJoinResultHandle;
-
-InnerJoinResultHandle* galleon_inner_join_e2e_i64(const int64_t* left_keys, size_t left_len,
-                                                   const int64_t* right_keys, size_t right_len);
-InnerJoinResultHandle* galleon_parallel_inner_join_i64(const int64_t* left_keys, size_t left_len,
-                                                        const int64_t* right_keys, size_t right_len);
-InnerJoinResultHandle* galleon_inner_join_radix_i64(const int64_t* left_keys, size_t left_len,
-                                                     const int64_t* right_keys, size_t right_len);
-bool galleon_is_sorted_i64(const int64_t* keys, size_t len);
-InnerJoinResultHandle* galleon_inner_join_sort_merge_i64(const int64_t* left_keys, size_t left_len,
-                                                          const int64_t* right_keys, size_t right_len);
-InnerJoinResultHandle* galleon_inner_join_swiss_i64(const int64_t* left_keys, size_t left_len,
-                                                     const int64_t* right_keys, size_t right_len);
-InnerJoinResultHandle* galleon_inner_join_two_pass_i64(const int64_t* left_keys, size_t left_len,
-                                                        const int64_t* right_keys, size_t right_len);
-InnerJoinResultHandle* galleon_inner_join_simd_i64(const int64_t* left_keys, size_t left_len,
-                                                    const int64_t* right_keys, size_t right_len);
-uint32_t galleon_inner_join_result_num_matches(const InnerJoinResultHandle* handle);
-const int32_t* galleon_inner_join_result_left_indices(const InnerJoinResultHandle* handle);
-const int32_t* galleon_inner_join_result_right_indices(const InnerJoinResultHandle* handle);
-void galleon_inner_join_result_destroy(InnerJoinResultHandle* handle);
-
-// ============================================================================
-// End-to-End Left Join
-// ============================================================================
-
-typedef struct LeftJoinResultHandle LeftJoinResultHandle;
-
-LeftJoinResultHandle* galleon_left_join_i64(const int64_t* left_keys, size_t left_len,
-                                             const int64_t* right_keys, size_t right_len);
-LeftJoinResultHandle* galleon_parallel_left_join_i64(const int64_t* left_keys, size_t left_len,
-                                                      const int64_t* right_keys, size_t right_len);
-LeftJoinResultHandle* galleon_left_join_sort_merge_i64(const int64_t* left_keys, size_t left_len,
-                                                        const int64_t* right_keys, size_t right_len);
-uint32_t galleon_left_join_result_num_rows(const LeftJoinResultHandle* handle);
-const int32_t* galleon_left_join_result_left_indices(const LeftJoinResultHandle* handle);
-const int32_t* galleon_left_join_result_right_indices(const LeftJoinResultHandle* handle);
-void galleon_left_join_result_destroy(LeftJoinResultHandle* handle);
 
 // ============================================================================
 // GroupBy Operations
@@ -524,6 +476,372 @@ const uint32_t* galleon_chunked_argsort_indices(const ChunkedArgsortResult* resu
 void galleon_chunked_argsort_destroy(ChunkedArgsortResult* result);
 
 ChunkedColumnF64Handle* galleon_chunked_f64_sort(ChunkedColumnF64Handle* col);
+
+// ============================================================================
+// Arrow C Data Interface (Zig-Managed)
+// ============================================================================
+// Go sends raw data to Zig. Zig creates and manages Arrow arrays.
+// This ensures all Arrow operations happen in Zig, not Go.
+
+// Opaque handle to Zig-managed Arrow array
+typedef struct ManagedArrowArray ManagedArrowArray;
+
+// --- Arrow Array Creation (Go sends raw data, Zig creates Arrow array) ---
+
+// Create a Float64 Arrow array from raw data (Zig copies the data)
+ManagedArrowArray* galleon_series_create_f64(const double* data, size_t len);
+
+// Create an Int64 Arrow array from raw data
+ManagedArrowArray* galleon_series_create_i64(const int64_t* data, size_t len);
+
+// Create a Float64 Arrow array with null values
+// valid_bitmap: packed bits where 1=valid, 0=null (LSB first, Arrow format)
+ManagedArrowArray* galleon_series_create_f64_with_nulls(
+    const double* data, size_t len,
+    const uint8_t* valid_bitmap, size_t bitmap_len,
+    int64_t null_count);
+
+// Create an Int64 Arrow array with null values
+ManagedArrowArray* galleon_series_create_i64_with_nulls(
+    const int64_t* data, size_t len,
+    const uint8_t* valid_bitmap, size_t bitmap_len,
+    int64_t null_count);
+
+// Destroy a managed Arrow array (frees all memory)
+void galleon_series_destroy(ManagedArrowArray* arr);
+
+// --- Arrow Array Properties ---
+
+// Get length of Arrow array
+size_t galleon_series_len(const ManagedArrowArray* arr);
+
+// Get null count
+int64_t galleon_series_null_count(const ManagedArrowArray* arr);
+
+// Check if has nulls
+bool galleon_series_has_nulls(const ManagedArrowArray* arr);
+
+// --- Arrow SIMD Operations ---
+// These automatically handle validity bitmaps for null values.
+
+// Float64 aggregations
+double galleon_series_sum_f64(const ManagedArrowArray* arr);
+double galleon_series_min_f64(const ManagedArrowArray* arr);
+double galleon_series_max_f64(const ManagedArrowArray* arr);
+double galleon_series_mean_f64(const ManagedArrowArray* arr);
+
+// Int64 aggregations
+int64_t galleon_series_sum_i64(const ManagedArrowArray* arr);
+int64_t galleon_series_min_i64(const ManagedArrowArray* arr);
+int64_t galleon_series_max_i64(const ManagedArrowArray* arr);
+
+// --- Arrow Sort Operations ---
+
+// Argsort result handle
+typedef struct SeriesArgsortResult SeriesArgsortResult;
+
+// Argsort - returns indices that would sort the array
+SeriesArgsortResult* galleon_series_argsort_f64(const ManagedArrowArray* arr, bool ascending);
+SeriesArgsortResult* galleon_series_argsort_i64(const ManagedArrowArray* arr, bool ascending);
+
+// Argsort result accessors
+size_t galleon_series_argsort_len(const SeriesArgsortResult* result);
+const uint32_t* galleon_series_argsort_indices(const SeriesArgsortResult* result);
+void galleon_series_argsort_destroy(SeriesArgsortResult* result);
+
+// Sort - returns new sorted ManagedArrowArray
+ManagedArrowArray* galleon_series_sort_f64(const ManagedArrowArray* arr, bool ascending);
+ManagedArrowArray* galleon_series_sort_i64(const ManagedArrowArray* arr, bool ascending);
+
+// Data Access
+bool galleon_series_is_valid(const ManagedArrowArray* arr, size_t index);
+double galleon_series_get_f64(const ManagedArrowArray* arr, size_t index);
+int64_t galleon_series_get_i64(const ManagedArrowArray* arr, size_t index);
+const double* galleon_series_data_ptr_f64(const ManagedArrowArray* arr);
+const int64_t* galleon_series_data_ptr_i64(const ManagedArrowArray* arr);
+ManagedArrowArray* galleon_series_slice_f64(const ManagedArrowArray* arr, size_t start, size_t end);
+ManagedArrowArray* galleon_series_slice_i64(const ManagedArrowArray* arr, size_t start, size_t end);
+size_t galleon_series_copy_f64(const ManagedArrowArray* arr, double* dest, size_t dest_len);
+size_t galleon_series_copy_i64(const ManagedArrowArray* arr, int64_t* dest, size_t dest_len);
+
+// Forward declare SeriesFilterResult for comparison functions
+typedef struct SeriesFilterResult SeriesFilterResult;
+
+// ============================================================================
+// Float32 Series Operations
+// ============================================================================
+
+ManagedArrowArray* galleon_series_create_f32(const float* data, size_t len);
+ManagedArrowArray* galleon_series_create_f32_with_nulls(
+    const float* data, size_t len,
+    const uint8_t* valid_bitmap, size_t bitmap_len,
+    int64_t null_count);
+
+float galleon_series_sum_f32(const ManagedArrowArray* arr);
+float galleon_series_min_f32(const ManagedArrowArray* arr);
+float galleon_series_max_f32(const ManagedArrowArray* arr);
+float galleon_series_mean_f32(const ManagedArrowArray* arr);
+
+SeriesArgsortResult* galleon_series_argsort_f32(const ManagedArrowArray* arr, bool ascending);
+ManagedArrowArray* galleon_series_sort_f32(const ManagedArrowArray* arr, bool ascending);
+
+float galleon_series_get_f32(const ManagedArrowArray* arr, size_t index);
+const float* galleon_series_data_ptr_f32(const ManagedArrowArray* arr);
+ManagedArrowArray* galleon_series_slice_f32(const ManagedArrowArray* arr, size_t start, size_t end);
+size_t galleon_series_copy_f32(const ManagedArrowArray* arr, float* dest, size_t dest_len);
+
+// Float32 comparisons
+SeriesFilterResult* galleon_series_gt_f32(const ManagedArrowArray* arr, float value);
+SeriesFilterResult* galleon_series_ge_f32(const ManagedArrowArray* arr, float value);
+SeriesFilterResult* galleon_series_lt_f32(const ManagedArrowArray* arr, float value);
+SeriesFilterResult* galleon_series_le_f32(const ManagedArrowArray* arr, float value);
+SeriesFilterResult* galleon_series_eq_f32(const ManagedArrowArray* arr, float value);
+SeriesFilterResult* galleon_series_ne_f32(const ManagedArrowArray* arr, float value);
+
+// ============================================================================
+// Int32 Series Operations
+// ============================================================================
+
+ManagedArrowArray* galleon_series_create_i32(const int32_t* data, size_t len);
+ManagedArrowArray* galleon_series_create_i32_with_nulls(
+    const int32_t* data, size_t len,
+    const uint8_t* valid_bitmap, size_t bitmap_len,
+    int64_t null_count);
+
+int32_t galleon_series_sum_i32(const ManagedArrowArray* arr);
+int32_t galleon_series_min_i32(const ManagedArrowArray* arr);
+int32_t galleon_series_max_i32(const ManagedArrowArray* arr);
+
+SeriesArgsortResult* galleon_series_argsort_i32(const ManagedArrowArray* arr, bool ascending);
+ManagedArrowArray* galleon_series_sort_i32(const ManagedArrowArray* arr, bool ascending);
+
+int32_t galleon_series_get_i32(const ManagedArrowArray* arr, size_t index);
+const int32_t* galleon_series_data_ptr_i32(const ManagedArrowArray* arr);
+ManagedArrowArray* galleon_series_slice_i32(const ManagedArrowArray* arr, size_t start, size_t end);
+size_t galleon_series_copy_i32(const ManagedArrowArray* arr, int32_t* dest, size_t dest_len);
+
+// Int32 comparisons
+SeriesFilterResult* galleon_series_gt_i32(const ManagedArrowArray* arr, int32_t value);
+SeriesFilterResult* galleon_series_ge_i32(const ManagedArrowArray* arr, int32_t value);
+SeriesFilterResult* galleon_series_lt_i32(const ManagedArrowArray* arr, int32_t value);
+SeriesFilterResult* galleon_series_le_i32(const ManagedArrowArray* arr, int32_t value);
+SeriesFilterResult* galleon_series_eq_i32(const ManagedArrowArray* arr, int32_t value);
+SeriesFilterResult* galleon_series_ne_i32(const ManagedArrowArray* arr, int32_t value);
+
+// ============================================================================
+// UInt64 Series Operations
+// ============================================================================
+
+ManagedArrowArray* galleon_series_create_u64(const uint64_t* data, size_t len);
+ManagedArrowArray* galleon_series_create_u64_with_nulls(
+    const uint64_t* data, size_t len,
+    const uint8_t* valid_bitmap, size_t bitmap_len,
+    int64_t null_count);
+
+uint64_t galleon_series_sum_u64(const ManagedArrowArray* arr);
+uint64_t galleon_series_min_u64(const ManagedArrowArray* arr);
+uint64_t galleon_series_max_u64(const ManagedArrowArray* arr);
+
+SeriesArgsortResult* galleon_series_argsort_u64(const ManagedArrowArray* arr, bool ascending);
+ManagedArrowArray* galleon_series_sort_u64(const ManagedArrowArray* arr, bool ascending);
+
+uint64_t galleon_series_get_u64(const ManagedArrowArray* arr, size_t index);
+const uint64_t* galleon_series_data_ptr_u64(const ManagedArrowArray* arr);
+ManagedArrowArray* galleon_series_slice_u64(const ManagedArrowArray* arr, size_t start, size_t end);
+size_t galleon_series_copy_u64(const ManagedArrowArray* arr, uint64_t* dest, size_t dest_len);
+
+// UInt64 comparisons
+SeriesFilterResult* galleon_series_gt_u64(const ManagedArrowArray* arr, uint64_t value);
+SeriesFilterResult* galleon_series_ge_u64(const ManagedArrowArray* arr, uint64_t value);
+SeriesFilterResult* galleon_series_lt_u64(const ManagedArrowArray* arr, uint64_t value);
+SeriesFilterResult* galleon_series_le_u64(const ManagedArrowArray* arr, uint64_t value);
+SeriesFilterResult* galleon_series_eq_u64(const ManagedArrowArray* arr, uint64_t value);
+SeriesFilterResult* galleon_series_ne_u64(const ManagedArrowArray* arr, uint64_t value);
+
+// ============================================================================
+// UInt32 Series Operations
+// ============================================================================
+
+ManagedArrowArray* galleon_series_create_u32(const uint32_t* data, size_t len);
+ManagedArrowArray* galleon_series_create_u32_with_nulls(
+    const uint32_t* data, size_t len,
+    const uint8_t* valid_bitmap, size_t bitmap_len,
+    int64_t null_count);
+
+uint32_t galleon_series_sum_u32(const ManagedArrowArray* arr);
+uint32_t galleon_series_min_u32(const ManagedArrowArray* arr);
+uint32_t galleon_series_max_u32(const ManagedArrowArray* arr);
+
+SeriesArgsortResult* galleon_series_argsort_u32(const ManagedArrowArray* arr, bool ascending);
+ManagedArrowArray* galleon_series_sort_u32(const ManagedArrowArray* arr, bool ascending);
+
+uint32_t galleon_series_get_u32(const ManagedArrowArray* arr, size_t index);
+const uint32_t* galleon_series_data_ptr_u32(const ManagedArrowArray* arr);
+ManagedArrowArray* galleon_series_slice_u32(const ManagedArrowArray* arr, size_t start, size_t end);
+size_t galleon_series_copy_u32(const ManagedArrowArray* arr, uint32_t* dest, size_t dest_len);
+
+// UInt32 comparisons
+SeriesFilterResult* galleon_series_gt_u32(const ManagedArrowArray* arr, uint32_t value);
+SeriesFilterResult* galleon_series_ge_u32(const ManagedArrowArray* arr, uint32_t value);
+SeriesFilterResult* galleon_series_lt_u32(const ManagedArrowArray* arr, uint32_t value);
+SeriesFilterResult* galleon_series_le_u32(const ManagedArrowArray* arr, uint32_t value);
+SeriesFilterResult* galleon_series_eq_u32(const ManagedArrowArray* arr, uint32_t value);
+SeriesFilterResult* galleon_series_ne_u32(const ManagedArrowArray* arr, uint32_t value);
+
+// Filter Operations (SeriesFilterResult already forward declared above)
+
+// Filter result accessors
+size_t galleon_series_filter_result_len(const SeriesFilterResult* result);
+const bool* galleon_series_filter_result_mask(const SeriesFilterResult* result);
+void galleon_series_filter_result_destroy(SeriesFilterResult* result);
+
+// Float64 comparisons - return boolean mask
+SeriesFilterResult* galleon_series_gt_f64(const ManagedArrowArray* arr, double value);
+SeriesFilterResult* galleon_series_ge_f64(const ManagedArrowArray* arr, double value);
+SeriesFilterResult* galleon_series_lt_f64(const ManagedArrowArray* arr, double value);
+SeriesFilterResult* galleon_series_le_f64(const ManagedArrowArray* arr, double value);
+SeriesFilterResult* galleon_series_eq_f64(const ManagedArrowArray* arr, double value);
+SeriesFilterResult* galleon_series_ne_f64(const ManagedArrowArray* arr, double value);
+
+// Int64 comparisons - return boolean mask
+SeriesFilterResult* galleon_series_gt_i64(const ManagedArrowArray* arr, int64_t value);
+SeriesFilterResult* galleon_series_ge_i64(const ManagedArrowArray* arr, int64_t value);
+SeriesFilterResult* galleon_series_lt_i64(const ManagedArrowArray* arr, int64_t value);
+SeriesFilterResult* galleon_series_le_i64(const ManagedArrowArray* arr, int64_t value);
+SeriesFilterResult* galleon_series_eq_i64(const ManagedArrowArray* arr, int64_t value);
+SeriesFilterResult* galleon_series_ne_i64(const ManagedArrowArray* arr, int64_t value);
+
+// Filter by boolean mask - return new filtered array
+ManagedArrowArray* galleon_series_filter_f64(const ManagedArrowArray* arr, const bool* mask, size_t mask_len);
+ManagedArrowArray* galleon_series_filter_i64(const ManagedArrowArray* arr, const bool* mask, size_t mask_len);
+
+// Arithmetic Operations - Float64
+ManagedArrowArray* galleon_series_add_f64(const ManagedArrowArray* arr1, const ManagedArrowArray* arr2);
+ManagedArrowArray* galleon_series_sub_f64(const ManagedArrowArray* arr1, const ManagedArrowArray* arr2);
+ManagedArrowArray* galleon_series_mul_f64(const ManagedArrowArray* arr1, const ManagedArrowArray* arr2);
+ManagedArrowArray* galleon_series_div_f64(const ManagedArrowArray* arr1, const ManagedArrowArray* arr2);
+
+// Arithmetic Operations - Float64 Scalar
+ManagedArrowArray* galleon_series_add_scalar_f64(const ManagedArrowArray* arr, double value);
+ManagedArrowArray* galleon_series_sub_scalar_f64(const ManagedArrowArray* arr, double value);
+ManagedArrowArray* galleon_series_mul_scalar_f64(const ManagedArrowArray* arr, double value);
+ManagedArrowArray* galleon_series_div_scalar_f64(const ManagedArrowArray* arr, double value);
+
+// Arithmetic Operations - Int64
+ManagedArrowArray* galleon_series_add_i64(const ManagedArrowArray* arr1, const ManagedArrowArray* arr2);
+ManagedArrowArray* galleon_series_sub_i64(const ManagedArrowArray* arr1, const ManagedArrowArray* arr2);
+ManagedArrowArray* galleon_series_mul_i64(const ManagedArrowArray* arr1, const ManagedArrowArray* arr2);
+
+// Arithmetic Operations - Int64 Scalar
+ManagedArrowArray* galleon_series_add_scalar_i64(const ManagedArrowArray* arr, int64_t value);
+ManagedArrowArray* galleon_series_mul_scalar_i64(const ManagedArrowArray* arr, int64_t value);
+
+// =============================================================================
+// Full Join Operations (Join + Materialize in one call)
+// =============================================================================
+
+// Full join result - contains all materialized result columns
+typedef struct FullJoinResult FullJoinResult;
+
+// Complete inner join: join + materialize all columns in one call
+// This minimizes CGO overhead by doing everything in Zig
+FullJoinResult* galleon_inner_join_full(
+    const ManagedArrowArray* left_key,
+    const ManagedArrowArray* right_key,
+    const ManagedArrowArray* const* left_columns,
+    size_t left_col_count,
+    const ManagedArrowArray* const* right_columns,
+    size_t right_col_count
+);
+
+// Complete left join: join + materialize all columns in one call
+FullJoinResult* galleon_left_join_full(
+    const ManagedArrowArray* left_key,
+    const ManagedArrowArray* right_key,
+    const ManagedArrowArray* const* left_columns,
+    size_t left_col_count,
+    const ManagedArrowArray* const* right_columns,
+    size_t right_col_count
+);
+
+// Full join result accessors
+size_t galleon_full_join_result_num_columns(const FullJoinResult* result);
+size_t galleon_full_join_result_num_rows(const FullJoinResult* result);
+ManagedArrowArray* galleon_full_join_result_column(const FullJoinResult* result, size_t index);
+ManagedArrowArray* galleon_full_join_result_take_column(FullJoinResult* result, size_t index);
+void galleon_full_join_result_destroy_struct(FullJoinResult* result);
+void galleon_full_join_result_destroy(FullJoinResult* result);
+
+// =============================================================================
+// Full DataFrame Sort (Sort + Gather all columns in one call)
+// =============================================================================
+
+// Sort result - contains all reordered columns
+typedef struct SortResult SortResult;
+
+// Complete DataFrame sort: argsort + gather all columns in one call
+// This minimizes CGO overhead by doing everything in Zig
+SortResult* galleon_sort_dataframe_full(
+    const ManagedArrowArray* sort_column,
+    const ManagedArrowArray* const* columns,
+    size_t col_count,
+    bool ascending
+);
+
+// Sort result accessors
+size_t galleon_sort_result_num_columns(const SortResult* result);
+size_t galleon_sort_result_num_rows(const SortResult* result);
+ManagedArrowArray* galleon_sort_result_take_column(SortResult* result, size_t index);
+void galleon_sort_result_destroy_struct(SortResult* result);
+void galleon_sort_result_destroy(SortResult* result);
+
+// =============================================================================
+// Arrow GroupBy Operations
+// =============================================================================
+
+// GroupBy Sum Result - holds unique keys and aggregated values
+typedef struct GroupBySumResult GroupBySumResult;
+
+// GroupBy Multi-Agg Result - holds keys and multiple aggregations (sum, min, max, count)
+typedef struct GroupByMultiAggResult GroupByMultiAggResult;
+
+// GroupBy Sum: groups by Int64 key, sums Float64 values
+GroupBySumResult* galleon_series_groupby_sum_i64_f64(
+    const ManagedArrowArray* keys,
+    const ManagedArrowArray* values
+);
+
+// GroupBy Count: groups by Int64 key, counts occurrences
+GroupBySumResult* galleon_series_groupby_count_i64(
+    const ManagedArrowArray* keys
+);
+
+// GroupBy Mean: groups by Int64 key, computes mean of Float64 values
+GroupBySumResult* galleon_series_groupby_mean_i64_f64(
+    const ManagedArrowArray* keys,
+    const ManagedArrowArray* values
+);
+
+// GroupBy Multi-Agg: groups by Int64 key, computes sum/min/max/count of Float64 values
+GroupByMultiAggResult* galleon_series_groupby_multi_agg_i64_f64(
+    const ManagedArrowArray* keys,
+    const ManagedArrowArray* values
+);
+
+// GroupBy Sum Result accessors
+uint32_t galleon_series_groupby_sum_result_num_groups(const GroupBySumResult* result);
+const ManagedArrowArray* galleon_series_groupby_sum_result_keys(const GroupBySumResult* result);
+const ManagedArrowArray* galleon_series_groupby_sum_result_values(const GroupBySumResult* result);
+void galleon_series_groupby_sum_result_destroy(GroupBySumResult* result);
+
+// GroupBy Multi-Agg Result accessors
+uint32_t galleon_series_groupby_multi_agg_result_num_groups(const GroupByMultiAggResult* result);
+const ManagedArrowArray* galleon_series_groupby_multi_agg_result_keys(const GroupByMultiAggResult* result);
+const ManagedArrowArray* galleon_series_groupby_multi_agg_result_sums(const GroupByMultiAggResult* result);
+const ManagedArrowArray* galleon_series_groupby_multi_agg_result_mins(const GroupByMultiAggResult* result);
+const ManagedArrowArray* galleon_series_groupby_multi_agg_result_maxs(const GroupByMultiAggResult* result);
+const ManagedArrowArray* galleon_series_groupby_multi_agg_result_counts(const GroupByMultiAggResult* result);
+void galleon_series_groupby_multi_agg_result_destroy(GroupByMultiAggResult* result);
 
 #ifdef __cplusplus
 }

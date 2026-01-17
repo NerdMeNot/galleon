@@ -1,1232 +1,1352 @@
+//! High-Performance Sorting for Galleon
+//!
+//! Implements optimized radix sort with:
+//! - 8-bit radix (256 buckets) = 8 passes for 64-bit data (better L1 cache fit)
+//! - Skip-pass optimization for uniform digits
+//! - Parallel scatter for large arrays
+//! - SIMD key transformation
+//! - Verge sort for pre-sorted data detection
+
 const std = @import("std");
-const core = @import("core.zig");
-const blitz = @import("../blitz/mod.zig");
-
-// Import core constants
-const MAX_THREADS = core.MAX_THREADS;
-const getMaxThreads = core.getMaxThreads;
+const blitz = @import("../blitz.zig");
 
 // ============================================================================
-// Radix Sort Configuration
+// Configuration
 // ============================================================================
 
-/// Radix sort bits per pass
-pub const RADIX_BITS: u6 = 8;
+/// 8-bit radix for 8 passes on 64-bit data
+/// 256 buckets * 8 bytes = 2KB (fits in L1 cache with room to spare)
+/// Better cache locality outweighs extra passes for large arrays
+pub const RADIX_BITS: u5 = 8;
+pub const NUM_BUCKETS: usize = 1 << RADIX_BITS; // 256
+pub const RADIX_MASK: u64 = NUM_BUCKETS - 1;
 
-/// Number of buckets per radix sort pass (256 buckets)
-pub const RADIX_SIZE: usize = 1 << RADIX_BITS;
+/// Threshold for switching to insertion sort
+const INSERTION_THRESHOLD: usize = 64;
 
-/// Mask for extracting radix digit
-pub const RADIX_MASK: u64 = RADIX_SIZE - 1;
+/// Threshold for using parallel operations
+/// Based on voracious_sort: parallel comparison sort wins until ~800K elements
+/// Parallel radix sort only wins for very large arrays
+const PARALLEL_THRESHOLD: usize = 500_000;
 
-/// Threshold for using parallel sample sort
-pub const PARALLEL_SORT_THRESHOLD: usize = 50000;
+/// Prefetch distance in elements
+const PREFETCH_DISTANCE: usize = 32;
+
+/// SIMD vector width for key transformation
+const VECTOR_WIDTH: usize = 4;
+
+/// Get the parallel sort threshold based on system configuration.
+pub fn getParallelSortThreshold() usize {
+    return blitz.threshold.getThreshold(.sort);
+}
+
+/// Check if parallel sorting is beneficial for this data size.
+pub fn shouldParallelSort(len: usize) bool {
+    return blitz.shouldParallelize(.sort, len);
+}
 
 // ============================================================================
-// Sort Pair Structures
-// ============================================================================
-
-/// Pair structure for cache-friendly sorting
-/// Packs value and index together so comparisons don't cause cache misses
-pub const SortPair = packed struct {
-    key: u64, // sortable representation of value
-    idx: u32, // original index
-};
-
-/// ValueIndex pair for cache-friendly sorting
-pub const ValueIndexPair = struct {
-    value: f64,
-    idx: u32,
-};
-
-// ============================================================================
-// Float to Sortable Conversion
+// Key Conversion Utilities
 // ============================================================================
 
 /// Convert f64 to sortable u64 representation
-/// This maps floats to integers that sort in the same order:
-/// - Positive floats: flip sign bit
-/// - Negative floats: flip all bits
-pub inline fn f64ToSortable(val: f64) u64 {
-    const bits: u64 = @bitCast(val);
-    // If negative (sign bit set), flip all bits; otherwise flip just sign bit
-    const mask: u64 = @bitCast(-@as(i64, @bitCast(bits >> 63)));
-    return bits ^ (mask | (1 << 63));
-}
-
-/// Convert f64 to sortable u64 representation (alternate implementation)
-/// This ensures: -inf < negative < -0 < +0 < positive < +inf
+/// Maps floats to integers that sort in the same order
 pub inline fn floatToSortable(val: f64) u64 {
     const bits: u64 = @bitCast(val);
-    // If negative (sign bit set), flip all bits
-    // If positive, flip only the sign bit
-    // Use wrapping subtraction to handle the sign extension safely
     const sign_bit = bits >> 63;
     const mask: u64 = (0 -% sign_bit) | (@as(u64, 1) << 63);
     return bits ^ mask;
 }
 
 /// Convert sortable u64 back to f64
-pub inline fn sortableToFloat(bits: u64) f64 {
-    // Reverse the transformation
-    // Use wrapping addition to avoid overflow
+/// - If sortable sign_bit is 0, original was negative (XOR with all 1s)
+/// - If sortable sign_bit is 1, original was positive (XOR with just sign bit)
+pub inline fn sortableToF64(bits: u64) f64 {
     const sign_bit = bits >> 63;
-    const mask: u64 = ((~sign_bit) +% 1) | (@as(u64, 1) << 63);
+    // For sign_bit = 0: (0 -% 1) = 0xFFFFFFFFFFFFFFFF (all 1s)
+    // For sign_bit = 1: (1 -% 1) = 0, then OR with sign bit = 0x8000...
+    const mask: u64 = (0 -% (1 - sign_bit)) | (@as(u64, 1) << 63);
     return @bitCast(bits ^ mask);
 }
 
-// ============================================================================
-// Integer to Sortable Conversion
-// ============================================================================
-
 /// Convert i64 to sortable u64 representation
-/// For signed integers: flip the sign bit to make negative numbers sort first
-/// -9223372036854775808 (MIN) -> 0x0000000000000000
-/// -1                        -> 0x7FFFFFFFFFFFFFFF
-/// 0                         -> 0x8000000000000000
-/// 9223372036854775807 (MAX) -> 0xFFFFFFFFFFFFFFFF
+/// Flip sign bit so negative numbers sort before positive
 pub inline fn i64ToSortable(val: i64) u64 {
     const bits: u64 = @bitCast(val);
-    return bits ^ (@as(u64, 1) << 63); // Flip sign bit
+    return bits ^ (@as(u64, 1) << 63);
 }
 
-/// Convert i32 to sortable u32 representation
-pub inline fn i32ToSortable(val: i32) u32 {
-    const bits: u32 = @bitCast(val);
-    return bits ^ (@as(u32, 1) << 31); // Flip sign bit
+/// Convert sortable u64 back to i64
+pub inline fn sortableToI64(bits: u64) i64 {
+    return @bitCast(bits ^ (@as(u64, 1) << 63));
 }
 
 // ============================================================================
-// Partitioning Functions
+// SIMD Key Transformation
 // ============================================================================
 
-/// Simple partition for small arrays
-fn simplePartitionPairs(pairs: []ValueIndexPair, ascending: bool) usize {
-    if (pairs.len <= 1) return 0;
+/// True SIMD vector width for u64 (256-bit AVX = 4 x u64)
+const SIMD_WIDTH: usize = 4;
+const U64Vec = @Vector(SIMD_WIDTH, u64);
 
-    const last = pairs.len - 1;
-    const pivot = pairs[last].value;
+/// Vectorized float-to-sortable conversion using true SIMD
+fn transformKeysF64(data: []const f64, keys: []u64) void {
+    const len = data.len;
+    const simd_end = len - (len % SIMD_WIDTH);
+
+    const sign_bit_vec: U64Vec = @splat(@as(u64, 1) << 63);
+
+    var i: usize = 0;
+    while (i < simd_end) : (i += SIMD_WIDTH) {
+        // Load 4 f64 values as u64 bits
+        const bits: U64Vec = @bitCast(data[i..][0..SIMD_WIDTH].*);
+        // Extract sign bits (1 for negative, 0 for positive)
+        const sign_bits = bits >> @splat(@as(u6, 63));
+        // Create mask: all 1s for negative, just sign bit for positive
+        // For negative: (0 - 1) | sign_bit = all_ones
+        // For positive: (0 - 0) | sign_bit = sign_bit
+        const neg_mask = @as(U64Vec, @splat(0)) -% sign_bits;
+        const mask = neg_mask | sign_bit_vec;
+        // XOR to create sortable keys
+        const sortable = bits ^ mask;
+        // Store result
+        keys[i..][0..SIMD_WIDTH].* = sortable;
+    }
+
+    // Handle remainder
+    while (i < len) : (i += 1) {
+        keys[i] = floatToSortable(data[i]);
+    }
+}
+
+/// Vectorized sortable-to-f64 conversion using true SIMD
+fn transformKeysToF64(keys: []const u64, out: []f64) void {
+    const len = @min(keys.len, out.len);
+    const simd_end = len - (len % SIMD_WIDTH);
+
+    const sign_bit_vec: U64Vec = @splat(@as(u64, 1) << 63);
+
+    var i: usize = 0;
+    while (i < simd_end) : (i += SIMD_WIDTH) {
+        // Load 4 sortable keys
+        const bits: U64Vec = keys[i..][0..SIMD_WIDTH].*;
+        // Extract sign bits of sortable representation
+        // sign_bit = 0 means original was NEGATIVE (need XOR with all 1s)
+        // sign_bit = 1 means original was POSITIVE (need XOR with sign bit)
+        const sign_bits = bits >> @splat(@as(u6, 63));
+        // Create mask: all 1s for sign_bit=0, just sign bit for sign_bit=1
+        // For sign_bit=0: (0 - 1) | sign_bit = all_ones
+        // For sign_bit=1: (0 - 0) | sign_bit = sign_bit
+        const neg_mask = @as(U64Vec, @splat(0)) -% (@as(U64Vec, @splat(1)) - sign_bits);
+        const mask = neg_mask | sign_bit_vec;
+        // XOR to recover original float bits
+        const original_bits = bits ^ mask;
+        // Store as f64
+        out[i..][0..SIMD_WIDTH].* = @bitCast(original_bits);
+    }
+
+    // Handle remainder
+    while (i < len) : (i += 1) {
+        out[i] = sortableToF64(keys[i]);
+    }
+}
+
+/// Vectorized sortable-to-f64 in reverse order (for descending sort)
+fn transformKeysToF64Reverse(keys: []const u64, out: []f64) void {
+    const len = @min(keys.len, out.len);
+    if (len == 0) return;
+
+    // Process in reverse - can't easily SIMD this due to non-contiguous access
+    // But we can still use scalar with good cache behavior
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        out[i] = sortableToF64(keys[len - 1 - i]);
+    }
+}
+
+/// Vectorized i64-to-sortable conversion
+fn transformKeysI64(data: []const i64, keys: []u64) void {
+    const len = data.len;
+    const simd_end = len - (len % SIMD_WIDTH);
+
+    const sign_bit_vec: U64Vec = @splat(@as(u64, 1) << 63);
+
+    var i: usize = 0;
+    while (i < simd_end) : (i += SIMD_WIDTH) {
+        const bits: U64Vec = @bitCast(data[i..][0..SIMD_WIDTH].*);
+        keys[i..][0..SIMD_WIDTH].* = bits ^ sign_bit_vec;
+    }
+
+    while (i < len) : (i += 1) {
+        keys[i] = i64ToSortable(data[i]);
+    }
+}
+
+/// Vectorized sortable-to-i64 conversion
+fn transformKeysToI64(keys: []const u64, out: []i64) void {
+    const len = @min(keys.len, out.len);
+    const simd_end = len - (len % SIMD_WIDTH);
+
+    const sign_bit_vec: U64Vec = @splat(@as(u64, 1) << 63);
+
+    var i: usize = 0;
+    while (i < simd_end) : (i += SIMD_WIDTH) {
+        const bits: U64Vec = keys[i..][0..SIMD_WIDTH].*;
+        out[i..][0..SIMD_WIDTH].* = @bitCast(bits ^ sign_bit_vec);
+    }
+
+    while (i < len) : (i += 1) {
+        out[i] = sortableToI64(keys[i]);
+    }
+}
+
+/// Vectorized sortable-to-i64 in reverse order (for descending sort)
+fn transformKeysToI64Reverse(keys: []const u64, out: []i64) void {
+    const len = @min(keys.len, out.len);
+    if (len == 0) return;
+
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        out[i] = sortableToI64(keys[len - 1 - i]);
+    }
+}
+
+// ============================================================================
+// Histogram Computation
+// ============================================================================
+
+/// Result of histogram computation with skip detection
+const HistogramResult = struct {
+    can_skip: bool,
+    min_bucket: usize,
+    max_bucket: usize,
+};
+
+/// Compute histogram with skip detection
+fn computeHistogramWithSkip(keys: []const u64, shift: u6, counts: []usize) HistogramResult {
+    @memset(counts[0..NUM_BUCKETS], 0);
+
+    const len = keys.len;
+    const unroll_end = len - (len % 8);
     var i: usize = 0;
 
-    for (0..last) |j| {
-        const cmp = if (ascending) pairs[j].value < pivot else pairs[j].value > pivot;
-        if (cmp) {
-            std.mem.swap(ValueIndexPair, &pairs[i], &pairs[j]);
-            i += 1;
+    while (i < unroll_end) : (i += 8) {
+        if (i + PREFETCH_DISTANCE < len) {
+            @prefetch(@as([*]const u8, @ptrCast(&keys[i + PREFETCH_DISTANCE])), .{});
+        }
+
+        const b0: usize = @intCast((keys[i] >> shift) & RADIX_MASK);
+        const b1: usize = @intCast((keys[i + 1] >> shift) & RADIX_MASK);
+        const b2: usize = @intCast((keys[i + 2] >> shift) & RADIX_MASK);
+        const b3: usize = @intCast((keys[i + 3] >> shift) & RADIX_MASK);
+        const b4: usize = @intCast((keys[i + 4] >> shift) & RADIX_MASK);
+        const b5: usize = @intCast((keys[i + 5] >> shift) & RADIX_MASK);
+        const b6: usize = @intCast((keys[i + 6] >> shift) & RADIX_MASK);
+        const b7: usize = @intCast((keys[i + 7] >> shift) & RADIX_MASK);
+
+        counts[b0] += 1;
+        counts[b1] += 1;
+        counts[b2] += 1;
+        counts[b3] += 1;
+        counts[b4] += 1;
+        counts[b5] += 1;
+        counts[b6] += 1;
+        counts[b7] += 1;
+    }
+
+    while (i < len) : (i += 1) {
+        const b: usize = @intCast((keys[i] >> shift) & RADIX_MASK);
+        counts[b] += 1;
+    }
+
+    // Check for skip
+    var min_bucket: usize = NUM_BUCKETS;
+    var max_bucket: usize = 0;
+    var non_zero_count: usize = 0;
+
+    for (0..NUM_BUCKETS) |bucket| {
+        if (counts[bucket] > 0) {
+            if (min_bucket == NUM_BUCKETS) min_bucket = bucket;
+            max_bucket = bucket;
+            non_zero_count += 1;
         }
     }
-    std.mem.swap(ValueIndexPair, &pairs[i], &pairs[last]);
-    return i;
+
+    return .{
+        .can_skip = non_zero_count == 1,
+        .min_bucket = min_bucket,
+        .max_bucket = max_bucket,
+    };
 }
 
-/// SIMD-accelerated partition for quicksort on pairs
-/// Returns the partition index where all elements < pivot are on the left
-fn simdPartitionPairs(pairs: []ValueIndexPair, ascending: bool) usize {
-    if (pairs.len <= 1) return 0;
-    if (pairs.len <= 16) {
-        // Small array: use simple partition
-        return simplePartitionPairs(pairs, ascending);
-    }
+// ============================================================================
+// Insertion Sort (for small arrays)
+// ============================================================================
 
-    // Median-of-three pivot selection
-    const mid = pairs.len / 2;
-    const last = pairs.len - 1;
+fn insertionSortKeys(keys: []u64, indices: []u32) void {
+    if (keys.len <= 1) return;
+
+    for (1..keys.len) |i| {
+        const key = keys[i];
+        const idx = indices[i];
+        var j = i;
+
+        while (j > 0 and keys[j - 1] > key) {
+            keys[j] = keys[j - 1];
+            indices[j] = indices[j - 1];
+            j -= 1;
+        }
+
+        keys[j] = key;
+        indices[j] = idx;
+    }
+}
+
+fn insertionSortKeysOnly(keys: []u64) void {
+    if (keys.len <= 1) return;
+
+    for (1..keys.len) |i| {
+        const key = keys[i];
+        var j = i;
+
+        while (j > 0 and keys[j - 1] > key) {
+            keys[j] = keys[j - 1];
+            j -= 1;
+        }
+
+        keys[j] = key;
+    }
+}
+
+fn insertionSortIndirectF64(data: []const f64, indices: []u32, ascending: bool) void {
+    if (indices.len <= 1) return;
+
+    for (1..indices.len) |i| {
+        const idx = indices[i];
+        const val = data[idx];
+        var j = i;
+
+        while (j > 0) {
+            const cmp = if (ascending)
+                val < data[indices[j - 1]]
+            else
+                val > data[indices[j - 1]];
+
+            if (!cmp) break;
+            indices[j] = indices[j - 1];
+            j -= 1;
+        }
+        indices[j] = idx;
+    }
+}
+
+fn insertionSortIndirectI64(data: []const i64, indices: []u32, ascending: bool) void {
+    if (indices.len <= 1) return;
+
+    for (1..indices.len) |i| {
+        const idx = indices[i];
+        const val = data[idx];
+        var j = i;
+
+        while (j > 0) {
+            const cmp = if (ascending)
+                val < data[indices[j - 1]]
+            else
+                val > data[indices[j - 1]];
+
+            if (!cmp) break;
+            indices[j] = indices[j - 1];
+            j -= 1;
+        }
+        indices[j] = idx;
+    }
+}
+
+// ============================================================================
+// Sorted Detection (Verge Sort)
+// ============================================================================
+
+fn isSortedF64(data: []const f64, ascending: bool) bool {
+    if (data.len < 2) return true;
 
     if (ascending) {
-        if (pairs[0].value > pairs[mid].value) std.mem.swap(ValueIndexPair, &pairs[0], &pairs[mid]);
-        if (pairs[0].value > pairs[last].value) std.mem.swap(ValueIndexPair, &pairs[0], &pairs[last]);
-        if (pairs[mid].value > pairs[last].value) std.mem.swap(ValueIndexPair, &pairs[mid], &pairs[last]);
+        for (1..data.len) |i| {
+            if (data[i] < data[i - 1]) return false;
+        }
     } else {
-        if (pairs[0].value < pairs[mid].value) std.mem.swap(ValueIndexPair, &pairs[0], &pairs[mid]);
-        if (pairs[0].value < pairs[last].value) std.mem.swap(ValueIndexPair, &pairs[0], &pairs[last]);
-        if (pairs[mid].value < pairs[last].value) std.mem.swap(ValueIndexPair, &pairs[mid], &pairs[last]);
+        for (1..data.len) |i| {
+            if (data[i] > data[i - 1]) return false;
+        }
     }
+    return true;
+}
 
-    std.mem.swap(ValueIndexPair, &pairs[mid], &pairs[last - 1]);
-    const pivot = pairs[last - 1].value;
+fn isSortedI64(data: []const i64, ascending: bool) bool {
+    if (data.len < 2) return true;
 
-    // SIMD partition using vector comparisons
-    const Vec = @Vector(4, f64);
-    const pivot_vec: Vec = @splat(pivot);
-
-    var left: usize = 0;
-    var right: usize = last - 1;
-
-    // Process 4 elements at a time from left
-    while (left + 4 <= right) {
-        // Load 4 values
-        var vals: Vec = undefined;
-        inline for (0..4) |i| {
-            vals[i] = pairs[left + i].value;
+    if (ascending) {
+        for (1..data.len) |i| {
+            if (data[i] < data[i - 1]) return false;
         }
-
-        // Compare with pivot
-        const cmp = if (ascending) vals < pivot_vec else vals > pivot_vec;
-
-        // Count elements that should stay on left
-        var stay_count: usize = 0;
-        inline for (0..4) |i| {
-            if (cmp[i]) stay_count += 1;
+    } else {
+        for (1..data.len) |i| {
+            if (data[i] > data[i - 1]) return false;
         }
+    }
+    return true;
+}
 
-        if (stay_count == 4) {
-            // All stay on left
-            left += 4;
-        } else if (stay_count == 0) {
-            // All go to right - swap with right side
-            inline for (0..4) |i| {
-                right -= 1;
-                std.mem.swap(ValueIndexPair, &pairs[left + i], &pairs[right]);
-            }
+// ============================================================================
+// Verge Sort Run Detection
+// Based on voracious_sort's verge_sort_heuristic.rs
+// ============================================================================
+
+/// Compute the minimum size for a "big enough" run
+/// This is n / log2(n) - determines jump distance and minimum useful run size
+fn computeJumpSize(size: usize) usize {
+    if (size < 4) return 1;
+    // Approximate log2 using leading zeros
+    const log2_size = @bitSizeOf(usize) - @clz(size);
+    return size / log2_size;
+}
+
+/// Explore forward from start position looking for ascending run
+/// Returns the exclusive end of the ascending run
+fn exploreForwardAscF64(data: []const f64, start: usize) usize {
+    if (start >= data.len - 1) return data.len;
+
+    var i = start;
+    // Unrolled check for 4 elements at a time
+    const unroll_end = if (data.len >= 4) data.len - 4 else start;
+    while (i < unroll_end) {
+        const b0 = data[i] <= data[i + 1];
+        const b1 = data[i + 1] <= data[i + 2] and b0;
+        const b2 = data[i + 2] <= data[i + 3] and b1;
+        const b3 = data[i + 3] <= data[i + 4] and b2;
+
+        if (b3) {
+            i += 4;
+        } else if (b2) {
+            return i + 4;
+        } else if (b1) {
+            return i + 3;
+        } else if (b0) {
+            return i + 2;
         } else {
-            // Mixed - fall back to scalar
-            break;
+            return i + 1;
         }
     }
 
     // Scalar cleanup
+    while (i < data.len - 1) {
+        if (data[i] <= data[i + 1]) {
+            i += 1;
+        } else {
+            return i + 1;
+        }
+    }
+    return i + 1;
+}
+
+/// Explore forward from start position looking for descending run
+/// Returns the exclusive end of the descending run
+fn exploreForwardDescF64(data: []const f64, start: usize) usize {
+    if (start >= data.len - 1) return data.len;
+
+    var i = start;
+    const unroll_end = if (data.len >= 4) data.len - 4 else start;
+    while (i < unroll_end) {
+        const b0 = data[i] >= data[i + 1];
+        const b1 = data[i + 1] >= data[i + 2] and b0;
+        const b2 = data[i + 2] >= data[i + 3] and b1;
+        const b3 = data[i + 3] >= data[i + 4] and b2;
+
+        if (b3) {
+            i += 4;
+        } else if (b2) {
+            return i + 4;
+        } else if (b1) {
+            return i + 3;
+        } else if (b0) {
+            return i + 2;
+        } else {
+            return i + 1;
+        }
+    }
+
+    while (i < data.len - 1) {
+        if (data[i] >= data[i + 1]) {
+            i += 1;
+        } else {
+            return i + 1;
+        }
+    }
+    return i + 1;
+}
+
+/// Explore backward from position looking for ascending run start
+fn exploreBackwardAscF64(data: []const f64, position: usize, min_boundary: usize) usize {
+    if (position <= min_boundary) return min_boundary;
+
+    var i = position;
+    while (i > min_boundary) {
+        if (data[i - 1] <= data[i]) {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    return i;
+}
+
+/// Explore backward from position looking for descending run start
+fn exploreBackwardDescF64(data: []const f64, position: usize, min_boundary: usize) usize {
+    if (position <= min_boundary) return min_boundary;
+
+    var i = position;
+    while (i > min_boundary) {
+        if (data[i - 1] >= data[i]) {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    return i;
+}
+
+/// Reverse a slice of f64 in-place
+fn reverseF64(data: []f64) void {
+    if (data.len <= 1) return;
+    var left: usize = 0;
+    var right: usize = data.len - 1;
     while (left < right) {
-        const cmp = if (ascending) pairs[left].value < pivot else pairs[left].value > pivot;
-        if (cmp) {
-            left += 1;
+        const tmp = data[left];
+        data[left] = data[right];
+        data[right] = tmp;
+        left += 1;
+        right -= 1;
+    }
+}
+
+/// Run descriptor for verge sort
+const RunDescriptor = struct {
+    start: usize,
+    end: usize,
+};
+
+/// Maximum number of runs we track (if more, fall back to regular sort)
+const MAX_RUNS: usize = 32;
+
+/// Verge Sort preprocessing: detect sorted runs and convert descending to ascending
+/// Returns the number of runs found (0 if should fall back to regular sort)
+fn vergeSortPreprocessingF64(data: []f64, runs: *[MAX_RUNS]RunDescriptor) usize {
+    const len = data.len;
+    if (len < 2) {
+        runs[0] = .{ .start = 0, .end = len };
+        return 1;
+    }
+
+    const big_enough = computeJumpSize(len);
+    var num_runs: usize = 0;
+    var position: usize = 0;
+
+    while (position < len) {
+        if (num_runs >= MAX_RUNS) return 0; // Too many runs, fall back
+
+        // Determine direction at this position
+        if (position >= len - 1) {
+            // Single element left
+            runs[num_runs] = .{ .start = position, .end = len };
+            num_runs += 1;
+            break;
+        }
+
+        const run_start = position;
+        var run_end: usize = undefined;
+
+        if (data[position] <= data[position + 1]) {
+            // Ascending run
+            run_end = exploreForwardAscF64(data, position);
         } else {
-            right -= 1;
-            std.mem.swap(ValueIndexPair, &pairs[left], &pairs[right]);
+            // Descending run - explore then reverse
+            run_end = exploreForwardDescF64(data, position);
+            reverseF64(data[run_start..run_end]);
         }
-    }
 
-    // Move pivot to final position
-    std.mem.swap(ValueIndexPair, &pairs[left], &pairs[last - 1]);
-    return left;
-}
-
-// ============================================================================
-// Insertion Sort
-// ============================================================================
-
-/// Insertion sort for small arrays
-fn insertionSortPairs(pairs: []ValueIndexPair, ascending: bool) void {
-    if (pairs.len <= 1) return;
-    for (1..pairs.len) |i| {
-        const key = pairs[i];
-        var j: usize = i;
-        while (j > 0) {
-            const cmp = if (ascending) key.value < pairs[j - 1].value else key.value > pairs[j - 1].value;
-            if (!cmp) break;
-            pairs[j] = pairs[j - 1];
-            j -= 1;
+        // Only track runs that are "big enough"
+        const run_size = run_end - run_start;
+        if (run_size >= big_enough or num_runs == 0 or run_end == len) {
+            runs[num_runs] = .{ .start = run_start, .end = run_end };
+            num_runs += 1;
+        } else if (num_runs > 0) {
+            // Extend previous run to include this small section
+            // (will need to be sorted during merge)
+            runs[num_runs - 1].end = run_end;
         }
-        pairs[j] = key;
+
+        position = run_end;
     }
+
+    return num_runs;
 }
 
-// ============================================================================
-// SIMD Quicksort
-// ============================================================================
+/// Merge two adjacent sorted runs in-place
+/// Uses a temporary buffer for the smaller run
+fn mergeTwoRunsF64(data: []f64, temp: []f64, start: usize, middle: usize, end: usize) void {
+    if (start >= middle or middle >= end) return;
 
-/// SIMD-accelerated quicksort on pairs
-fn simdQuicksortPairs(pairs: []ValueIndexPair, ascending: bool) void {
-    if (pairs.len <= 24) {
-        insertionSortPairs(pairs, ascending);
-        return;
-    }
+    // Already sorted - check if last of left <= first of right
+    if (data[middle - 1] <= data[middle]) return;
 
-    const pivot_idx = simdPartitionPairs(pairs, ascending);
+    const left_size = middle - start;
+    const right_size = end - middle;
 
-    // Recursively sort partitions
-    if (pivot_idx > 0) simdQuicksortPairs(pairs[0..pivot_idx], ascending);
-    if (pivot_idx + 1 < pairs.len) simdQuicksortPairs(pairs[pivot_idx + 1 ..], ascending);
-}
+    // Copy smaller side to temp, merge from appropriate direction
+    if (left_size <= right_size) {
+        // Forward merge - copy left side
+        @memcpy(temp[0..left_size], data[start..middle]);
 
-// ============================================================================
-// Parallel Sample Sort
-// ============================================================================
+        var i: usize = 0;
+        var j: usize = middle;
+        var pos: usize = start;
 
-/// Find the bucket for a value based on splitters
-fn findBucket(value: f64, splitters: []const f64, ascending: bool) usize {
-    for (splitters, 0..) |s, i| {
-        if (ascending) {
-            if (value < s) return i;
-        } else {
-            if (value > s) return i;
-        }
-    }
-    return splitters.len;
-}
-
-/// Parallel sample sort for large arrays
-fn parallelSampleSortPairs(pairs: []ValueIndexPair, ascending: bool) void {
-    const len = pairs.len;
-    const num_threads: usize = @min(getMaxThreads(), 8); // Cap at 8 threads for sort
-    const num_buckets: usize = num_threads;
-
-    if (len < PARALLEL_SORT_THRESHOLD or num_threads <= 1) {
-        simdQuicksortPairs(pairs, ascending);
-        return;
-    }
-
-    const allocator = std.heap.page_allocator;
-
-    // Sample to find partition boundaries
-    const sample_size = @min(num_buckets * 100, len / 10);
-    var samples = allocator.alloc(f64, sample_size) catch {
-        simdQuicksortPairs(pairs, ascending);
-        return;
-    };
-    defer allocator.free(samples);
-
-    // Take evenly spaced samples
-    const step = len / sample_size;
-    for (0..sample_size) |i| {
-        samples[i] = pairs[i * step].value;
-    }
-
-    // Sort samples to find splitters
-    if (ascending) {
-        std.sort.pdq(f64, samples, {}, struct {
-            fn lt(_: void, a: f64, b: f64) bool {
-                return a < b;
+        while (i < left_size and j < end) {
+            if (temp[i] <= data[j]) {
+                data[pos] = temp[i];
+                i += 1;
+            } else {
+                data[pos] = data[j];
+                j += 1;
             }
-        }.lt);
+            pos += 1;
+        }
+
+        // Copy remaining from temp (right side already in place)
+        while (i < left_size) {
+            data[pos] = temp[i];
+            i += 1;
+            pos += 1;
+        }
     } else {
-        std.sort.pdq(f64, samples, {}, struct {
-            fn lt(_: void, a: f64, b: f64) bool {
-                return a > b;
+        // Backward merge - copy right side
+        @memcpy(temp[0..right_size], data[middle..end]);
+
+        var i: isize = @intCast(right_size - 1);
+        var j: isize = @intCast(middle - 1);
+        var pos: usize = end - 1;
+
+        while (i >= 0 and j >= @as(isize, @intCast(start))) {
+            const ii: usize = @intCast(i);
+            const jj: usize = @intCast(j);
+            if (temp[ii] >= data[jj]) {
+                data[pos] = temp[ii];
+                i -= 1;
+            } else {
+                data[pos] = data[jj];
+                j -= 1;
             }
-        }.lt);
+            if (pos > 0) pos -= 1 else break;
+        }
+
+        // Copy remaining from temp
+        while (i >= 0) {
+            const ii: usize = @intCast(i);
+            data[pos] = temp[ii];
+            i -= 1;
+            if (pos > 0) pos -= 1 else break;
+        }
+    }
+}
+
+/// K-way merge of sorted runs using pairwise merging
+fn kWayMergeF64(data: []f64, runs: []RunDescriptor, temp: []f64) void {
+    var num_runs = runs.len;
+    if (num_runs <= 1) return;
+
+    // Pairwise merge until single run
+    while (num_runs > 1) {
+        var new_runs: usize = 0;
+        var i: usize = 0;
+
+        while (i + 1 < num_runs) {
+            // Merge runs[i] and runs[i+1]
+            mergeTwoRunsF64(data, temp, runs[i].start, runs[i + 1].start, runs[i + 1].end);
+            runs[new_runs] = .{ .start = runs[i].start, .end = runs[i + 1].end };
+            new_runs += 1;
+            i += 2;
+        }
+
+        // If odd number of runs, carry last one forward
+        if (i < num_runs) {
+            runs[new_runs] = runs[i];
+            new_runs += 1;
+        }
+
+        num_runs = new_runs;
+    }
+}
+
+// ============================================================================
+// Verge Sort for i64
+// ============================================================================
+
+/// Explore forward for ascending i64 run
+fn exploreForwardAscI64(data: []const i64, start: usize) usize {
+    if (start >= data.len - 1) return data.len;
+
+    var i = start;
+    const unroll_end = if (data.len >= 4) data.len - 4 else start;
+    while (i < unroll_end) {
+        const b0 = data[i] <= data[i + 1];
+        const b1 = data[i + 1] <= data[i + 2] and b0;
+        const b2 = data[i + 2] <= data[i + 3] and b1;
+        const b3 = data[i + 3] <= data[i + 4] and b2;
+
+        if (b3) {
+            i += 4;
+        } else if (b2) {
+            return i + 4;
+        } else if (b1) {
+            return i + 3;
+        } else if (b0) {
+            return i + 2;
+        } else {
+            return i + 1;
+        }
     }
 
-    // Extract splitters (bucket boundaries)
-    var splitters: [8]f64 = undefined;
-    for (0..num_buckets - 1) |i| {
-        splitters[i] = samples[(i + 1) * sample_size / num_buckets];
+    while (i < data.len - 1) {
+        if (data[i] <= data[i + 1]) {
+            i += 1;
+        } else {
+            return i + 1;
+        }
+    }
+    return i + 1;
+}
+
+/// Explore forward for descending i64 run
+fn exploreForwardDescI64(data: []const i64, start: usize) usize {
+    if (start >= data.len - 1) return data.len;
+
+    var i = start;
+    const unroll_end = if (data.len >= 4) data.len - 4 else start;
+    while (i < unroll_end) {
+        const b0 = data[i] >= data[i + 1];
+        const b1 = data[i + 1] >= data[i + 2] and b0;
+        const b2 = data[i + 2] >= data[i + 3] and b1;
+        const b3 = data[i + 3] >= data[i + 4] and b2;
+
+        if (b3) {
+            i += 4;
+        } else if (b2) {
+            return i + 4;
+        } else if (b1) {
+            return i + 3;
+        } else if (b0) {
+            return i + 2;
+        } else {
+            return i + 1;
+        }
     }
 
-    // Count elements per bucket
-    var bucket_counts: [8]usize = [_]usize{0} ** 8;
-    for (pairs) |pair| {
-        const bucket = findBucket(pair.value, splitters[0 .. num_buckets - 1], ascending);
-        bucket_counts[bucket] += 1;
+    while (i < data.len - 1) {
+        if (data[i] >= data[i + 1]) {
+            i += 1;
+        } else {
+            return i + 1;
+        }
+    }
+    return i + 1;
+}
+
+/// Reverse a slice of i64 in-place
+fn reverseI64(data: []i64) void {
+    if (data.len <= 1) return;
+    var left: usize = 0;
+    var right: usize = data.len - 1;
+    while (left < right) {
+        const tmp = data[left];
+        data[left] = data[right];
+        data[right] = tmp;
+        left += 1;
+        right -= 1;
+    }
+}
+
+/// Verge Sort preprocessing for i64
+fn vergeSortPreprocessingI64(data: []i64, runs: *[MAX_RUNS]RunDescriptor) usize {
+    const len = data.len;
+    if (len < 2) {
+        runs[0] = .{ .start = 0, .end = len };
+        return 1;
     }
 
-    // Calculate bucket offsets
-    var bucket_offsets: [9]usize = undefined;
-    bucket_offsets[0] = 0;
-    for (0..num_buckets) |i| {
-        bucket_offsets[i + 1] = bucket_offsets[i] + bucket_counts[i];
+    const big_enough = computeJumpSize(len);
+    var num_runs: usize = 0;
+    var position: usize = 0;
+
+    while (position < len) {
+        if (num_runs >= MAX_RUNS) return 0;
+
+        if (position >= len - 1) {
+            runs[num_runs] = .{ .start = position, .end = len };
+            num_runs += 1;
+            break;
+        }
+
+        const run_start = position;
+        var run_end: usize = undefined;
+
+        if (data[position] <= data[position + 1]) {
+            run_end = exploreForwardAscI64(data, position);
+        } else {
+            run_end = exploreForwardDescI64(data, position);
+            reverseI64(data[run_start..run_end]);
+        }
+
+        const run_size = run_end - run_start;
+        if (run_size >= big_enough or num_runs == 0 or run_end == len) {
+            runs[num_runs] = .{ .start = run_start, .end = run_end };
+            num_runs += 1;
+        } else if (num_runs > 0) {
+            runs[num_runs - 1].end = run_end;
+        }
+
+        position = run_end;
     }
 
-    // Allocate temp array and distribute to buckets
-    const temp = allocator.alloc(ValueIndexPair, len) catch {
-        simdQuicksortPairs(pairs, ascending);
+    return num_runs;
+}
+
+/// Merge two adjacent sorted i64 runs
+fn mergeTwoRunsI64(data: []i64, temp: []i64, start: usize, middle: usize, end: usize) void {
+    if (start >= middle or middle >= end) return;
+    if (data[middle - 1] <= data[middle]) return;
+
+    const left_size = middle - start;
+    const right_size = end - middle;
+
+    if (left_size <= right_size) {
+        @memcpy(temp[0..left_size], data[start..middle]);
+
+        var i: usize = 0;
+        var j: usize = middle;
+        var pos: usize = start;
+
+        while (i < left_size and j < end) {
+            if (temp[i] <= data[j]) {
+                data[pos] = temp[i];
+                i += 1;
+            } else {
+                data[pos] = data[j];
+                j += 1;
+            }
+            pos += 1;
+        }
+
+        while (i < left_size) {
+            data[pos] = temp[i];
+            i += 1;
+            pos += 1;
+        }
+    } else {
+        @memcpy(temp[0..right_size], data[middle..end]);
+
+        var i: isize = @intCast(right_size - 1);
+        var j: isize = @intCast(middle - 1);
+        var pos: usize = end - 1;
+
+        while (i >= 0 and j >= @as(isize, @intCast(start))) {
+            const ii: usize = @intCast(i);
+            const jj: usize = @intCast(j);
+            if (temp[ii] >= data[jj]) {
+                data[pos] = temp[ii];
+                i -= 1;
+            } else {
+                data[pos] = data[jj];
+                j -= 1;
+            }
+            if (pos > 0) pos -= 1 else break;
+        }
+
+        while (i >= 0) {
+            const ii: usize = @intCast(i);
+            data[pos] = temp[ii];
+            i -= 1;
+            if (pos > 0) pos -= 1 else break;
+        }
+    }
+}
+
+/// K-way merge for i64
+fn kWayMergeI64(data: []i64, runs: []RunDescriptor, temp: []i64) void {
+    var num_runs = runs.len;
+    if (num_runs <= 1) return;
+
+    while (num_runs > 1) {
+        var new_runs: usize = 0;
+        var i: usize = 0;
+
+        while (i + 1 < num_runs) {
+            mergeTwoRunsI64(data, temp, runs[i].start, runs[i + 1].start, runs[i + 1].end);
+            runs[new_runs] = .{ .start = runs[i].start, .end = runs[i + 1].end };
+            new_runs += 1;
+            i += 2;
+        }
+
+        if (i < num_runs) {
+            runs[new_runs] = runs[i];
+            new_runs += 1;
+        }
+
+        num_runs = new_runs;
+    }
+}
+
+// ============================================================================
+// Parallel Scatter
+// ============================================================================
+
+fn parallelScatter(
+    src_keys: []const u64,
+    src_indices: []const u32,
+    dst_keys: []u64,
+    dst_indices: []u32,
+    shift: u6,
+    global_offsets: *[NUM_BUCKETS]usize,
+) void {
+    const len = src_keys.len;
+    const num_workers = @min(blitz.numWorkers(), 8);
+    const chunk_size = (len + num_workers - 1) / num_workers;
+
+    if (num_workers <= 1) {
+        var offsets: [NUM_BUCKETS]usize = undefined;
+        @memcpy(&offsets, global_offsets);
+
+        for (0..len) |i| {
+            const key = src_keys[i];
+            const bucket: usize = @intCast((key >> shift) & RADIX_MASK);
+            const dst_pos = offsets[bucket];
+            offsets[bucket] += 1;
+            dst_keys[dst_pos] = key;
+            dst_indices[dst_pos] = src_indices[i];
+        }
         return;
-    };
-    defer allocator.free(temp);
-
-    var bucket_cursors: [8]usize = undefined;
-    for (0..num_buckets) |i| {
-        bucket_cursors[i] = bucket_offsets[i];
     }
 
-    for (pairs) |pair| {
-        const bucket = findBucket(pair.value, splitters[0 .. num_buckets - 1], ascending);
-        temp[bucket_cursors[bucket]] = pair;
-        bucket_cursors[bucket] += 1;
+    // Per-worker histograms
+    var worker_counts: [8][NUM_BUCKETS]usize = undefined;
+    for (&worker_counts) |*wc| {
+        @memset(wc, 0);
     }
 
-    // Sort each bucket in parallel using Blitz
-    const BucketSortCtx = struct {
-        temp: []ValueIndexPair,
-        bucket_offsets: *const [9]usize,
-        num_buckets: usize,
-        ascending: bool,
+    // Phase 1: Parallel histogram
+    const HistCtx = struct {
+        keys: []const u64,
+        worker_counts: *[8][NUM_BUCKETS]usize,
+        chunk_size: usize,
+        len: usize,
+        shift: u6,
     };
 
-    const ctx = BucketSortCtx{
-        .temp = temp,
-        .bucket_offsets = &bucket_offsets,
-        .num_buckets = num_buckets,
-        .ascending = ascending,
+    const hist_ctx = HistCtx{
+        .keys = src_keys,
+        .worker_counts = &worker_counts,
+        .chunk_size = chunk_size,
+        .len = len,
+        .shift = shift,
     };
 
-    // Use Blitz to sort buckets in parallel
-    blitz.parallelForWithGrain(num_buckets, BucketSortCtx, ctx, struct {
-        fn sortBuckets(c: BucketSortCtx, start_bucket: usize, end_bucket: usize) void {
-            for (start_bucket..end_bucket) |i| {
-                const start = c.bucket_offsets[i];
-                const end = c.bucket_offsets[i + 1];
-                if (start < end) {
-                    simdQuicksortPairs(c.temp[start..end], c.ascending);
+    blitz.parallelFor(num_workers, HistCtx, hist_ctx, struct {
+        fn work(c: HistCtx, start_w: usize, end_w: usize) void {
+            for (start_w..end_w) |w| {
+                const start = w * c.chunk_size;
+                const end = @min(start + c.chunk_size, c.len);
+                const keys_slice = c.keys[start..end];
+
+                const slice_len = keys_slice.len;
+                const unroll_end = slice_len - (slice_len % 8);
+                var i: usize = 0;
+
+                while (i < unroll_end) : (i += 8) {
+                    if (i + PREFETCH_DISTANCE < slice_len) {
+                        @prefetch(@as([*]const u8, @ptrCast(&keys_slice[i + PREFETCH_DISTANCE])), .{});
+                    }
+
+                    inline for (0..8) |j| {
+                        const b: usize = @intCast((keys_slice[i + j] >> c.shift) & RADIX_MASK);
+                        c.worker_counts[w][b] += 1;
+                    }
+                }
+
+                while (i < slice_len) : (i += 1) {
+                    const bucket: usize = @intCast((keys_slice[i] >> c.shift) & RADIX_MASK);
+                    c.worker_counts[w][bucket] += 1;
                 }
             }
         }
-    }.sortBuckets, 1); // Grain size 1 means each bucket can be stolen
+    }.work);
 
-    // Copy back
-    @memcpy(pairs, temp);
-}
-
-// ============================================================================
-// Fallback Sort
-// ============================================================================
-
-/// Fallback simple argsort for when allocation fails
-fn argsortFallback(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    for (out_indices[0..len], 0..) |*idx, i| {
-        idx.* = @intCast(i);
-    }
-    if (ascending) {
-        std.mem.sort(u32, out_indices[0..len], data, struct {
-            fn lt(ctx: []const T, a: u32, b: u32) bool {
-                return ctx[a] < ctx[b];
-            }
-        }.lt);
-    } else {
-        std.mem.sort(u32, out_indices[0..len], data, struct {
-            fn lt(ctx: []const T, a: u32, b: u32) bool {
-                return ctx[a] > ctx[b];
-            }
-        }.lt);
-    }
-}
-
-/// Simple argsort for small arrays using comparison sort
-fn argsortSmall(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-
-    for (out_indices[0..len], 0..) |*idx, i| {
-        idx.* = @intCast(i);
+    // Phase 2: Compute per-worker offsets
+    var worker_offsets: [8][NUM_BUCKETS]usize = undefined;
+    for (0..NUM_BUCKETS) |bucket| {
+        var offset = global_offsets[bucket];
+        for (0..num_workers) |w| {
+            worker_offsets[w][bucket] = offset;
+            offset += worker_counts[w][bucket];
+        }
     }
 
-    if (ascending) {
-        std.mem.sort(u32, out_indices[0..len], data, struct {
-            fn lessThan(ctx: []const T, a: u32, b: u32) bool {
-                return ctx[a] < ctx[b];
-            }
-        }.lessThan);
-    } else {
-        std.mem.sort(u32, out_indices[0..len], data, struct {
-            fn lessThan(ctx: []const T, a: u32, b: u32) bool {
-                return ctx[a] > ctx[b];
-            }
-        }.lessThan);
-    }
-}
-
-// ============================================================================
-// Public Argsort Functions
-// ============================================================================
-
-/// High-performance argsort using pdqsort (pattern-defeating quicksort)
-/// Cache-friendly comparison sort that beats radix sort in practice
-/// Complexity: O(n log n) average, O(n) for sorted/reverse-sorted patterns
-pub fn argsortPdq(data: []const f64, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
-
-    // For small arrays, use simple insertion sort
-    if (len <= 32) {
-        argsortSmall(f64, data, out_indices, ascending);
-        return;
-    }
-
-    const allocator = std.heap.c_allocator;
-
-    // Create value-index pairs for cache-friendly sorting
-    const pairs = allocator.alloc(ValueIndexPair, len) catch {
-        argsortSmall(f64, data, out_indices, ascending);
-        return;
+    // Phase 3: Parallel scatter
+    const ScatterCtx = struct {
+        src_keys: []const u64,
+        src_indices: []const u32,
+        dst_keys: []u64,
+        dst_indices: []u32,
+        worker_offsets: *[8][NUM_BUCKETS]usize,
+        chunk_size: usize,
+        len: usize,
+        shift: u6,
     };
-    defer allocator.free(pairs);
 
-    // Initialize pairs
-    for (0..len) |i| {
-        pairs[i] = .{ .value = data[i], .idx = @intCast(i) };
-    }
-
-    // Sort using pdqsort - Zig's standard library has this
-    if (ascending) {
-        std.sort.pdq(ValueIndexPair, pairs, {}, struct {
-            fn lessThan(_: void, a: ValueIndexPair, b: ValueIndexPair) bool {
-                // Handle NaN: NaN goes to the end
-                const a_nan = a.value != a.value;
-                const b_nan = b.value != b.value;
-                if (a_nan and b_nan) return a.idx < b.idx; // Stable for NaNs
-                if (a_nan) return false;
-                if (b_nan) return true;
-                return a.value < b.value;
-            }
-        }.lessThan);
-    } else {
-        std.sort.pdq(ValueIndexPair, pairs, {}, struct {
-            fn lessThan(_: void, a: ValueIndexPair, b: ValueIndexPair) bool {
-                // Handle NaN: NaN goes to the end
-                const a_nan = a.value != a.value;
-                const b_nan = b.value != b.value;
-                if (a_nan and b_nan) return a.idx < b.idx;
-                if (a_nan) return false;
-                if (b_nan) return true;
-                return a.value > b.value;
-            }
-        }.lessThan);
-    }
-
-    // Extract indices
-    for (0..len) |i| {
-        out_indices[i] = pairs[i].idx;
-    }
-}
-
-/// High-performance argsort for i64 using pdqsort
-pub fn argsortPdqI64(data: []const i64, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
-
-    if (len <= 32) {
-        argsortSmallInt(i64, data, out_indices, ascending);
-        return;
-    }
-
-    const allocator = std.heap.c_allocator;
-
-    // Create key-index pairs
-    const KeyIndexPair = struct { key: i64, idx: u32 };
-    const pairs = allocator.alloc(KeyIndexPair, len) catch {
-        argsortSmallInt(i64, data, out_indices, ascending);
-        return;
+    const scatter_ctx = ScatterCtx{
+        .src_keys = src_keys,
+        .src_indices = src_indices,
+        .dst_keys = dst_keys,
+        .dst_indices = dst_indices,
+        .worker_offsets = &worker_offsets,
+        .chunk_size = chunk_size,
+        .len = len,
+        .shift = shift,
     };
-    defer allocator.free(pairs);
 
-    for (0..len) |i| {
-        pairs[i] = .{ .key = data[i], .idx = @intCast(i) };
-    }
+    blitz.parallelFor(num_workers, ScatterCtx, scatter_ctx, struct {
+        fn work(c: ScatterCtx, start_w: usize, end_w: usize) void {
+            for (start_w..end_w) |w| {
+                const start = w * c.chunk_size;
+                const end = @min(start + c.chunk_size, c.len);
 
-    if (ascending) {
-        std.sort.pdq(KeyIndexPair, pairs, {}, struct {
-            fn lessThan(_: void, a: KeyIndexPair, b: KeyIndexPair) bool {
-                return a.key < b.key;
+                var i = start;
+                while (i < end) : (i += 1) {
+                    if (i + PREFETCH_DISTANCE < end) {
+                        @prefetch(@as([*]const u8, @ptrCast(&c.src_keys[i + PREFETCH_DISTANCE])), .{});
+                    }
+
+                    const key = c.src_keys[i];
+                    const bucket: usize = @intCast((key >> c.shift) & RADIX_MASK);
+                    const dst_pos = c.worker_offsets[w][bucket];
+                    c.worker_offsets[w][bucket] += 1;
+                    c.dst_keys[dst_pos] = key;
+                    c.dst_indices[dst_pos] = c.src_indices[i];
+                }
             }
-        }.lessThan);
-    } else {
-        std.sort.pdq(KeyIndexPair, pairs, {}, struct {
-            fn lessThan(_: void, a: KeyIndexPair, b: KeyIndexPair) bool {
-                return a.key > b.key;
-            }
-        }.lessThan);
-    }
-
-    for (0..len) |i| {
-        out_indices[i] = pairs[i].idx;
-    }
+        }
+    }.work);
 }
 
-/// High-performance radix sort for f64 argsort
-/// Uses optimized parallel LSD radix sort with skip-pass optimization - O(n) complexity
-pub fn argsortPairRadix(data: []const f64, out_indices: []u32, ascending: bool) void {
-    // Use optimized radix sort - faster than pdqsort for large arrays
-    if (data.len >= 50000) {
-        argsortRadixF64Optimized(data, out_indices, ascending);
-    } else {
-        argsortRadixF64(data, out_indices, ascending);
-    }
-}
-
-/// Optimized parallel radix sort with:
-/// 1. Skip-pass optimization (skip passes where all digits are the same)
-/// 2. Parallel histogram computation
-/// 3. SIMD key conversion
-/// 4. Two-pass approach: count then scatter
-pub fn argsortRadixF64Optimized(data: []const f64, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
-
-    if (len < 256) {
-        argsortSmall(f64, data, out_indices, ascending);
-        return;
-    }
-
-    const allocator = std.heap.c_allocator;
+/// Parallel scatter for direct sort (keys only, no indices)
+fn parallelScatterKeysOnly(
+    src_keys: []const u64,
+    dst_keys: []u64,
+    shift: u6,
+    global_offsets: *[NUM_BUCKETS]usize,
+) void {
+    const len = src_keys.len;
     const num_workers = @min(blitz.numWorkers(), 8);
+    const chunk_size = (len + num_workers - 1) / num_workers;
 
-    // Allocate working buffers
-    const keys = allocator.alloc(u64, len) catch {
-        argsortRadixF64(data, out_indices, ascending);
+    if (num_workers <= 1) {
+        var offsets: [NUM_BUCKETS]usize = undefined;
+        @memcpy(&offsets, global_offsets);
+
+        for (0..len) |i| {
+            const key = src_keys[i];
+            const bucket: usize = @intCast((key >> shift) & RADIX_MASK);
+            const dst_pos = offsets[bucket];
+            offsets[bucket] += 1;
+            dst_keys[dst_pos] = key;
+        }
         return;
-    };
-    defer allocator.free(keys);
+    }
 
-    const temp_indices = allocator.alloc(u32, len) catch {
-        argsortRadixF64(data, out_indices, ascending);
+    var worker_counts: [8][NUM_BUCKETS]usize = undefined;
+    for (&worker_counts) |*wc| {
+        @memset(wc, 0);
+    }
+
+    // Phase 1: Parallel histogram
+    const HistCtx = struct {
+        keys: []const u64,
+        worker_counts: *[8][NUM_BUCKETS]usize,
+        chunk_size: usize,
+        len: usize,
+        shift: u6,
+    };
+
+    const hist_ctx = HistCtx{
+        .keys = src_keys,
+        .worker_counts = &worker_counts,
+        .chunk_size = chunk_size,
+        .len = len,
+        .shift = shift,
+    };
+
+    blitz.parallelFor(num_workers, HistCtx, hist_ctx, struct {
+        fn work(c: HistCtx, start_w: usize, end_w: usize) void {
+            for (start_w..end_w) |w| {
+                const start = w * c.chunk_size;
+                const end = @min(start + c.chunk_size, c.len);
+
+                for (c.keys[start..end]) |key| {
+                    const bucket: usize = @intCast((key >> c.shift) & RADIX_MASK);
+                    c.worker_counts[w][bucket] += 1;
+                }
+            }
+        }
+    }.work);
+
+    // Phase 2: Compute per-worker offsets
+    var worker_offsets: [8][NUM_BUCKETS]usize = undefined;
+    for (0..NUM_BUCKETS) |bucket| {
+        var offset = global_offsets[bucket];
+        for (0..num_workers) |w| {
+            worker_offsets[w][bucket] = offset;
+            offset += worker_counts[w][bucket];
+        }
+    }
+
+    // Phase 3: Parallel scatter
+    const ScatterCtx = struct {
+        src_keys: []const u64,
+        dst_keys: []u64,
+        worker_offsets: *[8][NUM_BUCKETS]usize,
+        chunk_size: usize,
+        len: usize,
+        shift: u6,
+    };
+
+    const scatter_ctx = ScatterCtx{
+        .src_keys = src_keys,
+        .dst_keys = dst_keys,
+        .worker_offsets = &worker_offsets,
+        .chunk_size = chunk_size,
+        .len = len,
+        .shift = shift,
+    };
+
+    blitz.parallelFor(num_workers, ScatterCtx, scatter_ctx, struct {
+        fn work(c: ScatterCtx, start_w: usize, end_w: usize) void {
+            for (start_w..end_w) |w| {
+                const start = w * c.chunk_size;
+                const end = @min(start + c.chunk_size, c.len);
+
+                for (start..end) |i| {
+                    const key = c.src_keys[i];
+                    const bucket: usize = @intCast((key >> c.shift) & RADIX_MASK);
+                    const dst_pos = c.worker_offsets[w][bucket];
+                    c.worker_offsets[w][bucket] += 1;
+                    c.dst_keys[dst_pos] = key;
+                }
+            }
+        }
+    }.work);
+}
+
+// ============================================================================
+// LSD Radix Sort Core
+// ============================================================================
+
+/// LSD radix sort with indices (for argsort)
+fn lsdRadixSortWithIndices(
+    keys: []u64,
+    indices: []u32,
+    temp_keys: []u64,
+    temp_indices: []u32,
+) void {
+    const len = keys.len;
+
+    if (len <= INSERTION_THRESHOLD) {
+        insertionSortKeys(keys, indices);
         return;
-    };
-    defer allocator.free(temp_indices);
-
-    const temp_keys = allocator.alloc(u64, len) catch {
-        argsortRadixF64(data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(temp_keys);
-
-    // SIMD key conversion - convert floats to sortable integers
-    const Vec = @Vector(8, u64);
-    const SignBit: Vec = @splat(@as(u64, 1) << 63);
-    const aligned_len = len - (len % 8);
-
-    var i: usize = 0;
-    while (i < aligned_len) : (i += 8) {
-        // Load 8 floats, convert to u64 bits
-        var bits: Vec = undefined;
-        inline for (0..8) |j| {
-            bits[j] = @bitCast(data[i + j]);
-        }
-
-        // Apply sortable transformation vectorized
-        // For each bit: if sign bit is set, flip all bits; otherwise flip only sign bit
-        const signs = bits >> @splat(@as(u6, 63));
-        const masks = ((@as(Vec, @splat(0)) -% signs) | SignBit);
-        const sortable = bits ^ masks;
-
-        // Store results
-        inline for (0..8) |j| {
-            keys[i + j] = sortable[j];
-            out_indices[i + j] = @intCast(i + j);
-        }
-    }
-
-    // Handle remaining elements
-    while (i < len) : (i += 1) {
-        keys[i] = floatToSortable(data[i]);
-        out_indices[i] = @intCast(i);
-    }
-
-    // Determine which passes can be skipped by checking byte ranges
-    var pass_needed: [8]bool = [_]bool{true} ** 8;
-    var min_bytes: [8]u8 = [_]u8{255} ** 8;
-    var max_bytes: [8]u8 = [_]u8{0} ** 8;
-
-    // Sample to determine pass necessity (check every 64th element for speed)
-    const sample_step = @max(len / 1024, 1);
-    var sample_idx: usize = 0;
-    while (sample_idx < len) : (sample_idx += sample_step) {
-        const key = keys[sample_idx];
-        inline for (0..8) |p| {
-            const byte: u8 = @truncate(key >> (@as(u6, p) * 8));
-            min_bytes[p] = @min(min_bytes[p], byte);
-            max_bytes[p] = @max(max_bytes[p], byte);
-        }
-    }
-
-    // Mark passes as not needed if all sampled values have same byte
-    inline for (0..8) |p| {
-        if (min_bytes[p] == max_bytes[p]) {
-            pass_needed[p] = false;
-        }
-    }
-
-    // Count actual passes needed
-    var passes_to_run: usize = 0;
-    inline for (0..8) |p| {
-        if (pass_needed[p]) passes_to_run += 1;
     }
 
     var src_keys = keys;
     var dst_keys = temp_keys;
-    var src_indices = out_indices;
+    var src_indices = indices;
     var dst_indices = temp_indices;
 
-    // LSD radix sort with skip-pass optimization
-    var pass: u8 = 0;
-    while (pass < 8) : (pass += 1) {
-        // Skip pass if all bytes are identical
-        if (!pass_needed[pass]) {
+    const num_passes: usize = 8;
+    var pass: usize = 0;
+
+    while (pass < num_passes) : (pass += 1) {
+        const shift: u6 = @intCast(pass * @as(usize, RADIX_BITS));
+
+        var counts: [NUM_BUCKETS]usize = undefined;
+        const hist_result = computeHistogramWithSkip(src_keys, shift, &counts);
+
+        if (hist_result.can_skip) {
             continue;
         }
 
-        const shift: u6 = @intCast(pass * 8);
+        var offsets: [NUM_BUCKETS]usize = undefined;
+        var running: usize = 0;
+        for (0..NUM_BUCKETS) |i| {
+            offsets[i] = running;
+            running += counts[i];
+        }
 
-        // Parallel histogram computation using Blitz
-        if (len >= 100000 and num_workers > 1) {
-            // Allocate per-worker histograms
-            var worker_counts: [8][256]usize = undefined;
-            for (&worker_counts) |*wc| {
-                wc.* = [_]usize{0} ** 256;
-            }
-
-            const chunk_size = (len + num_workers - 1) / num_workers;
-
-            const HistCtx = struct {
-                keys: []const u64,
-                shift: u6,
-                worker_counts: *[8][256]usize,
-                chunk_size: usize,
-                len: usize,
-            };
-
-            const hist_ctx = HistCtx{
-                .keys = src_keys,
-                .shift = shift,
-                .worker_counts = &worker_counts,
-                .chunk_size = chunk_size,
-                .len = len,
-            };
-
-            blitz.parallelForWithGrain(num_workers, HistCtx, hist_ctx, struct {
-                fn countDigits(c: HistCtx, start_worker: usize, end_worker: usize) void {
-                    for (start_worker..end_worker) |w| {
-                        const start = w * c.chunk_size;
-                        const end = @min(start + c.chunk_size, c.len);
-                        const local_counts = &c.worker_counts[w];
-
-                        for (c.keys[start..end]) |key| {
-                            const digit: usize = @intCast((key >> c.shift) & 0xFF);
-                            local_counts[digit] += 1;
-                        }
-                    }
-                }
-            }.countDigits, 1);
-
-            // Merge histograms
-            var counts: [256]usize = [_]usize{0} ** 256;
-            for (worker_counts[0..num_workers]) |wc| {
-                for (0..256) |d| {
-                    counts[d] += wc[d];
-                }
-            }
-
-            // Compute prefix sums
-            var offsets: [256]usize = undefined;
-            var total: usize = 0;
-            for (0..256) |d| {
-                offsets[d] = total;
-                total += counts[d];
-            }
-
-            // Scatter phase (sequential for now to avoid race conditions)
-            for (0..len) |idx| {
-                const key = src_keys[idx];
-                const digit: usize = @intCast((key >> shift) & 0xFF);
-                const dst_pos = offsets[digit];
-                offsets[digit] += 1;
-
-                dst_keys[dst_pos] = key;
-                dst_indices[dst_pos] = src_indices[idx];
-            }
+        if (len >= PARALLEL_THRESHOLD) {
+            parallelScatter(src_keys, src_indices, dst_keys, dst_indices, shift, &offsets);
         } else {
-            // Single-threaded path for smaller arrays
-            var counts: [256]usize = [_]usize{0} ** 256;
-            for (src_keys[0..len]) |key| {
-                const digit: usize = @intCast((key >> shift) & 0xFF);
-                counts[digit] += 1;
-            }
+            var i: usize = 0;
+            while (i < len) : (i += 1) {
+                if (i + PREFETCH_DISTANCE < len) {
+                    @prefetch(@as([*]const u8, @ptrCast(&src_keys[i + PREFETCH_DISTANCE])), .{});
+                }
 
-            var offsets: [256]usize = undefined;
-            var total: usize = 0;
-            for (0..256) |d| {
-                offsets[d] = total;
-                total += counts[d];
-            }
-
-            for (0..len) |idx| {
-                const key = src_keys[idx];
-                const digit: usize = @intCast((key >> shift) & 0xFF);
-                const dst_pos = offsets[digit];
-                offsets[digit] += 1;
-
+                const key = src_keys[i];
+                const bucket: usize = @intCast((key >> shift) & RADIX_MASK);
+                const dst_pos = offsets[bucket];
+                offsets[bucket] += 1;
                 dst_keys[dst_pos] = key;
-                dst_indices[dst_pos] = src_indices[idx];
+                dst_indices[dst_pos] = src_indices[i];
             }
         }
 
-        // Swap buffers
-        const tmp_keys = src_keys;
+        const tmp_k = src_keys;
         src_keys = dst_keys;
-        dst_keys = tmp_keys;
+        dst_keys = tmp_k;
 
-        const tmp_indices = src_indices;
+        const tmp_i = src_indices;
         src_indices = dst_indices;
-        dst_indices = tmp_indices;
+        dst_indices = tmp_i;
     }
 
-    // Copy result to out_indices if needed (depends on number of passes done)
-    var passes_done: usize = 0;
-    for (pass_needed) |needed| {
-        if (needed) passes_done += 1;
-    }
-
-    if (passes_done % 2 == 1) {
-        // Result is in temp_indices, copy back
-        @memcpy(out_indices[0..len], temp_indices[0..len]);
-    }
-
-    // If descending, reverse
-    if (!ascending) {
-        var left: usize = 0;
-        var right: usize = len - 1;
-        while (left < right) {
-            const tmp = out_indices[left];
-            out_indices[left] = out_indices[right];
-            out_indices[right] = tmp;
-            left += 1;
-            right -= 1;
-        }
+    if (src_keys.ptr != keys.ptr) {
+        @memcpy(keys, src_keys);
+        @memcpy(indices, src_indices);
     }
 }
 
-/// Radix sort for f64 argsort - uses c_allocator for better performance
-pub fn argsortRadixF64(data: []const f64, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
+/// LSD radix sort without indices (for direct sort)
+fn lsdRadixSortKeysOnly(
+    keys: []u64,
+    temp_keys: []u64,
+) void {
+    const len = keys.len;
 
-    // For small arrays, use simple sort
-    if (len < 256) {
-        argsortSmall(f64, data, out_indices, ascending);
+    if (len <= INSERTION_THRESHOLD) {
+        insertionSortKeysOnly(keys);
         return;
-    }
-
-    const allocator = std.heap.c_allocator;
-
-    // Allocate working buffers
-    const keys = allocator.alloc(u64, len) catch {
-        argsortSmall(f64, data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(keys);
-
-    const temp_indices = allocator.alloc(u32, len) catch {
-        argsortSmall(f64, data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(temp_indices);
-
-    const temp_keys = allocator.alloc(u64, len) catch {
-        argsortSmall(f64, data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(temp_keys);
-
-    // Convert floats to sortable integers and initialize indices
-    for (0..len) |i| {
-        keys[i] = floatToSortable(data[i]);
-        out_indices[i] = @intCast(i);
     }
 
     var src_keys = keys;
     var dst_keys = temp_keys;
-    var src_indices = out_indices;
-    var dst_indices = temp_indices;
 
-    // LSD radix sort: 8 passes for 64-bit keys
-    var pass: u8 = 0;
-    while (pass < 8) : (pass += 1) {
-        const shift: u6 = @intCast(pass * 8);
-        // Count occurrences for this digit
-        var counts: [256]usize = [_]usize{0} ** 256;
-        for (src_keys[0..len]) |key| {
-            const digit: usize = @intCast((key >> shift) & 0xFF);
-            counts[digit] += 1;
+    const num_passes: usize = 8;
+    var pass: usize = 0;
+
+    while (pass < num_passes) : (pass += 1) {
+        const shift: u6 = @intCast(pass * @as(usize, RADIX_BITS));
+
+        var counts: [NUM_BUCKETS]usize = undefined;
+        const hist_result = computeHistogramWithSkip(src_keys, shift, &counts);
+
+        if (hist_result.can_skip) {
+            continue;
         }
 
-        // Compute prefix sums
-        var offsets: [256]usize = undefined;
-        var total: usize = 0;
-        for (0..256) |i| {
-            offsets[i] = total;
-            total += counts[i];
+        var offsets: [NUM_BUCKETS]usize = undefined;
+        var running: usize = 0;
+        for (0..NUM_BUCKETS) |i| {
+            offsets[i] = running;
+            running += counts[i];
         }
 
-        // Distribute elements
-        for (0..len) |i| {
-            const key = src_keys[i];
-            const digit: usize = @intCast((key >> shift) & 0xFF);
-            const dst_pos = offsets[digit];
-            offsets[digit] += 1;
-
-            dst_keys[dst_pos] = key;
-            dst_indices[dst_pos] = src_indices[i];
+        if (len >= PARALLEL_THRESHOLD) {
+            parallelScatterKeysOnly(src_keys, dst_keys, shift, &offsets);
+        } else {
+            for (0..len) |i| {
+                const key = src_keys[i];
+                const bucket: usize = @intCast((key >> shift) & RADIX_MASK);
+                const dst_pos = offsets[bucket];
+                offsets[bucket] += 1;
+                dst_keys[dst_pos] = key;
+            }
         }
 
-        // Swap buffers
-        const tmp_keys = src_keys;
+        const tmp = src_keys;
         src_keys = dst_keys;
-        dst_keys = tmp_keys;
-
-        const tmp_indices = src_indices;
-        src_indices = dst_indices;
-        dst_indices = tmp_indices;
+        dst_keys = tmp;
     }
 
-    // After 8 passes, result is in original buffers
-
-    // If descending, reverse
-    if (!ascending) {
-        var left: usize = 0;
-        var right: usize = len - 1;
-        while (left < right) {
-            const tmp = out_indices[left];
-            out_indices[left] = out_indices[right];
-            out_indices[right] = tmp;
-            left += 1;
-            right -= 1;
-        }
+    if (src_keys.ptr != keys.ptr) {
+        @memcpy(keys, src_keys);
     }
 }
 
-/// Radix sort for i64 argsort - O(n) complexity
-/// Uses LSD (Least Significant Digit) radix sort with sign bit flip
-pub fn argsortRadixI64(data: []const i64, out_indices: []u32, ascending: bool) void {
+// ============================================================================
+// Public API: Argsort (returns indices)
+// ============================================================================
+
+/// Argsort for f64 - returns indices that would sort the array
+pub fn argsortF64(data: []const f64, out_indices: []u32, ascending: bool) void {
     const len = @min(data.len, out_indices.len);
     if (len == 0) return;
-
-    // For small arrays, use simple sort
-    if (len < 256) {
-        argsortSmallInt(i64, data, out_indices, ascending);
-        return;
-    }
-
-    const allocator = std.heap.c_allocator;
-
-    // Allocate working buffers
-    const keys = allocator.alloc(u64, len) catch {
-        argsortSmallInt(i64, data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(keys);
-
-    const temp_indices = allocator.alloc(u32, len) catch {
-        argsortSmallInt(i64, data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(temp_indices);
-
-    const temp_keys = allocator.alloc(u64, len) catch {
-        argsortSmallInt(i64, data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(temp_keys);
-
-    // Convert signed integers to sortable unsigned and initialize indices
-    for (0..len) |i| {
-        keys[i] = i64ToSortable(data[i]);
-        out_indices[i] = @intCast(i);
-    }
-
-    var src_keys = keys;
-    var dst_keys = temp_keys;
-    var src_indices = out_indices;
-    var dst_indices = temp_indices;
-
-    // LSD radix sort: 8 passes for 64-bit keys
-    var pass: u8 = 0;
-    while (pass < 8) : (pass += 1) {
-        const shift: u6 = @intCast(pass * 8);
-        // Count occurrences for this digit
-        var counts: [256]usize = [_]usize{0} ** 256;
-        for (src_keys[0..len]) |key| {
-            const digit: usize = @intCast((key >> shift) & 0xFF);
-            counts[digit] += 1;
-        }
-
-        // Compute prefix sums
-        var offsets: [256]usize = undefined;
-        var total: usize = 0;
-        for (0..256) |i| {
-            offsets[i] = total;
-            total += counts[i];
-        }
-
-        // Distribute elements
-        for (0..len) |i| {
-            const key = src_keys[i];
-            const digit: usize = @intCast((key >> shift) & 0xFF);
-            const dst_pos = offsets[digit];
-            offsets[digit] += 1;
-
-            dst_keys[dst_pos] = key;
-            dst_indices[dst_pos] = src_indices[i];
-        }
-
-        // Swap buffers
-        const tmp_keys = src_keys;
-        src_keys = dst_keys;
-        dst_keys = tmp_keys;
-
-        const tmp_indices = src_indices;
-        src_indices = dst_indices;
-        dst_indices = tmp_indices;
-    }
-
-    // After 8 passes, result is in original buffers
-
-    // If descending, reverse
-    if (!ascending) {
-        var left: usize = 0;
-        var right: usize = len - 1;
-        while (left < right) {
-            const tmp = out_indices[left];
-            out_indices[left] = out_indices[right];
-            out_indices[right] = tmp;
-            left += 1;
-            right -= 1;
-        }
-    }
-}
-
-/// Parallel radix sort for i64 argsort using Blitz
-/// For large arrays, uses parallel chunk sorting + parallel merge
-/// Falls back to single-threaded radix for smaller arrays
-pub fn argsortRadixI64Parallel(data: []const i64, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
-
-    // For small/medium arrays, single-threaded radix is faster
-    if (len < 100000) {
-        argsortRadixI64(data, out_indices, ascending);
-        return;
-    }
-
-    const num_workers = blitz.numWorkers();
-    if (num_workers <= 1) {
-        argsortRadixI64(data, out_indices, ascending);
-        return;
-    }
-
-    const allocator = std.heap.c_allocator;
-
-    // Parallel approach: each thread sorts a chunk using radix sort,
-    // then parallel k-way merge
-    const chunk_size = (len + num_workers - 1) / num_workers;
-    const num_chunks = (len + chunk_size - 1) / chunk_size;
 
     // Initialize indices
     for (out_indices[0..len], 0..) |*idx, i| {
         idx.* = @intCast(i);
     }
 
-    // Allocate temp arrays for each chunk's radix sort
-    // We'll sort indices in place within each chunk
-    const temp_indices = allocator.alloc(u32, len) catch {
-        argsortRadixI64(data, out_indices, ascending);
+    if (len <= INSERTION_THRESHOLD) {
+        insertionSortIndirectF64(data, out_indices[0..len], ascending);
         return;
-    };
-    defer allocator.free(temp_indices);
+    }
 
-    // Sort chunks in parallel using radix sort
-    const ChunkCtx = struct {
-        data: []const i64,
-        indices: []u32,
-        chunk_size: usize,
-        len: usize,
-        ascending: bool,
-    };
+    // Check if already sorted (Verge sort optimization)
+    if (isSortedF64(data, ascending)) {
+        return;
+    }
 
-    const ctx = ChunkCtx{
-        .data = data,
-        .indices = out_indices,
-        .chunk_size = chunk_size,
-        .len = len,
-        .ascending = ascending,
-    };
-
-    blitz.parallelForWithGrain(num_chunks, ChunkCtx, ctx, struct {
-        fn sortChunk(c: ChunkCtx, start_chunk: usize, end_chunk: usize) void {
-            for (start_chunk..end_chunk) |chunk_idx| {
-                const start = chunk_idx * c.chunk_size;
-                const end = @min(start + c.chunk_size, c.len);
-                if (start >= c.len) break;
-
-                // Sort this chunk's indices using comparison sort
-                // (radix sort on a slice would need separate buffers)
-                const chunk = c.indices[start..end];
-                if (c.ascending) {
-                    std.mem.sort(u32, chunk, c.data, struct {
-                        fn lt(d: []const i64, a: u32, b: u32) bool {
-                            return d[a] < d[b];
-                        }
-                    }.lt);
-                } else {
-                    std.mem.sort(u32, chunk, c.data, struct {
-                        fn lt(d: []const i64, a: u32, b: u32) bool {
-                            return d[a] > d[b];
-                        }
-                    }.lt);
-                }
-            }
+    // Check if reverse sorted
+    if (isSortedF64(data, !ascending)) {
+        var left: usize = 0;
+        var right: usize = len - 1;
+        while (left < right) {
+            const tmp = out_indices[left];
+            out_indices[left] = out_indices[right];
+            out_indices[right] = tmp;
+            left += 1;
+            right -= 1;
         }
-    }.sortChunk, 1);
-
-    // Parallel merge of sorted chunks
-    var current_size = chunk_size;
-    var src = out_indices;
-    var dst = temp_indices;
-
-    while (current_size < len) {
-        const num_merges = (len + 2 * current_size - 1) / (2 * current_size);
-
-        const MergeCtx = struct {
-            data: []const i64,
-            src: []const u32,
-            dst: []u32,
-            merge_size: usize,
-            len: usize,
-            ascending: bool,
-        };
-
-        const merge_ctx = MergeCtx{
-            .data = data,
-            .src = src,
-            .dst = dst,
-            .merge_size = current_size,
-            .len = len,
-            .ascending = ascending,
-        };
-
-        blitz.parallelForWithGrain(num_merges, MergeCtx, merge_ctx, struct {
-            fn doMerge(mc: MergeCtx, start_merge: usize, end_merge: usize) void {
-                for (start_merge..end_merge) |m| {
-                    const left_start = m * 2 * mc.merge_size;
-                    const left_end = @min(left_start + mc.merge_size, mc.len);
-                    const right_start = left_end;
-                    const right_end = @min(right_start + mc.merge_size, mc.len);
-
-                    if (left_start >= mc.len) break;
-
-                    // Merge two sorted runs
-                    var li = left_start;
-                    var ri = right_start;
-                    var di = left_start;
-
-                    while (li < left_end and ri < right_end) {
-                        const left_val = mc.data[mc.src[li]];
-                        const right_val = mc.data[mc.src[ri]];
-                        const take_left = if (mc.ascending) left_val <= right_val else left_val >= right_val;
-
-                        if (take_left) {
-                            mc.dst[di] = mc.src[li];
-                            li += 1;
-                        } else {
-                            mc.dst[di] = mc.src[ri];
-                            ri += 1;
-                        }
-                        di += 1;
-                    }
-
-                    // Copy remaining
-                    while (li < left_end) {
-                        mc.dst[di] = mc.src[li];
-                        li += 1;
-                        di += 1;
-                    }
-                    while (ri < right_end) {
-                        mc.dst[di] = mc.src[ri];
-                        ri += 1;
-                        di += 1;
-                    }
-                }
-            }
-        }.doMerge, 1);
-
-        // Swap buffers
-        const tmp = src;
-        src = dst;
-        dst = tmp;
-
-        current_size *= 2;
-    }
-
-    // Copy result back if needed
-    if (src.ptr != out_indices.ptr) {
-        @memcpy(out_indices[0..len], src[0..len]);
-    }
-}
-
-/// Radix sort for i32 argsort - O(n) complexity
-/// Uses LSD (Least Significant Digit) radix sort with sign bit flip
-pub fn argsortRadixI32(data: []const i32, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
-
-    // For small arrays, use simple sort
-    if (len < 256) {
-        argsortSmallInt(i32, data, out_indices, ascending);
         return;
     }
 
     const allocator = std.heap.c_allocator;
 
-    // Allocate working buffers
-    const keys = allocator.alloc(u32, len) catch {
-        argsortSmallInt(i32, data, out_indices, ascending);
+    const keys = allocator.alloc(u64, len) catch {
+        insertionSortIndirectF64(data, out_indices[0..len], ascending);
         return;
     };
     defer allocator.free(keys);
 
-    const temp_indices = allocator.alloc(u32, len) catch {
-        argsortSmallInt(i32, data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(temp_indices);
-
-    const temp_keys = allocator.alloc(u32, len) catch {
-        argsortSmallInt(i32, data, out_indices, ascending);
+    const temp_keys = allocator.alloc(u64, len) catch {
+        insertionSortIndirectF64(data, out_indices[0..len], ascending);
         return;
     };
     defer allocator.free(temp_keys);
 
-    // Convert signed integers to sortable unsigned and initialize indices
-    for (0..len) |i| {
-        keys[i] = i32ToSortable(data[i]);
-        out_indices[i] = @intCast(i);
-    }
+    const temp_indices = allocator.alloc(u32, len) catch {
+        insertionSortIndirectF64(data, out_indices[0..len], ascending);
+        return;
+    };
+    defer allocator.free(temp_indices);
 
-    var src_keys = keys;
-    var dst_keys = temp_keys;
-    var src_indices = out_indices;
-    var dst_indices = temp_indices;
+    transformKeysF64(data[0..len], keys);
+    lsdRadixSortWithIndices(keys, out_indices[0..len], temp_keys, temp_indices);
 
-    // LSD radix sort: 4 passes for 32-bit keys
-    var pass: u8 = 0;
-    while (pass < 4) : (pass += 1) {
-        const shift: u5 = @intCast(pass * 8);
-        // Count occurrences for this digit
-        var counts: [256]usize = [_]usize{0} ** 256;
-        for (src_keys[0..len]) |key| {
-            const digit: usize = @intCast((key >> shift) & 0xFF);
-            counts[digit] += 1;
-        }
-
-        // Compute prefix sums
-        var offsets: [256]usize = undefined;
-        var total: usize = 0;
-        for (0..256) |i| {
-            offsets[i] = total;
-            total += counts[i];
-        }
-
-        // Distribute elements
-        for (0..len) |i| {
-            const key = src_keys[i];
-            const digit: usize = @intCast((key >> shift) & 0xFF);
-            const dst_pos = offsets[digit];
-            offsets[digit] += 1;
-
-            dst_keys[dst_pos] = key;
-            dst_indices[dst_pos] = src_indices[i];
-        }
-
-        // Swap buffers
-        const tmp_keys = src_keys;
-        src_keys = dst_keys;
-        dst_keys = tmp_keys;
-
-        const tmp_indices = src_indices;
-        src_indices = dst_indices;
-        dst_indices = tmp_indices;
-    }
-
-    // After 4 passes, result is in original buffers
-
-    // If descending, reverse
     if (!ascending) {
         var left: usize = 0;
         var right: usize = len - 1;
@@ -1240,561 +1360,631 @@ pub fn argsortRadixI32(data: []const i32, out_indices: []u32, ascending: bool) v
     }
 }
 
-/// Helper function for small integer arrays (fallback)
-fn argsortSmallInt(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
+/// Argsort for i64 - returns indices that would sort the array
+pub fn argsortI64(data: []const i64, out_indices: []u32, ascending: bool) void {
     const len = @min(data.len, out_indices.len);
+    if (len == 0) return;
 
     for (out_indices[0..len], 0..) |*idx, i| {
         idx.* = @intCast(i);
+    }
+
+    if (len <= INSERTION_THRESHOLD) {
+        insertionSortIndirectI64(data, out_indices[0..len], ascending);
+        return;
+    }
+
+    if (isSortedI64(data, ascending)) {
+        return;
+    }
+
+    if (isSortedI64(data, !ascending)) {
+        var left: usize = 0;
+        var right: usize = len - 1;
+        while (left < right) {
+            const tmp = out_indices[left];
+            out_indices[left] = out_indices[right];
+            out_indices[right] = tmp;
+            left += 1;
+            right -= 1;
+        }
+        return;
+    }
+
+    const allocator = std.heap.c_allocator;
+
+    const keys = allocator.alloc(u64, len) catch {
+        insertionSortIndirectI64(data, out_indices[0..len], ascending);
+        return;
+    };
+    defer allocator.free(keys);
+
+    const temp_keys = allocator.alloc(u64, len) catch {
+        insertionSortIndirectI64(data, out_indices[0..len], ascending);
+        return;
+    };
+    defer allocator.free(temp_keys);
+
+    const temp_indices = allocator.alloc(u32, len) catch {
+        insertionSortIndirectI64(data, out_indices[0..len], ascending);
+        return;
+    };
+    defer allocator.free(temp_indices);
+
+    transformKeysI64(data[0..len], keys);
+    lsdRadixSortWithIndices(keys, out_indices[0..len], temp_keys, temp_indices);
+
+    if (!ascending) {
+        var left: usize = 0;
+        var right: usize = len - 1;
+        while (left < right) {
+            const tmp = out_indices[left];
+            out_indices[left] = out_indices[right];
+            out_indices[right] = tmp;
+            left += 1;
+            right -= 1;
+        }
+    }
+}
+
+// ============================================================================
+// Public API: Direct Sort (returns sorted values)
+// ============================================================================
+
+/// Sort f64 values directly (faster than argsort, no index tracking)
+/// Uses Verge Sort preprocessing to exploit existing order, then radix sort for random sections
+pub fn sortF64(data: []const f64, out: []f64, ascending: bool) void {
+    const len = @min(data.len, out.len);
+    if (len == 0) return;
+
+    // Check if already sorted
+    if (isSortedF64(data, ascending)) {
+        @memcpy(out[0..len], data[0..len]);
+        return;
+    }
+
+    // Check if reverse sorted
+    if (isSortedF64(data, !ascending)) {
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            out[i] = data[len - 1 - i];
+        }
+        return;
+    }
+
+    // For small arrays, use std sort (pdqsort-like)
+    // Based on voracious_sort: pdqsort wins at ≤300 elements
+    const SMALL_SORT_THRESHOLD: usize = 300;
+    if (len <= SMALL_SORT_THRESHOLD) {
+        @memcpy(out[0..len], data[0..len]);
+        if (ascending) {
+            std.mem.sort(f64, out[0..len], {}, std.sort.asc(f64));
+        } else {
+            std.mem.sort(f64, out[0..len], {}, std.sort.desc(f64));
+        }
+        return;
+    }
+
+    // Copy data to output buffer for in-place operations
+    @memcpy(out[0..len], data[0..len]);
+
+    const allocator = std.heap.c_allocator;
+
+    // Try Verge Sort preprocessing: detect sorted runs
+    var runs: [MAX_RUNS]RunDescriptor = undefined;
+    const num_runs = vergeSortPreprocessingF64(out[0..len], &runs);
+
+    // If single run, data is now sorted (ascending)
+    if (num_runs == 1) {
+        if (!ascending) {
+            reverseF64(out[0..len]);
+        }
+        return;
+    }
+
+    // If preprocessing found runs (not too many), use k-way merge
+    if (num_runs > 1 and num_runs <= MAX_RUNS) {
+        // Allocate merge buffer (half the size since we always merge smaller into temp)
+        const merge_buffer = allocator.alloc(f64, len / 2 + 1) catch {
+            // Fallback to std sort
+            if (ascending) {
+                std.mem.sort(f64, out[0..len], {}, std.sort.asc(f64));
+            } else {
+                std.mem.sort(f64, out[0..len], {}, std.sort.desc(f64));
+            }
+            return;
+        };
+        defer allocator.free(merge_buffer);
+
+        kWayMergeF64(out[0..len], runs[0..num_runs], merge_buffer);
+
+        if (!ascending) {
+            reverseF64(out[0..len]);
+        }
+        return;
+    }
+
+    // Fallback to radix sort for truly random data (many small runs)
+    const out_as_u64: []u64 = @as([*]u64, @ptrCast(out.ptr))[0..len];
+
+    const temp_keys = allocator.alloc(u64, len) catch {
+        // Fallback: use std sort
+        if (ascending) {
+            std.mem.sort(f64, out[0..len], {}, std.sort.asc(f64));
+        } else {
+            std.mem.sort(f64, out[0..len], {}, std.sort.desc(f64));
+        }
+        return;
+    };
+    defer allocator.free(temp_keys);
+
+    // Transform to sortable keys (data already in out buffer)
+    for (0..len) |i| {
+        out_as_u64[i] = floatToSortable(out[i]);
+    }
+
+    // Sort keys
+    lsdRadixSortKeysOnly(out_as_u64, temp_keys);
+
+    // Convert back to f64
+    if (ascending) {
+        transformKeysToF64InPlace(out_as_u64);
+    } else {
+        reverseU64(out_as_u64);
+        transformKeysToF64InPlace(out_as_u64);
+    }
+}
+
+/// In-place transformation from sortable keys to f64
+fn transformKeysToF64InPlace(keys: []u64) void {
+    const len = keys.len;
+    const simd_end = len - (len % SIMD_WIDTH);
+
+    const sign_bit_vec: U64Vec = @splat(@as(u64, 1) << 63);
+
+    var i: usize = 0;
+    while (i < simd_end) : (i += SIMD_WIDTH) {
+        const bits: U64Vec = keys[i..][0..SIMD_WIDTH].*;
+        const sign_bits = bits >> @splat(@as(u6, 63));
+        const neg_mask = @as(U64Vec, @splat(0)) -% (@as(U64Vec, @splat(1)) - sign_bits);
+        const mask = neg_mask | sign_bit_vec;
+        const original_bits = bits ^ mask;
+        keys[i..][0..SIMD_WIDTH].* = original_bits;
+    }
+
+    while (i < len) : (i += 1) {
+        keys[i] = @bitCast(sortableToF64(keys[i]));
+    }
+}
+
+/// Reverse a u64 array in-place
+fn reverseU64(arr: []u64) void {
+    if (arr.len <= 1) return;
+    var left: usize = 0;
+    var right: usize = arr.len - 1;
+    while (left < right) {
+        const tmp = arr[left];
+        arr[left] = arr[right];
+        arr[right] = tmp;
+        left += 1;
+        right -= 1;
+    }
+}
+
+/// Sort i64 values directly (faster than argsort, no index tracking)
+/// Uses Verge Sort preprocessing to exploit existing order, then radix sort for random sections
+pub fn sortI64(data: []const i64, out: []i64, ascending: bool) void {
+    const len = @min(data.len, out.len);
+    if (len == 0) return;
+
+    if (isSortedI64(data, ascending)) {
+        @memcpy(out[0..len], data[0..len]);
+        return;
+    }
+
+    if (isSortedI64(data, !ascending)) {
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            out[i] = data[len - 1 - i];
+        }
+        return;
+    }
+
+    // For small arrays, use std sort (pdqsort-like)
+    const SMALL_SORT_THRESHOLD: usize = 300;
+    if (len <= SMALL_SORT_THRESHOLD) {
+        @memcpy(out[0..len], data[0..len]);
+        if (ascending) {
+            std.mem.sort(i64, out[0..len], {}, std.sort.asc(i64));
+        } else {
+            std.mem.sort(i64, out[0..len], {}, std.sort.desc(i64));
+        }
+        return;
+    }
+
+    // Copy data to output buffer for in-place operations
+    @memcpy(out[0..len], data[0..len]);
+
+    const allocator = std.heap.c_allocator;
+
+    // Try Verge Sort preprocessing: detect sorted runs
+    var runs: [MAX_RUNS]RunDescriptor = undefined;
+    const num_runs = vergeSortPreprocessingI64(out[0..len], &runs);
+
+    // If single run, data is now sorted (ascending)
+    if (num_runs == 1) {
+        if (!ascending) {
+            reverseI64(out[0..len]);
+        }
+        return;
+    }
+
+    // If preprocessing found runs (not too many), use k-way merge
+    if (num_runs > 1 and num_runs <= MAX_RUNS) {
+        const merge_buffer = allocator.alloc(i64, len / 2 + 1) catch {
+            if (ascending) {
+                std.mem.sort(i64, out[0..len], {}, std.sort.asc(i64));
+            } else {
+                std.mem.sort(i64, out[0..len], {}, std.sort.desc(i64));
+            }
+            return;
+        };
+        defer allocator.free(merge_buffer);
+
+        kWayMergeI64(out[0..len], runs[0..num_runs], merge_buffer);
+
+        if (!ascending) {
+            reverseI64(out[0..len]);
+        }
+        return;
+    }
+
+    // Fallback to radix sort for truly random data (many small runs)
+    const out_as_u64: []u64 = @as([*]u64, @ptrCast(out.ptr))[0..len];
+
+    const temp_keys = allocator.alloc(u64, len) catch {
+        if (ascending) {
+            std.mem.sort(i64, out[0..len], {}, std.sort.asc(i64));
+        } else {
+            std.mem.sort(i64, out[0..len], {}, std.sort.desc(i64));
+        }
+        return;
+    };
+    defer allocator.free(temp_keys);
+
+    // Transform to sortable keys (data already in out buffer)
+    for (0..len) |i| {
+        out_as_u64[i] = i64ToSortable(out[i]);
+    }
+
+    // Sort keys
+    lsdRadixSortKeysOnly(out_as_u64, temp_keys);
+
+    // Convert back to i64
+    if (ascending) {
+        transformKeysToI64InPlace(out_as_u64);
+    } else {
+        reverseU64(out_as_u64);
+        transformKeysToI64InPlace(out_as_u64);
+    }
+}
+
+/// In-place transformation from sortable keys to i64
+fn transformKeysToI64InPlace(keys: []u64) void {
+    const len = keys.len;
+    const simd_end = len - (len % SIMD_WIDTH);
+
+    const sign_bit_vec: U64Vec = @splat(@as(u64, 1) << 63);
+
+    var i: usize = 0;
+    while (i < simd_end) : (i += SIMD_WIDTH) {
+        const bits: U64Vec = keys[i..][0..SIMD_WIDTH].*;
+        keys[i..][0..SIMD_WIDTH].* = bits ^ sign_bit_vec;
+    }
+
+    while (i < len) : (i += 1) {
+        keys[i] = @bitCast(sortableToI64(keys[i]));
+    }
+}
+
+// ============================================================================
+// Public API: Gather (for reordering by indices)
+// ============================================================================
+
+/// Parallel gather for f64
+pub fn gatherF64(src: []const f64, indices: []const u32, dst: []f64) void {
+    const len = @min(indices.len, dst.len);
+    if (len == 0) return;
+
+    if (len < PARALLEL_THRESHOLD) {
+        for (0..len) |i| {
+            dst[i] = src[indices[i]];
+        }
+        return;
+    }
+
+    const num_workers = @min(blitz.numWorkers(), 8);
+    const chunk_size = (len + num_workers - 1) / num_workers;
+
+    const Ctx = struct {
+        src: []const f64,
+        indices: []const u32,
+        dst: []f64,
+        chunk_size: usize,
+        len: usize,
+    };
+
+    const ctx = Ctx{
+        .src = src,
+        .indices = indices,
+        .dst = dst,
+        .chunk_size = chunk_size,
+        .len = len,
+    };
+
+    blitz.parallelFor(num_workers, Ctx, ctx, struct {
+        fn work(c: Ctx, start_w: usize, end_w: usize) void {
+            for (start_w..end_w) |w| {
+                const start = w * c.chunk_size;
+                const end = @min(start + c.chunk_size, c.len);
+
+                for (start..end) |i| {
+                    c.dst[i] = c.src[c.indices[i]];
+                }
+            }
+        }
+    }.work);
+}
+
+/// Parallel gather for i64
+pub fn gatherI64(src: []const i64, indices: []const u32, dst: []i64) void {
+    const len = @min(indices.len, dst.len);
+    if (len == 0) return;
+
+    if (len < PARALLEL_THRESHOLD) {
+        for (0..len) |i| {
+            dst[i] = src[indices[i]];
+        }
+        return;
+    }
+
+    const num_workers = @min(blitz.numWorkers(), 8);
+    const chunk_size = (len + num_workers - 1) / num_workers;
+
+    const Ctx = struct {
+        src: []const i64,
+        indices: []const u32,
+        dst: []i64,
+        chunk_size: usize,
+        len: usize,
+    };
+
+    const ctx = Ctx{
+        .src = src,
+        .indices = indices,
+        .dst = dst,
+        .chunk_size = chunk_size,
+        .len = len,
+    };
+
+    blitz.parallelFor(num_workers, Ctx, ctx, struct {
+        fn work(c: Ctx, start_w: usize, end_w: usize) void {
+            for (start_w..end_w) |w| {
+                const start = w * c.chunk_size;
+                const end = @min(start + c.chunk_size, c.len);
+
+                for (start..end) |i| {
+                    c.dst[i] = c.src[c.indices[i]];
+                }
+            }
+        }
+    }.work);
+}
+
+// ============================================================================
+// Public API: 32-bit Argsort (using std.sort, for i32/f32 types)
+// ============================================================================
+
+/// Argsort for i32 values using comparison-based sort
+pub fn argsortI32(data: []const i32, out_indices: []u32, ascending: bool) void {
+    const len = @min(data.len, out_indices.len);
+    if (len == 0) return;
+
+    // Initialize indices
+    for (0..len) |i| {
+        out_indices[i] = @intCast(i);
+    }
+
+    // Sort indices by data values
+    if (ascending) {
+        std.mem.sort(u32, out_indices[0..len], data, struct {
+            fn lessThan(d: []const i32, a: u32, b: u32) bool {
+                return d[a] < d[b];
+            }
+        }.lessThan);
+    } else {
+        std.mem.sort(u32, out_indices[0..len], data, struct {
+            fn lessThan(d: []const i32, a: u32, b: u32) bool {
+                return d[a] > d[b];
+            }
+        }.lessThan);
+    }
+}
+
+/// Argsort for f32 values using comparison-based sort
+pub fn argsortF32(data: []const f32, out_indices: []u32, ascending: bool) void {
+    const len = @min(data.len, out_indices.len);
+    if (len == 0) return;
+
+    // Initialize indices
+    for (0..len) |i| {
+        out_indices[i] = @intCast(i);
+    }
+
+    // Sort indices by data values
+    if (ascending) {
+        std.mem.sort(u32, out_indices[0..len], data, struct {
+            fn lessThan(d: []const f32, a: u32, b: u32) bool {
+                return d[a] < d[b];
+            }
+        }.lessThan);
+    } else {
+        std.mem.sort(u32, out_indices[0..len], data, struct {
+            fn lessThan(d: []const f32, a: u32, b: u32) bool {
+                return d[a] > d[b];
+            }
+        }.lessThan);
+    }
+}
+
+/// Sort i32 values directly
+pub fn sortI32(data: []const i32, out: []i32, ascending: bool) void {
+    const len = @min(data.len, out.len);
+    if (len == 0) return;
+
+    @memcpy(out[0..len], data[0..len]);
+    if (ascending) {
+        std.mem.sort(i32, out[0..len], {}, std.sort.asc(i32));
+    } else {
+        std.mem.sort(i32, out[0..len], {}, std.sort.desc(i32));
+    }
+}
+
+/// Sort f32 values directly
+pub fn sortF32(data: []const f32, out: []f32, ascending: bool) void {
+    const len = @min(data.len, out.len);
+    if (len == 0) return;
+
+    @memcpy(out[0..len], data[0..len]);
+    if (ascending) {
+        std.mem.sort(f32, out[0..len], {}, std.sort.asc(f32));
+    } else {
+        std.mem.sort(f32, out[0..len], {}, std.sort.desc(f32));
+    }
+}
+
+/// Argsort for u64 values using comparison-based sort
+pub fn argsortU64(data: []const u64, out_indices: []u32, ascending: bool) void {
+    const len = @min(data.len, out_indices.len);
+    if (len == 0) return;
+
+    for (0..len) |i| {
+        out_indices[i] = @intCast(i);
     }
 
     if (ascending) {
         std.mem.sort(u32, out_indices[0..len], data, struct {
-            fn lessThan(ctx: []const T, a: u32, b: u32) bool {
-                return ctx[a] < ctx[b];
+            fn lessThan(d: []const u64, a: u32, b: u32) bool {
+                return d[a] < d[b];
             }
         }.lessThan);
     } else {
         std.mem.sort(u32, out_indices[0..len], data, struct {
-            fn lessThan(ctx: []const T, a: u32, b: u32) bool {
-                return ctx[a] > ctx[b];
+            fn lessThan(d: []const u64, a: u32, b: u32) bool {
+                return d[a] > d[b];
             }
         }.lessThan);
     }
 }
 
-/// Parallel sort using divide-and-conquer with parallel merge (using Blitz)
-/// Each chunk is sorted in parallel, then merged using parallel pairwise merge
-pub fn argsortParallelMerge(data: []const f64, out_indices: []u32, ascending: bool) void {
+/// Argsort for u32 values using comparison-based sort
+pub fn argsortU32(data: []const u32, out_indices: []u32, ascending: bool) void {
     const len = @min(data.len, out_indices.len);
     if (len == 0) return;
 
-    // For small arrays, use radix sort
-    if (len < 16384) {
-        argsortRadixF64(data, out_indices, ascending);
-        return;
+    for (0..len) |i| {
+        out_indices[i] = @intCast(i);
     }
 
-    const num_threads = blitz.numWorkers();
-    if (num_threads <= 1) {
-        argsortRadixF64(data, out_indices, ascending);
-        return;
-    }
-
-    const allocator = std.heap.page_allocator;
-    const chunk_size = (len + num_threads - 1) / num_threads;
-
-    // Allocate temp buffer for merging
-    const temp_indices = allocator.alloc(u32, len) catch {
-        argsortRadixF64(data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(temp_indices);
-
-    // Initialize indices
-    for (out_indices[0..len], 0..) |*idx, i| {
-        idx.* = @intCast(i);
-    }
-
-    // Phase 1: Sort chunks in parallel using Blitz
-    const ChunkSortCtx = struct {
-        data: []const f64,
-        indices: []u32,
-        chunk_size: usize,
-        len: usize,
-        ascending: bool,
-    };
-
-    const sort_ctx = ChunkSortCtx{
-        .data = data,
-        .indices = out_indices,
-        .chunk_size = chunk_size,
-        .len = len,
-        .ascending = ascending,
-    };
-
-    blitz.parallelForWithGrain(num_threads, ChunkSortCtx, sort_ctx, struct {
-        fn sortChunks(ctx: ChunkSortCtx, start_chunk: usize, end_chunk: usize) void {
-            for (start_chunk..end_chunk) |t| {
-                const start = t * ctx.chunk_size;
-                const end = @min(start + ctx.chunk_size, ctx.len);
-                if (start >= ctx.len) continue;
-
-                const chunk = ctx.indices[start..end];
-                if (ctx.ascending) {
-                    std.sort.pdq(u32, chunk, ctx.data, struct {
-                        fn lt(d: []const f64, a: u32, b: u32) bool {
-                            return d[a] < d[b];
-                        }
-                    }.lt);
-                } else {
-                    std.sort.pdq(u32, chunk, ctx.data, struct {
-                        fn lt(d: []const f64, a: u32, b: u32) bool {
-                            return d[a] > d[b];
-                        }
-                    }.lt);
-                }
+    if (ascending) {
+        std.mem.sort(u32, out_indices[0..len], data, struct {
+            fn lessThan(d: []const u32, a: u32, b: u32) bool {
+                return d[a] < d[b];
             }
-        }
-    }.sortChunks, 1);
-
-    // Phase 2: Parallel pairwise merge
-    var current_chunk_size = chunk_size;
-    var src = out_indices;
-    var dst = temp_indices;
-
-    while (current_chunk_size < len) {
-        const num_merges = (len + 2 * current_chunk_size - 1) / (2 * current_chunk_size);
-
-        const MergeCtx = struct {
-            data: []const f64,
-            src: []const u32,
-            dst: []u32,
-            current_chunk_size: usize,
-            len: usize,
-            ascending: bool,
-        };
-
-        const merge_ctx = MergeCtx{
-            .data = data,
-            .src = src,
-            .dst = dst,
-            .current_chunk_size = current_chunk_size,
-            .len = len,
-            .ascending = ascending,
-        };
-
-        blitz.parallelForWithGrain(num_merges, MergeCtx, merge_ctx, struct {
-            fn doMerges(ctx: MergeCtx, start_merge: usize, end_merge: usize) void {
-                for (start_merge..end_merge) |t| {
-                    const left = t * 2 * ctx.current_chunk_size;
-                    if (left >= ctx.len) continue;
-
-                    const mid = @min(left + ctx.current_chunk_size, ctx.len);
-                    const right = @min(left + 2 * ctx.current_chunk_size, ctx.len);
-
-                    if (mid >= right) {
-                        // Only one chunk, just copy
-                        @memcpy(ctx.dst[left..right], ctx.src[left..right]);
-                        continue;
-                    }
-
-                    // Merge [left..mid] and [mid..right]
-                    var i = left;
-                    var j = mid;
-                    var k = left;
-
-                    while (i < mid and j < right) {
-                        const cmp = if (ctx.ascending)
-                            ctx.data[ctx.src[i]] <= ctx.data[ctx.src[j]]
-                        else
-                            ctx.data[ctx.src[i]] >= ctx.data[ctx.src[j]];
-
-                        if (cmp) {
-                            ctx.dst[k] = ctx.src[i];
-                            i += 1;
-                        } else {
-                            ctx.dst[k] = ctx.src[j];
-                            j += 1;
-                        }
-                        k += 1;
-                    }
-
-                    while (i < mid) : (i += 1) {
-                        ctx.dst[k] = ctx.src[i];
-                        k += 1;
-                    }
-                    while (j < right) : (j += 1) {
-                        ctx.dst[k] = ctx.src[j];
-                        k += 1;
-                    }
-                }
-            }
-        }.doMerges, 1);
-
-        // Swap buffers
-        const tmp = src;
-        src = dst;
-        dst = tmp;
-
-        current_chunk_size *= 2;
-    }
-
-    // If result is in temp buffer, copy back
-    if (src.ptr != out_indices.ptr) {
-        @memcpy(out_indices[0..len], src[0..len]);
-    }
-}
-
-/// Parallel argsort using divide-and-conquer with Blitz
-/// Divides data into chunks, sorts each in parallel, then merges
-pub fn argsortParallel(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
-
-    // For small arrays, use simple sort
-    if (len < 32768) {
-        argsortSmall(T, data, out_indices, ascending);
-        return;
-    }
-
-    const num_workers = blitz.numWorkers();
-    const chunk_size = (len + num_workers - 1) / num_workers;
-    const num_chunks = (len + chunk_size - 1) / chunk_size;
-    const allocator = std.heap.page_allocator;
-
-    // Initialize indices
-    for (out_indices[0..len], 0..) |*idx, i| {
-        idx.* = @intCast(i);
-    }
-
-    // Temp buffer for merging
-    const temp = allocator.alloc(u32, len) catch {
-        argsortSmall(T, data, out_indices, ascending);
-        return;
-    };
-    defer allocator.free(temp);
-
-    // Sort chunks in parallel using Blitz
-    const ChunkSortCtx = struct {
-        data: []const T,
-        indices: []u32,
-        chunk_size: usize,
-        len: usize,
-        ascending: bool,
-    };
-
-    const sort_ctx = ChunkSortCtx{
-        .data = data,
-        .indices = out_indices,
-        .chunk_size = chunk_size,
-        .len = len,
-        .ascending = ascending,
-    };
-
-    blitz.parallelForWithGrain(num_chunks, ChunkSortCtx, sort_ctx, struct {
-        fn sortChunks(ctx: ChunkSortCtx, start_chunk: usize, end_chunk: usize) void {
-            for (start_chunk..end_chunk) |c| {
-                const start = c * ctx.chunk_size;
-                const end = @min(start + ctx.chunk_size, ctx.len);
-                if (start >= ctx.len) break;
-
-                const chunk = ctx.indices[start..end];
-                if (ctx.ascending) {
-                    std.mem.sort(u32, chunk, ctx.data, struct {
-                        fn lt(d: []const T, a: u32, b: u32) bool {
-                            return d[a] < d[b];
-                        }
-                    }.lt);
-                } else {
-                    std.mem.sort(u32, chunk, ctx.data, struct {
-                        fn lt(d: []const T, a: u32, b: u32) bool {
-                            return d[a] > d[b];
-                        }
-                    }.lt);
-                }
-            }
-        }
-    }.sortChunks, 1);
-
-    // Merge sorted chunks (log(num_chunks) levels)
-    var current_size = chunk_size;
-    var src = out_indices;
-    var dst = temp;
-
-    while (current_size < len) {
-        const num_merges = (len + 2 * current_size - 1) / (2 * current_size);
-
-        // Parallel merge using Blitz
-        const MergeCtx = struct {
-            data: []const T,
-            src: []const u32,
-            dst: []u32,
-            current_size: usize,
-            len: usize,
-            ascending: bool,
-        };
-
-        const merge_ctx = MergeCtx{
-            .data = data,
-            .src = src,
-            .dst = dst,
-            .current_size = current_size,
-            .len = len,
-            .ascending = ascending,
-        };
-
-        blitz.parallelForWithGrain(num_merges, MergeCtx, merge_ctx, struct {
-            fn doMerges(ctx: MergeCtx, start_merge: usize, end_merge: usize) void {
-                for (start_merge..end_merge) |m| {
-                    const left = m * 2 * ctx.current_size;
-                    if (left >= ctx.len) break;
-
-                    const mid = @min(left + ctx.current_size, ctx.len);
-                    const right = @min(left + 2 * ctx.current_size, ctx.len);
-
-                    if (mid >= right) {
-                        @memcpy(ctx.dst[left..right], ctx.src[left..right]);
-                        continue;
-                    }
-
-                    // Merge [left..mid] and [mid..right]
-                    var i = left;
-                    var j = mid;
-                    var k = left;
-
-                    while (i < mid and j < right) {
-                        const cmp = if (ctx.ascending)
-                            ctx.data[ctx.src[i]] <= ctx.data[ctx.src[j]]
-                        else
-                            ctx.data[ctx.src[i]] >= ctx.data[ctx.src[j]];
-
-                        if (cmp) {
-                            ctx.dst[k] = ctx.src[i];
-                            i += 1;
-                        } else {
-                            ctx.dst[k] = ctx.src[j];
-                            j += 1;
-                        }
-                        k += 1;
-                    }
-
-                    @memcpy(ctx.dst[k .. k + (mid - i)], ctx.src[i..mid]);
-                    k += mid - i;
-                    @memcpy(ctx.dst[k .. k + (right - j)], ctx.src[j..right]);
-                }
-            }
-        }.doMerges, 1);
-
-        // Swap buffers
-        const tmp = src;
-        src = dst;
-        dst = tmp;
-
-        current_size *= 2;
-    }
-
-    // Copy result back if needed
-    if (src.ptr != out_indices.ptr) {
-        @memcpy(out_indices[0..len], src[0..len]);
-    }
-}
-
-/// In-place parallel sort using Blitz (modifies out_indices directly)
-fn argsortParallelInPlace(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
-    const len = out_indices.len;
-    const num_workers = blitz.numWorkers();
-    const chunk_size = (len + num_workers - 1) / num_workers;
-    const num_chunks = (len + chunk_size - 1) / chunk_size;
-    const allocator = std.heap.page_allocator;
-
-    // Sort chunks in parallel using Blitz
-    const ChunkSortCtx = struct {
-        data: []const T,
-        indices: []u32,
-        chunk_size: usize,
-        len: usize,
-        ascending: bool,
-    };
-
-    const sort_ctx = ChunkSortCtx{
-        .data = data,
-        .indices = out_indices,
-        .chunk_size = chunk_size,
-        .len = len,
-        .ascending = ascending,
-    };
-
-    blitz.parallelForWithGrain(num_chunks, ChunkSortCtx, sort_ctx, struct {
-        fn sortChunks(ctx: ChunkSortCtx, start_chunk: usize, end_chunk: usize) void {
-            for (start_chunk..end_chunk) |c| {
-                const start = c * ctx.chunk_size;
-                const end = @min(start + ctx.chunk_size, ctx.len);
-                if (start >= ctx.len) break;
-
-                const chunk = ctx.indices[start..end];
-                if (ctx.ascending) {
-                    std.mem.sort(u32, chunk, ctx.data, struct {
-                        fn lt(d: []const T, a: u32, b: u32) bool {
-                            return d[a] < d[b];
-                        }
-                    }.lt);
-                } else {
-                    std.mem.sort(u32, chunk, ctx.data, struct {
-                        fn lt(d: []const T, a: u32, b: u32) bool {
-                            return d[a] > d[b];
-                        }
-                    }.lt);
-                }
-            }
-        }
-    }.sortChunks, 1);
-
-    // K-way merge using heap
-    const temp_buf = allocator.alloc(u32, len) catch {
-        // Fallback: just return partially sorted (chunks are sorted)
-        return;
-    };
-    defer allocator.free(temp_buf);
-
-    // Merge pairs iteratively using Blitz
-    var current_size = chunk_size;
-    var src = out_indices;
-    var dst = temp_buf;
-
-    while (current_size < len) {
-        const num_merges = (len + 2 * current_size - 1) / (2 * current_size);
-
-        const MergeCtx = struct {
-            data: []const T,
-            src: []const u32,
-            dst: []u32,
-            current_size: usize,
-            len: usize,
-            ascending: bool,
-        };
-
-        const merge_ctx = MergeCtx{
-            .data = data,
-            .src = src,
-            .dst = dst,
-            .current_size = current_size,
-            .len = len,
-            .ascending = ascending,
-        };
-
-        blitz.parallelForWithGrain(num_merges, MergeCtx, merge_ctx, struct {
-            fn doMerges(ctx: MergeCtx, start_merge: usize, end_merge: usize) void {
-                for (start_merge..end_merge) |m| {
-                    const left = m * 2 * ctx.current_size;
-                    if (left >= ctx.len) break;
-
-                    const mid = @min(left + ctx.current_size, ctx.len);
-                    const right = @min(left + 2 * ctx.current_size, ctx.len);
-
-                    if (mid >= right) {
-                        @memcpy(ctx.dst[left..right], ctx.src[left..right]);
-                        continue;
-                    }
-
-                    // Merge [left..mid] and [mid..right]
-                    var i = left;
-                    var j = mid;
-                    var k = left;
-
-                    while (i < mid and j < right) {
-                        const cmp = if (ctx.ascending)
-                            ctx.data[ctx.src[i]] <= ctx.data[ctx.src[j]]
-                        else
-                            ctx.data[ctx.src[i]] >= ctx.data[ctx.src[j]];
-
-                        if (cmp) {
-                            ctx.dst[k] = ctx.src[i];
-                            i += 1;
-                        } else {
-                            ctx.dst[k] = ctx.src[j];
-                            j += 1;
-                        }
-                        k += 1;
-                    }
-
-                    @memcpy(ctx.dst[k .. k + (mid - i)], ctx.src[i..mid]);
-                    k += mid - i;
-                    @memcpy(ctx.dst[k .. k + (right - j)], ctx.src[j..right]);
-                }
-            }
-        }.doMerges, 1);
-
-        const tmp = src;
-        src = dst;
-        dst = tmp;
-        current_size *= 2;
-    }
-
-    // Copy back if needed
-    if (src.ptr != out_indices.ptr) {
-        @memcpy(out_indices, src);
-    }
-}
-
-/// Argsort - return indices that would sort the array
-/// Uses pair-based radix sort for f64 (fastest), fallback to comparison sort for others
-pub fn argsort(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
-
-    // For f64, use the new pair-based radix sort (O(n) and cache-friendly)
-    if (T == f64) {
-        argsortPairRadix(data, out_indices, ascending);
-        return;
-    }
-
-    // For other types, use comparison-based sort
-    // Initialize indices
-    for (out_indices[0..len], 0..) |*idx, i| {
-        idx.* = @intCast(i);
-    }
-
-    // Use parallel sort for large arrays
-    if (len >= 100000) {
-        argsortParallelInPlace(T, data, out_indices[0..len], ascending);
+        }.lessThan);
     } else {
-        // Use block sort for smaller arrays
-        if (ascending) {
-            std.mem.sort(u32, out_indices[0..len], data, struct {
-                fn lt(ctx: []const T, a: u32, b: u32) bool {
-                    return ctx[a] < ctx[b];
-                }
-            }.lt);
-        } else {
-            std.mem.sort(u32, out_indices[0..len], data, struct {
-                fn lt(ctx: []const T, a: u32, b: u32) bool {
-                    return ctx[a] > ctx[b];
-                }
-            }.lt);
-        }
+        std.mem.sort(u32, out_indices[0..len], data, struct {
+            fn lessThan(d: []const u32, a: u32, b: u32) bool {
+                return d[a] > d[b];
+            }
+        }.lessThan);
     }
 }
 
-/// Argsort for integer types - uses O(n) radix sort for i64/i32
-pub fn argsortInt(comptime T: type, data: []const T, out_indices: []u32, ascending: bool) void {
-    const len = @min(data.len, out_indices.len);
-    if (len == 0) return;
+// ============================================================================
+// Utility: Check if sorted (used by joins)
+// ============================================================================
 
-    // Use optimized radix sort for i64 and i32
-    if (T == i64) {
-        argsortRadixI64(data, out_indices, ascending);
-        return;
-    }
-    if (T == i32) {
-        argsortRadixI32(data, out_indices, ascending);
-        return;
-    }
-
-    // Fallback for other integer types
-    argsortSmallInt(T, data, out_indices, ascending);
+/// Check if i64 array is sorted ascending
+pub fn isSortedI64Keys(keys: []const i64) bool {
+    return isSortedI64(keys, true);
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-test "sorting - f64ToSortable preserves order" {
-    const a = f64ToSortable(-10.0);
-    const b = f64ToSortable(-1.0);
-    const c = f64ToSortable(0.0);
-    const d = f64ToSortable(1.0);
-    const e = f64ToSortable(10.0);
+test "argsortF64 basic" {
+    var data = [_]f64{ 5.0, 2.0, 8.0, 1.0, 9.0, 3.0, 7.0, 4.0, 6.0, 0.0 };
+    var indices: [10]u32 = undefined;
 
-    try std.testing.expect(a < b);
-    try std.testing.expect(b < c);
-    try std.testing.expect(c < d);
-    try std.testing.expect(d < e);
+    argsortF64(&data, &indices, true);
+
+    for (0..indices.len - 1) |i| {
+        try std.testing.expect(data[indices[i]] <= data[indices[i + 1]]);
+    }
 }
 
-test "sorting - floatToSortable preserves sort order" {
-    // Test that floatToSortable preserves relative ordering
-    const values = [_]f64{ -100.5, -1.0, 0.0, 1.0, 100.5 };
+test "argsortF64 already sorted" {
+    var data = [_]f64{ 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0 };
+    var indices: [10]u32 = undefined;
+
+    argsortF64(&data, &indices, true);
+
+    for (indices, 0..) |idx, i| {
+        try std.testing.expectEqual(@as(u32, @intCast(i)), idx);
+    }
+}
+
+test "argsortI64 basic" {
+    var data = [_]i64{ 5, -2, 8, -1, 9, 3, -7, 4, 6, 0 };
+    var indices: [10]u32 = undefined;
+
+    argsortI64(&data, &indices, true);
+
+    for (0..indices.len - 1) |i| {
+        try std.testing.expect(data[indices[i]] <= data[indices[i + 1]]);
+    }
+}
+
+test "sortF64 basic" {
+    var data = [_]f64{ 5.0, 2.0, 8.0, 1.0, 9.0 };
+    var out: [5]f64 = undefined;
+
+    sortF64(&data, &out, true);
+
+    try std.testing.expectEqual(@as(f64, 1.0), out[0]);
+    try std.testing.expectEqual(@as(f64, 2.0), out[1]);
+    try std.testing.expectEqual(@as(f64, 5.0), out[2]);
+    try std.testing.expectEqual(@as(f64, 8.0), out[3]);
+    try std.testing.expectEqual(@as(f64, 9.0), out[4]);
+}
+
+test "sortI64 basic" {
+    var data = [_]i64{ 5, -2, 8, -1, 9 };
+    var out: [5]i64 = undefined;
+
+    sortI64(&data, &out, true);
+
+    try std.testing.expectEqual(@as(i64, -2), out[0]);
+    try std.testing.expectEqual(@as(i64, -1), out[1]);
+    try std.testing.expectEqual(@as(i64, 5), out[2]);
+    try std.testing.expectEqual(@as(i64, 8), out[3]);
+    try std.testing.expectEqual(@as(i64, 9), out[4]);
+}
+
+test "floatToSortable preserves order" {
+    const values = [_]f64{ -std.math.inf(f64), -100.0, -1.0, -0.0, 0.0, 1.0, 100.0, std.math.inf(f64) };
 
     for (0..values.len - 1) |i| {
         const a = floatToSortable(values[i]);
@@ -1803,153 +1993,12 @@ test "sorting - floatToSortable preserves sort order" {
     }
 }
 
-test "sorting - argsort f64 ascending" {
-    const data = [_]f64{ 3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0 };
-    var indices: [8]u32 = undefined;
-
-    argsort(f64, &data, &indices, true);
-
-    // Verify sorted order
-    for (0..7) |i| {
-        try std.testing.expect(data[indices[i]] <= data[indices[i + 1]]);
-    }
-}
-
-test "sorting - argsort f64 descending" {
-    const data = [_]f64{ 3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0 };
-    var indices: [8]u32 = undefined;
-
-    argsort(f64, &data, &indices, false);
-
-    // Verify sorted order (descending)
-    for (0..7) |i| {
-        try std.testing.expect(data[indices[i]] >= data[indices[i + 1]]);
-    }
-}
-
-test "sorting - argsortInt i64" {
-    const data = [_]i64{ 5, 2, 8, 1, 9, 3 };
-    var indices: [6]u32 = undefined;
-
-    argsortInt(i64, &data, &indices, true);
-
-    // Expected order: 1, 2, 3, 5, 8, 9
-    try std.testing.expectEqual(@as(u32, 3), indices[0]); // index of 1
-    try std.testing.expectEqual(@as(u32, 1), indices[1]); // index of 2
-    try std.testing.expectEqual(@as(u32, 5), indices[2]); // index of 3
-}
-
-test "sorting - argsortRadixF64 small array" {
-    const data = [_]f64{ 5.5, 2.2, 8.8, 1.1 };
-    var indices: [4]u32 = undefined;
-
-    argsortRadixF64(&data, &indices, true);
-
-    // Verify sorted order
-    try std.testing.expect(data[indices[0]] <= data[indices[1]]);
-    try std.testing.expect(data[indices[1]] <= data[indices[2]]);
-    try std.testing.expect(data[indices[2]] <= data[indices[3]]);
-}
-
-test "sorting - empty array" {
-    const data: []const f64 = &[_]f64{};
-    var indices: [0]u32 = undefined;
-
-    argsort(f64, data, &indices, true);
-    // Should not crash
-}
-
-test "sorting - single element" {
-    const data = [_]f64{42.0};
-    var indices: [1]u32 = undefined;
-
-    argsort(f64, &data, &indices, true);
-    try std.testing.expectEqual(@as(u32, 0), indices[0]);
-}
-
-test "sorting - i64ToSortable preserves order" {
-    // Test that i64ToSortable preserves relative ordering
-    const values = [_]i64{ -1000, -1, 0, 1, 1000 };
+test "i64ToSortable preserves order" {
+    const values = [_]i64{ std.math.minInt(i64), -100, -1, 0, 1, 100, std.math.maxInt(i64) };
 
     for (0..values.len - 1) |i| {
         const a = i64ToSortable(values[i]);
         const b = i64ToSortable(values[i + 1]);
         try std.testing.expect(a < b);
-    }
-}
-
-test "sorting - i64ToSortable edge cases" {
-    // Test min and max values
-    const min_val = i64ToSortable(std.math.minInt(i64));
-    const neg_one = i64ToSortable(-1);
-    const zero = i64ToSortable(0);
-    const one = i64ToSortable(1);
-    const max_val = i64ToSortable(std.math.maxInt(i64));
-
-    try std.testing.expect(min_val < neg_one);
-    try std.testing.expect(neg_one < zero);
-    try std.testing.expect(zero < one);
-    try std.testing.expect(one < max_val);
-}
-
-test "sorting - argsortRadixI64 ascending" {
-    const data = [_]i64{ 5, -2, 8, -10, 0, 3 };
-    var indices: [6]u32 = undefined;
-
-    argsortRadixI64(&data, &indices, true);
-
-    // Expected order: -10, -2, 0, 3, 5, 8
-    // Verify sorted order
-    for (0..5) |i| {
-        try std.testing.expect(data[indices[i]] <= data[indices[i + 1]]);
-    }
-}
-
-test "sorting - argsortRadixI64 descending" {
-    const data = [_]i64{ 5, -2, 8, -10, 0, 3 };
-    var indices: [6]u32 = undefined;
-
-    argsortRadixI64(&data, &indices, false);
-
-    // Verify sorted order (descending)
-    for (0..5) |i| {
-        try std.testing.expect(data[indices[i]] >= data[indices[i + 1]]);
-    }
-}
-
-test "sorting - argsortRadixI32 ascending" {
-    const data = [_]i32{ 5, -2, 8, -10, 0, 3 };
-    var indices: [6]u32 = undefined;
-
-    argsortRadixI32(&data, &indices, true);
-
-    // Verify sorted order
-    for (0..5) |i| {
-        try std.testing.expect(data[indices[i]] <= data[indices[i + 1]]);
-    }
-}
-
-test "sorting - argsortRadixI64 larger array" {
-    // Test with array larger than small threshold (256)
-    const allocator = std.testing.allocator;
-    const n: usize = 1000;
-
-    const data = try allocator.alloc(i64, n);
-    defer allocator.free(data);
-    const indices = try allocator.alloc(u32, n);
-    defer allocator.free(indices);
-
-    // Initialize with some pattern including negative numbers
-    var prng = std.Random.DefaultPrng.init(42);
-    const rng = prng.random();
-    for (data) |*d| {
-        d.* = rng.int(i64);
-    }
-
-    argsortRadixI64(data, indices, true);
-
-    // Verify sorted order
-    for (0..n - 1) |i| {
-        try std.testing.expect(data[indices[i]] <= data[indices[i + 1]]);
     }
 }

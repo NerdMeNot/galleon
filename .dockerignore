@@ -1,0 +1,28 @@
+# Build artifacts and caches
+core/.zig-cache/
+core/zig-cache/
+core/zig-out/
+**/.zig-cache/
+
+# Go caches
+go/vendor/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+*.out
+
+# Large generated files
+*.a
+*.so
+*.dylib

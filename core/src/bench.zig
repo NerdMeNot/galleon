@@ -103,7 +103,7 @@ pub fn main() !void {
         const sort_iterations: usize = 10;
         var timer = try std.time.Timer.start();
         for (0..sort_iterations) |_| {
-            simd.argsort(f64, data, indices, true);
+            simd.argsortF64(data, indices, true);
             std.mem.doNotOptimizeAway(indices.ptr);
         }
         const elapsed = timer.read();

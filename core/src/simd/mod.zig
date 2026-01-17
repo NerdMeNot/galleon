@@ -186,37 +186,55 @@ pub const optimalSumByGroup = groupby_agg.optimalSumByGroup;
 pub const optimalMinByGroup = groupby_agg.optimalMinByGroup;
 pub const optimalMaxByGroup = groupby_agg.optimalMaxByGroup;
 
-// Re-export sorting functions
-pub const argsort = sorting.argsort;
-pub const argsortInt = sorting.argsortInt;
-pub const argsortParallel = sorting.argsortParallel;
-pub const argsortRadixF64 = sorting.argsortRadixF64;
-pub const argsortRadixI64 = sorting.argsortRadixI64;
-pub const argsortRadixI64Parallel = sorting.argsortRadixI64Parallel;
-pub const argsortRadixI32 = sorting.argsortRadixI32;
-pub const argsortParallelMerge = sorting.argsortParallelMerge;
+// Re-export sorting functions (64-bit optimized radix sort)
+pub const argsortF64 = sorting.argsortF64;
+pub const argsortI64 = sorting.argsortI64;
+pub const sortF64 = sorting.sortF64;
+pub const sortI64 = sorting.sortI64;
+
+// Re-export sorting functions (32-bit using std.sort)
+pub const argsortI32 = sorting.argsortI32;
+pub const argsortF32 = sorting.argsortF32;
+pub const sortI32 = sorting.sortI32;
+pub const sortF32 = sorting.sortF32;
+
+// Re-export sorting functions (unsigned integers)
+pub const argsortU64 = sorting.argsortU64;
+pub const argsortU32 = sorting.argsortU32;
+
+// Key conversion utilities
+pub const floatToSortable = sorting.floatToSortable;
+pub const i64ToSortable = sorting.i64ToSortable;
+pub const isSortedI64Keys = sorting.isSortedI64Keys;
+
+// Parallel gather functions
+pub const gatherF64Parallel = sorting.gatherF64;
+pub const gatherI64Parallel = sorting.gatherI64;
 
 // Re-export join types and functions
 pub const InnerJoinResult = joins.InnerJoinResult;
 pub const LeftJoinResult = joins.LeftJoinResult;
-pub const SwissJoinTable = joins.SwissJoinTable;
-pub const buildJoinHashTable = joins.buildJoinHashTable;
-pub const probeJoinHashTable = joins.probeJoinHashTable;
+pub const JoinSwissTable = joins.JoinSwissTable;
+pub const IdxVec = joins.IdxVec;
+
+// Core join functions
 pub const innerJoinI64 = joins.innerJoinI64;
-pub const innerJoinI64SinglePass = joins.innerJoinI64SinglePass;
-pub const innerJoinI64Swiss = joins.innerJoinI64Swiss;
-pub const parallelInnerJoinI64 = joins.parallelInnerJoinI64;
-pub const innerJoinI64LockFree = joins.innerJoinI64LockFree;
-pub const innerJoinI64Radix = joins.innerJoinI64Radix;
 pub const leftJoinI64 = joins.leftJoinI64;
+pub const parallelInnerJoinI64 = joins.parallelInnerJoinI64;
 pub const parallelLeftJoinI64 = joins.parallelLeftJoinI64;
-pub const leftJoinI64Radix = joins.leftJoinI64Radix;
-pub const innerJoinI64SortMerge = joins.innerJoinI64SortMerge;
-pub const leftJoinI64SortMerge = joins.leftJoinI64SortMerge;
-pub const innerJoinI64TwoPass = joins.innerJoinI64TwoPass;
-pub const innerJoinI64Simd = joins.innerJoinI64Simd;
+
+// SwissTable-based joins (SIMD-accelerated)
+pub const innerJoinSwiss = joins.innerJoinSwiss;
+pub const leftJoinSwiss = joins.leftJoinSwiss;
+pub const parallelInnerJoinSwiss = joins.parallelInnerJoinSwiss;
+pub const parallelLeftJoinSwiss = joins.parallelLeftJoinSwiss;
+
+// Partitioned parallel build
+pub const PartitionedJoinTables = joins.PartitionedJoinTables;
+pub const parallelBuildPartitionedTables = joins.parallelBuildPartitionedTables;
+
+// Utility
 pub const isSortedI64 = joins.isSortedI64;
-pub const parallelAggregateSumF64ByGroup = joins.parallelAggregateSumF64ByGroup;
 
 // ============================================================================
 // Tests - run all submodule tests

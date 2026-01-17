@@ -1,1454 +1,1607 @@
 package galleon
 
 /*
+#cgo CFLAGS: -I${SRCDIR}/../core/include
+#cgo LDFLAGS: -L${SRCDIR}/../core/zig-out/lib -lgalleon
 #include "galleon.h"
 #include <stdlib.h>
 */
 import "C"
-
 import (
-	"fmt"
 	"runtime"
 	"unsafe"
 )
 
-// Series represents a single column of data with a name and type
+// Series is a Series backed by Arrow memory layout.
+// All Arrow operations are performed in Zig - Go only sends raw data
+// and receives results. This ensures zero-copy SIMD operations.
 type Series struct {
+	handle unsafe.Pointer // *C.ManagedArrowArray
 	name   string
 	dtype  DType
 	length int
-
-	// Underlying data - only one of these is non-nil based on dtype
-	f64Col  *C.ColumnF64
-	f32Col  *C.ColumnF32
-	i64Col  *C.ColumnI64
-	i32Col  *C.ColumnI32
-	boolCol *C.ColumnBool
-
-	// ChunkedColumn storage (V2) - cache-friendly chunk-based storage
-	// When set, operations use chunk-optimized algorithms
-	chunkedF64 *ChunkedColumnF64
-
-	// String data is stored in Go (Zig doesn't handle strings well via FFI)
-	strData []string
-
-	// Categorical data (dictionary-encoded strings)
-	catData *CategoricalData
 }
 
-// CategoricalData represents dictionary-encoded string data.
-// Strings are stored once in Dictionary, and data is stored as indices.
-// This is much more efficient for columns with repeated string values.
-type CategoricalData struct {
-	Indices    []int32          // The actual data: indices into Dictionary
-	Dictionary []string         // Unique category values
-	indexMap   map[string]int32 // For encoding: string -> index
-}
-
-// NewSeriesFloat64 creates a new Float64 series from a slice
-func NewSeriesFloat64(name string, data []float64) *Series {
+// NewSeriesF64 creates a Float64 Series from a Go slice.
+// The data is copied to Zig-managed Arrow memory.
+func NewSeriesF64(name string, data []float64) *Series {
 	if len(data) == 0 {
-		return &Series{name: name, dtype: Float64, length: 0}
+		return &Series{
+			handle: nil,
+			name:   name,
+			dtype:  Float64,
+			length: 0,
+		}
 	}
 
-	ptr := C.galleon_column_f64_create(
+	handle := C.galleon_series_create_f64(
 		(*C.double)(unsafe.Pointer(&data[0])),
 		C.size_t(len(data)),
 	)
-	if ptr == nil {
+
+	if handle == nil {
 		return nil
 	}
 
 	s := &Series{
+		handle: unsafe.Pointer(handle),
 		name:   name,
 		dtype:  Float64,
 		length: len(data),
-		f64Col: ptr,
 	}
-	runtime.SetFinalizer(s, (*Series).free)
+
+	// Set finalizer to free Zig memory when GC collects this
+	runtime.SetFinalizer(s, func(s *Series) {
+		s.Release()
+	})
+
 	return s
 }
 
-// NewSeriesFloat64Chunked creates a Float64 series backed by ChunkedColumn.
-// ChunkedColumn stores data in L2-cache-sized chunks (64K elements = 512KB)
-// for optimal cache performance on large datasets.
-// Use this for datasets > 100K elements where operations like sort and filter benefit.
-func NewSeriesFloat64Chunked(name string, data []float64) *Series {
-	chunked := NewChunkedColumnF64(data)
-	if chunked == nil {
-		return nil
-	}
-
-	s := &Series{
-		name:       name,
-		dtype:      Float64,
-		length:     len(data),
-		chunkedF64: chunked,
-	}
-	// Note: chunkedF64 has its own finalizer, no need to set one for the Series
-	return s
-}
-
-// IsChunked returns true if the series uses chunked storage (V2).
-func (s *Series) IsChunked() bool {
-	return s.chunkedF64 != nil
-}
-
-// NewSeriesFloat32 creates a new Float32 series from a slice
-func NewSeriesFloat32(name string, data []float32) *Series {
+// NewSeriesI64 creates an Int64 Series from a Go slice.
+func NewSeriesI64(name string, data []int64) *Series {
 	if len(data) == 0 {
-		return &Series{name: name, dtype: Float32, length: 0}
+		return &Series{
+			handle: nil,
+			name:   name,
+			dtype:  Int64,
+			length: 0,
+		}
 	}
 
-	ptr := C.galleon_column_f32_create(
-		(*C.float)(unsafe.Pointer(&data[0])),
-		C.size_t(len(data)),
-	)
-	if ptr == nil {
-		return nil
-	}
-
-	s := &Series{
-		name:   name,
-		dtype:  Float32,
-		length: len(data),
-		f32Col: ptr,
-	}
-	runtime.SetFinalizer(s, (*Series).free)
-	return s
-}
-
-// NewSeriesInt64 creates a new Int64 series from a slice
-func NewSeriesInt64(name string, data []int64) *Series {
-	if len(data) == 0 {
-		return &Series{name: name, dtype: Int64, length: 0}
-	}
-
-	ptr := C.galleon_column_i64_create(
+	handle := C.galleon_series_create_i64(
 		(*C.int64_t)(unsafe.Pointer(&data[0])),
 		C.size_t(len(data)),
 	)
-	if ptr == nil {
+
+	if handle == nil {
 		return nil
 	}
 
 	s := &Series{
+		handle: unsafe.Pointer(handle),
 		name:   name,
 		dtype:  Int64,
 		length: len(data),
-		i64Col: ptr,
 	}
-	runtime.SetFinalizer(s, (*Series).free)
+
+	runtime.SetFinalizer(s, func(s *Series) {
+		s.Release()
+	})
+
 	return s
 }
 
-// NewSeriesInt32 creates a new Int32 series from a slice
-func NewSeriesInt32(name string, data []int32) *Series {
+// NewSeriesF64WithNulls creates a Float64 Series with null values.
+// The valid slice indicates which values are valid (true) vs null (false).
+func NewSeriesF64WithNulls(name string, data []float64, valid []bool) *Series {
 	if len(data) == 0 {
-		return &Series{name: name, dtype: Int32, length: 0}
+		return &Series{
+			handle: nil,
+			name:   name,
+			dtype:  Float64,
+			length: 0,
+		}
 	}
 
-	ptr := C.galleon_column_i32_create(
+	// Convert bool slice to packed bitmap (Arrow format: LSB first)
+	bitmapLen := (len(data) + 7) / 8
+	bitmap := make([]byte, bitmapLen)
+	var nullCount int64
+
+	for i, isValid := range valid {
+		if isValid {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			bitmap[byteIdx] |= 1 << bitIdx
+		} else {
+			nullCount++
+		}
+	}
+
+	handle := C.galleon_series_create_f64_with_nulls(
+		(*C.double)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		(*C.uint8_t)(unsafe.Pointer(&bitmap[0])),
+		C.size_t(len(bitmap)),
+		C.int64_t(nullCount),
+	)
+
+	if handle == nil {
+		return nil
+	}
+
+	s := &Series{
+		handle: unsafe.Pointer(handle),
+		name:   name,
+		dtype:  Float64,
+		length: len(data),
+	}
+
+	runtime.SetFinalizer(s, func(s *Series) {
+		s.Release()
+	})
+
+	return s
+}
+
+// NewSeriesI64WithNulls creates an Int64 Series with null values.
+func NewSeriesI64WithNulls(name string, data []int64, valid []bool) *Series {
+	if len(data) == 0 {
+		return &Series{
+			handle: nil,
+			name:   name,
+			dtype:  Int64,
+			length: 0,
+		}
+	}
+
+	// Convert bool slice to packed bitmap
+	bitmapLen := (len(data) + 7) / 8
+	bitmap := make([]byte, bitmapLen)
+	var nullCount int64
+
+	for i, isValid := range valid {
+		if isValid {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			bitmap[byteIdx] |= 1 << bitIdx
+		} else {
+			nullCount++
+		}
+	}
+
+	handle := C.galleon_series_create_i64_with_nulls(
+		(*C.int64_t)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		(*C.uint8_t)(unsafe.Pointer(&bitmap[0])),
+		C.size_t(len(bitmap)),
+		C.int64_t(nullCount),
+	)
+
+	if handle == nil {
+		return nil
+	}
+
+	s := &Series{
+		handle: unsafe.Pointer(handle),
+		name:   name,
+		dtype:  Int64,
+		length: len(data),
+	}
+
+	runtime.SetFinalizer(s, func(s *Series) {
+		s.Release()
+	})
+
+	return s
+}
+
+// NewSeriesF32 creates a Float32 Series from a Go slice.
+func NewSeriesF32(name string, data []float32) *Series {
+	if len(data) == 0 {
+		return &Series{handle: nil, name: name, dtype: Float32, length: 0}
+	}
+
+	handle := C.galleon_series_create_f32(
+		(*C.float)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+	)
+
+	if handle == nil {
+		return nil
+	}
+
+	s := &Series{handle: unsafe.Pointer(handle), name: name, dtype: Float32, length: len(data)}
+	runtime.SetFinalizer(s, func(s *Series) { s.Release() })
+	return s
+}
+
+// NewSeriesI32 creates an Int32 Series from a Go slice.
+func NewSeriesI32(name string, data []int32) *Series {
+	if len(data) == 0 {
+		return &Series{handle: nil, name: name, dtype: Int32, length: 0}
+	}
+
+	handle := C.galleon_series_create_i32(
 		(*C.int32_t)(unsafe.Pointer(&data[0])),
 		C.size_t(len(data)),
 	)
-	if ptr == nil {
+
+	if handle == nil {
 		return nil
 	}
 
-	s := &Series{
-		name:   name,
-		dtype:  Int32,
-		length: len(data),
-		i32Col: ptr,
-	}
-	runtime.SetFinalizer(s, (*Series).free)
+	s := &Series{handle: unsafe.Pointer(handle), name: name, dtype: Int32, length: len(data)}
+	runtime.SetFinalizer(s, func(s *Series) { s.Release() })
 	return s
 }
 
-// NewSeriesBool creates a new Bool series from a slice
-func NewSeriesBool(name string, data []bool) *Series {
+// NewSeriesU64 creates a UInt64 Series from a Go slice.
+func NewSeriesU64(name string, data []uint64) *Series {
 	if len(data) == 0 {
-		return &Series{name: name, dtype: Bool, length: 0}
+		return &Series{handle: nil, name: name, dtype: UInt64, length: 0}
 	}
 
-	ptr := C.galleon_column_bool_create(
-		(*C.bool)(unsafe.Pointer(&data[0])),
+	handle := C.galleon_series_create_u64(
+		(*C.uint64_t)(unsafe.Pointer(&data[0])),
 		C.size_t(len(data)),
 	)
-	if ptr == nil {
+
+	if handle == nil {
 		return nil
 	}
 
-	s := &Series{
-		name:    name,
-		dtype:   Bool,
-		length:  len(data),
-		boolCol: ptr,
-	}
-	runtime.SetFinalizer(s, (*Series).free)
+	s := &Series{handle: unsafe.Pointer(handle), name: name, dtype: UInt64, length: len(data)}
+	runtime.SetFinalizer(s, func(s *Series) { s.Release() })
 	return s
 }
 
-// NewSeriesString creates a new String series from a slice
-func NewSeriesString(name string, data []string) *Series {
+// NewSeriesU32 creates a UInt32 Series from a Go slice.
+func NewSeriesU32(name string, data []uint32) *Series {
 	if len(data) == 0 {
-		return &Series{name: name, dtype: String, length: 0}
+		return &Series{handle: nil, name: name, dtype: UInt32, length: 0}
 	}
 
-	// Copy the data
-	strData := make([]string, len(data))
-	copy(strData, data)
+	handle := C.galleon_series_create_u32(
+		(*C.uint32_t)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+	)
 
-	return &Series{
-		name:    name,
-		dtype:   String,
-		length:  len(data),
-		strData: strData,
+	if handle == nil {
+		return nil
 	}
+
+	s := &Series{handle: unsafe.Pointer(handle), name: name, dtype: UInt32, length: len(data)}
+	runtime.SetFinalizer(s, func(s *Series) { s.Release() })
+	return s
 }
 
-// NewSeriesCategorical creates a new Categorical series from string data.
-// The data is dictionary-encoded: unique values are stored once in a dictionary,
-// and the actual data consists of integer indices into the dictionary.
-// This is much more efficient for columns with many repeated values.
-func NewSeriesCategorical(name string, data []string) *Series {
+// NewSeriesF32WithNulls creates a Float32 Series with null values.
+func NewSeriesF32WithNulls(name string, data []float32, valid []bool) *Series {
 	if len(data) == 0 {
-		return &Series{
-			name:   name,
-			dtype:  Categorical,
-			length: 0,
-			catData: &CategoricalData{
-				Indices:    []int32{},
-				Dictionary: []string{},
-				indexMap:   make(map[string]int32),
-			},
-		}
+		return &Series{handle: nil, name: name, dtype: Float32, length: 0}
 	}
 
-	// Build dictionary and encode indices
-	indexMap := make(map[string]int32)
-	dictionary := make([]string, 0)
-	indices := make([]int32, len(data))
+	bitmapLen := (len(data) + 7) / 8
+	bitmap := make([]byte, bitmapLen)
+	var nullCount int64
 
-	for i, val := range data {
-		if idx, exists := indexMap[val]; exists {
-			indices[i] = idx
+	for i, isValid := range valid {
+		if isValid {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			bitmap[byteIdx] |= 1 << bitIdx
 		} else {
-			idx := int32(len(dictionary))
-			indexMap[val] = idx
-			dictionary = append(dictionary, val)
-			indices[i] = idx
+			nullCount++
 		}
 	}
 
-	return &Series{
-		name:   name,
-		dtype:  Categorical,
-		length: len(data),
-		catData: &CategoricalData{
-			Indices:    indices,
-			Dictionary: dictionary,
-			indexMap:   indexMap,
-		},
+	handle := C.galleon_series_create_f32_with_nulls(
+		(*C.float)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		(*C.uint8_t)(unsafe.Pointer(&bitmap[0])),
+		C.size_t(len(bitmap)),
+		C.int64_t(nullCount),
+	)
+
+	if handle == nil {
+		return nil
 	}
+
+	s := &Series{handle: unsafe.Pointer(handle), name: name, dtype: Float32, length: len(data)}
+	runtime.SetFinalizer(s, func(s *Series) { s.Release() })
+	return s
 }
 
-// NewSeriesCategoricalWithCategories creates a Categorical series with predefined categories.
-// This is useful when you want specific category ordering or when categories are known in advance.
-func NewSeriesCategoricalWithCategories(name string, data []string, categories []string) (*Series, error) {
-	// Build index map from categories
-	indexMap := make(map[string]int32, len(categories))
-	for i, cat := range categories {
-		if _, exists := indexMap[cat]; exists {
-			return nil, fmt.Errorf("duplicate category: %s", cat)
+// NewSeriesI32WithNulls creates an Int32 Series with null values.
+func NewSeriesI32WithNulls(name string, data []int32, valid []bool) *Series {
+	if len(data) == 0 {
+		return &Series{handle: nil, name: name, dtype: Int32, length: 0}
+	}
+
+	bitmapLen := (len(data) + 7) / 8
+	bitmap := make([]byte, bitmapLen)
+	var nullCount int64
+
+	for i, isValid := range valid {
+		if isValid {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			bitmap[byteIdx] |= 1 << bitIdx
+		} else {
+			nullCount++
 		}
-		indexMap[cat] = int32(i)
 	}
 
-	// Encode data
-	indices := make([]int32, len(data))
-	for i, val := range data {
-		idx, exists := indexMap[val]
-		if !exists {
-			return nil, fmt.Errorf("value %q not in categories", val)
+	handle := C.galleon_series_create_i32_with_nulls(
+		(*C.int32_t)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		(*C.uint8_t)(unsafe.Pointer(&bitmap[0])),
+		C.size_t(len(bitmap)),
+		C.int64_t(nullCount),
+	)
+
+	if handle == nil {
+		return nil
+	}
+
+	s := &Series{handle: unsafe.Pointer(handle), name: name, dtype: Int32, length: len(data)}
+	runtime.SetFinalizer(s, func(s *Series) { s.Release() })
+	return s
+}
+
+// NewSeriesU64WithNulls creates a UInt64 Series with null values.
+func NewSeriesU64WithNulls(name string, data []uint64, valid []bool) *Series {
+	if len(data) == 0 {
+		return &Series{handle: nil, name: name, dtype: UInt64, length: 0}
+	}
+
+	bitmapLen := (len(data) + 7) / 8
+	bitmap := make([]byte, bitmapLen)
+	var nullCount int64
+
+	for i, isValid := range valid {
+		if isValid {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			bitmap[byteIdx] |= 1 << bitIdx
+		} else {
+			nullCount++
 		}
-		indices[i] = idx
 	}
 
-	// Copy categories
-	dict := make([]string, len(categories))
-	copy(dict, categories)
+	handle := C.galleon_series_create_u64_with_nulls(
+		(*C.uint64_t)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		(*C.uint8_t)(unsafe.Pointer(&bitmap[0])),
+		C.size_t(len(bitmap)),
+		C.int64_t(nullCount),
+	)
 
-	return &Series{
-		name:   name,
-		dtype:  Categorical,
-		length: len(data),
-		catData: &CategoricalData{
-			Indices:    indices,
-			Dictionary: dict,
-			indexMap:   indexMap,
-		},
-	}, nil
+	if handle == nil {
+		return nil
+	}
+
+	s := &Series{handle: unsafe.Pointer(handle), name: name, dtype: UInt64, length: len(data)}
+	runtime.SetFinalizer(s, func(s *Series) { s.Release() })
+	return s
 }
 
-// NewSeries creates a Series from any supported slice type.
-// This is a convenience constructor that infers the type from the input.
-// Supported types: []float64, []float32, []int64, []int32, []bool, []string
-func NewSeries(name string, data interface{}) (*Series, error) {
-	switch v := data.(type) {
-	case []float64:
-		return NewSeriesFloat64(name, v), nil
-	case []float32:
-		return NewSeriesFloat32(name, v), nil
-	case []int64:
-		return NewSeriesInt64(name, v), nil
-	case []int32:
-		return NewSeriesInt32(name, v), nil
-	case []int:
-		// Convert []int to []int64
-		data64 := make([]int64, len(v))
-		for i, val := range v {
-			data64[i] = int64(val)
+// NewSeriesU32WithNulls creates a UInt32 Series with null values.
+func NewSeriesU32WithNulls(name string, data []uint32, valid []bool) *Series {
+	if len(data) == 0 {
+		return &Series{handle: nil, name: name, dtype: UInt32, length: 0}
+	}
+
+	bitmapLen := (len(data) + 7) / 8
+	bitmap := make([]byte, bitmapLen)
+	var nullCount int64
+
+	for i, isValid := range valid {
+		if isValid {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			bitmap[byteIdx] |= 1 << bitIdx
+		} else {
+			nullCount++
 		}
-		return NewSeriesInt64(name, data64), nil
-	case []bool:
-		return NewSeriesBool(name, v), nil
-	case []string:
-		return NewSeriesString(name, v), nil
-	default:
-		return nil, fmt.Errorf("unsupported data type: %T", data)
+	}
+
+	handle := C.galleon_series_create_u32_with_nulls(
+		(*C.uint32_t)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		(*C.uint8_t)(unsafe.Pointer(&bitmap[0])),
+		C.size_t(len(bitmap)),
+		C.int64_t(nullCount),
+	)
+
+	if handle == nil {
+		return nil
+	}
+
+	s := &Series{handle: unsafe.Pointer(handle), name: name, dtype: UInt32, length: len(data)}
+	runtime.SetFinalizer(s, func(s *Series) { s.Release() })
+	return s
+}
+
+// Release frees the Zig-managed Arrow memory.
+// This is called automatically by the finalizer, but can be called
+// explicitly for deterministic cleanup.
+func (s *Series) Release() {
+	if s.handle != nil {
+		C.galleon_series_destroy((*C.ManagedArrowArray)(s.handle))
+		s.handle = nil
 	}
 }
 
-// free releases the underlying Zig memory
-func (s *Series) free() {
-	if s.f64Col != nil {
-		C.galleon_column_f64_destroy(s.f64Col)
-		s.f64Col = nil
-	}
-	if s.f32Col != nil {
-		C.galleon_column_f32_destroy(s.f32Col)
-		s.f32Col = nil
-	}
-	if s.i64Col != nil {
-		C.galleon_column_i64_destroy(s.i64Col)
-		s.i64Col = nil
-	}
-	if s.i32Col != nil {
-		C.galleon_column_i32_destroy(s.i32Col)
-		s.i32Col = nil
-	}
-	if s.boolCol != nil {
-		C.galleon_column_bool_destroy(s.boolCol)
-		s.boolCol = nil
-	}
-}
-
-// Name returns the series name
+// Name returns the series name.
 func (s *Series) Name() string {
 	return s.name
 }
 
-// Rename returns a new series with a different name (shares underlying data)
-func (s *Series) Rename(name string) *Series {
-	newS := &Series{
-		name:    name,
-		dtype:   s.dtype,
-		length:  s.length,
-		f64Col:  s.f64Col,
-		f32Col:  s.f32Col,
-		i64Col:  s.i64Col,
-		i32Col:  s.i32Col,
-		boolCol: s.boolCol,
-		strData: s.strData,
-	}
-	// Note: This creates a shallow copy - both series share the same underlying data
-	// The finalizer should only be on one of them to avoid double-free
-	// For now, we don't set a finalizer on the copy
-	return newS
-}
-
-// DType returns the data type of the series
+// DType returns the data type.
 func (s *Series) DType() DType {
 	return s.dtype
 }
 
-// Len returns the number of elements in the series
+// Len returns the number of elements.
 func (s *Series) Len() int {
-	return s.length
+	if s.handle == nil {
+		return 0
+	}
+	return int(C.galleon_series_len((*C.ManagedArrowArray)(s.handle)))
 }
 
-// IsEmpty returns true if the series has no elements
-func (s *Series) IsEmpty() bool {
-	return s.length == 0
+// NullCount returns the number of null values.
+func (s *Series) NullCount() int64 {
+	if s.handle == nil {
+		return 0
+	}
+	return int64(C.galleon_series_null_count((*C.ManagedArrowArray)(s.handle)))
 }
 
-// ============================================================================
-// Data Access Methods
-// ============================================================================
-
-// Float64 returns the underlying data as []float64
-func (s *Series) Float64() []float64 {
-	if s.dtype != Float64 || s.length == 0 {
-		return nil
+// HasNulls returns true if the series has any null values.
+func (s *Series) HasNulls() bool {
+	if s.handle == nil {
+		return false
 	}
-	// For chunked storage, materialize the data
-	if s.chunkedF64 != nil {
-		return s.chunkedF64.ToSlice()
-	}
-	if s.f64Col == nil {
-		return nil
-	}
-	ptr := C.galleon_column_f64_data(s.f64Col)
-	return unsafe.Slice((*float64)(unsafe.Pointer(ptr)), s.length)
+	return bool(C.galleon_series_has_nulls((*C.ManagedArrowArray)(s.handle)))
 }
 
-// Float32 returns the underlying data as []float32
-func (s *Series) Float32() []float32 {
-	if s.dtype != Float32 || s.f32Col == nil || s.length == 0 {
-		return nil
+// Sum returns the sum of all values (skipping nulls).
+func (s *Series) Sum() float64 {
+	if s.handle == nil {
+		return 0
 	}
-	ptr := C.galleon_column_f32_data(s.f32Col)
-	return unsafe.Slice((*float32)(unsafe.Pointer(ptr)), s.length)
+	switch s.dtype {
+	case Float64:
+		return float64(C.galleon_series_sum_f64((*C.ManagedArrowArray)(s.handle)))
+	case Float32:
+		return float64(C.galleon_series_sum_f32((*C.ManagedArrowArray)(s.handle)))
+	case Int64:
+		return float64(C.galleon_series_sum_i64((*C.ManagedArrowArray)(s.handle)))
+	case Int32:
+		return float64(C.galleon_series_sum_i32((*C.ManagedArrowArray)(s.handle)))
+	case UInt64:
+		return float64(C.galleon_series_sum_u64((*C.ManagedArrowArray)(s.handle)))
+	case UInt32:
+		return float64(C.galleon_series_sum_u32((*C.ManagedArrowArray)(s.handle)))
+	default:
+		return 0
+	}
 }
 
-// Int64 returns the underlying data as []int64
-func (s *Series) Int64() []int64 {
-	if s.dtype != Int64 || s.i64Col == nil || s.length == 0 {
-		return nil
+// SumI64 returns the sum as int64 (for Int64 series).
+func (s *Series) SumI64() int64 {
+	if s.handle == nil || s.dtype != Int64 {
+		return 0
 	}
-	ptr := C.galleon_column_i64_data(s.i64Col)
-	return unsafe.Slice((*int64)(unsafe.Pointer(ptr)), s.length)
+	return int64(C.galleon_series_sum_i64((*C.ManagedArrowArray)(s.handle)))
 }
 
-// Int32 returns the underlying data as []int32
-func (s *Series) Int32() []int32 {
-	if s.dtype != Int32 || s.i32Col == nil || s.length == 0 {
-		return nil
+// Min returns the minimum value (skipping nulls).
+func (s *Series) Min() float64 {
+	if s.handle == nil {
+		return 0
 	}
-	ptr := C.galleon_column_i32_data(s.i32Col)
-	return unsafe.Slice((*int32)(unsafe.Pointer(ptr)), s.length)
+	switch s.dtype {
+	case Float64:
+		return float64(C.galleon_series_min_f64((*C.ManagedArrowArray)(s.handle)))
+	case Float32:
+		return float64(C.galleon_series_min_f32((*C.ManagedArrowArray)(s.handle)))
+	case Int64:
+		return float64(C.galleon_series_min_i64((*C.ManagedArrowArray)(s.handle)))
+	case Int32:
+		return float64(C.galleon_series_min_i32((*C.ManagedArrowArray)(s.handle)))
+	case UInt64:
+		return float64(C.galleon_series_min_u64((*C.ManagedArrowArray)(s.handle)))
+	case UInt32:
+		return float64(C.galleon_series_min_u32((*C.ManagedArrowArray)(s.handle)))
+	default:
+		return 0
+	}
 }
 
-// Bool returns the underlying data as []bool
-func (s *Series) Bool() []bool {
-	if s.dtype != Bool || s.boolCol == nil || s.length == 0 {
-		return nil
+// MinI64 returns the minimum as int64 (for Int64 series).
+func (s *Series) MinI64() int64 {
+	if s.handle == nil || s.dtype != Int64 {
+		return 0
 	}
-	ptr := C.galleon_column_bool_data(s.boolCol)
-	return unsafe.Slice((*bool)(unsafe.Pointer(ptr)), s.length)
+	return int64(C.galleon_series_min_i64((*C.ManagedArrowArray)(s.handle)))
 }
 
-// Strings returns the underlying data as []string
-func (s *Series) Strings() []string {
-	if s.dtype != String || s.length == 0 {
-		return nil
+// Max returns the maximum value (skipping nulls).
+func (s *Series) Max() float64 {
+	if s.handle == nil {
+		return 0
 	}
-	return s.strData
+	switch s.dtype {
+	case Float64:
+		return float64(C.galleon_series_max_f64((*C.ManagedArrowArray)(s.handle)))
+	case Float32:
+		return float64(C.galleon_series_max_f32((*C.ManagedArrowArray)(s.handle)))
+	case Int64:
+		return float64(C.galleon_series_max_i64((*C.ManagedArrowArray)(s.handle)))
+	case Int32:
+		return float64(C.galleon_series_max_i32((*C.ManagedArrowArray)(s.handle)))
+	case UInt64:
+		return float64(C.galleon_series_max_u64((*C.ManagedArrowArray)(s.handle)))
+	case UInt32:
+		return float64(C.galleon_series_max_u32((*C.ManagedArrowArray)(s.handle)))
+	default:
+		return 0
+	}
 }
 
-// Categories returns the unique category values for a Categorical series.
-// Returns nil for non-categorical series.
-func (s *Series) Categories() []string {
-	if s.dtype != Categorical || s.catData == nil {
+// MaxI64 returns the maximum as int64 (for Int64 series).
+func (s *Series) MaxI64() int64 {
+	if s.handle == nil || s.dtype != Int64 {
+		return 0
+	}
+	return int64(C.galleon_series_max_i64((*C.ManagedArrowArray)(s.handle)))
+}
+
+// Mean returns the mean of all values (skipping nulls).
+func (s *Series) Mean() float64 {
+	if s.handle == nil {
+		return 0
+	}
+	switch s.dtype {
+	case Float64:
+		return float64(C.galleon_series_mean_f64((*C.ManagedArrowArray)(s.handle)))
+	case Float32:
+		return float64(C.galleon_series_mean_f32((*C.ManagedArrowArray)(s.handle)))
+	case Int64, Int32, UInt64, UInt32:
+		// For integer types, compute mean as float64
+		sum := s.Sum()
+		count := float64(s.Len()) - float64(s.NullCount())
+		if count > 0 {
+			return sum / count
+		}
+		return 0
+	default:
+		return 0
+	}
+}
+
+// Argsort returns the indices that would sort the series.
+// The returned slice is owned by the caller.
+func (s *Series) Argsort(ascending bool) []uint32 {
+	if s.handle == nil || s.length == 0 {
 		return nil
 	}
-	// Return a copy to prevent modification
-	result := make([]string, len(s.catData.Dictionary))
-	copy(result, s.catData.Dictionary)
+
+	var result *C.SeriesArgsortResult
+	switch s.dtype {
+	case Float64:
+		result = C.galleon_series_argsort_f64((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case Float32:
+		result = C.galleon_series_argsort_f32((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case Int64:
+		result = C.galleon_series_argsort_i64((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case Int32:
+		result = C.galleon_series_argsort_i32((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case UInt64:
+		result = C.galleon_series_argsort_u64((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case UInt32:
+		result = C.galleon_series_argsort_u32((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	default:
+		return nil
+	}
+
+	if result == nil {
+		return nil
+	}
+	defer C.galleon_series_argsort_destroy(result)
+
+	// Copy indices to Go slice
+	length := int(C.galleon_series_argsort_len(result))
+	if length == 0 {
+		return nil
+	}
+
+	indices := make([]uint32, length)
+	cIndices := C.galleon_series_argsort_indices(result)
+	for i := 0; i < length; i++ {
+		indices[i] = uint32(*(*C.uint32_t)(unsafe.Pointer(uintptr(unsafe.Pointer(cIndices)) + uintptr(i)*4)))
+	}
+
+	return indices
+}
+
+// Sort returns a new sorted Series.
+// The original series is not modified.
+func (s *Series) Sort(ascending bool) *Series {
+	if s.handle == nil || s.length == 0 {
+		return &Series{
+			handle: nil,
+			name:   s.name,
+			dtype:  s.dtype,
+			length: 0,
+		}
+	}
+
+	var newHandle *C.ManagedArrowArray
+	switch s.dtype {
+	case Float64:
+		newHandle = C.galleon_series_sort_f64((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case Float32:
+		newHandle = C.galleon_series_sort_f32((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case Int64:
+		newHandle = C.galleon_series_sort_i64((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case Int32:
+		newHandle = C.galleon_series_sort_i32((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case UInt64:
+		newHandle = C.galleon_series_sort_u64((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	case UInt32:
+		newHandle = C.galleon_series_sort_u32((*C.ManagedArrowArray)(s.handle), C.bool(ascending))
+	default:
+		return nil
+	}
+
+	if newHandle == nil {
+		return nil
+	}
+
+	sorted := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(sorted, func(s *Series) {
+		s.Release()
+	})
+
+	return sorted
+}
+
+// SortDesc returns a new Series sorted in descending order.
+func (s *Series) SortDesc() *Series {
+	return s.Sort(false)
+}
+
+// SortAsc returns a new Series sorted in ascending order.
+func (s *Series) SortAsc() *Series {
+	return s.Sort(true)
+}
+
+// --- Data Access Methods ---
+
+// IsValid returns true if the value at the given index is valid (not null).
+// Returns false if index is out of bounds.
+func (s *Series) IsValid(index int) bool {
+	if s.handle == nil || index < 0 || index >= s.length {
+		return false
+	}
+	return bool(C.galleon_series_is_valid((*C.ManagedArrowArray)(s.handle), C.size_t(index)))
+}
+
+// AtF64 returns the Float64 value at the given index.
+// Returns (value, true) if valid, (0, false) if null or out of bounds.
+func (s *Series) AtF64(index int) (float64, bool) {
+	if s.handle == nil || index < 0 || index >= s.length {
+		return 0, false
+	}
+	if !s.IsValid(index) {
+		return 0, false
+	}
+	return float64(C.galleon_series_get_f64((*C.ManagedArrowArray)(s.handle), C.size_t(index))), true
+}
+
+// AtI64 returns the Int64 value at the given index.
+// Returns (value, true) if valid, (0, false) if null or out of bounds.
+func (s *Series) AtI64(index int) (int64, bool) {
+	if s.handle == nil || index < 0 || index >= s.length {
+		return 0, false
+	}
+	if !s.IsValid(index) {
+		return 0, false
+	}
+	return int64(C.galleon_series_get_i64((*C.ManagedArrowArray)(s.handle), C.size_t(index))), true
+}
+
+// AtF32 returns the Float32 value at the given index.
+// Returns (value, true) if valid, (0, false) if null or out of bounds.
+func (s *Series) AtF32(index int) (float32, bool) {
+	if s.handle == nil || index < 0 || index >= s.length {
+		return 0, false
+	}
+	if !s.IsValid(index) {
+		return 0, false
+	}
+	return float32(C.galleon_series_get_f32((*C.ManagedArrowArray)(s.handle), C.size_t(index))), true
+}
+
+// AtI32 returns the Int32 value at the given index.
+// Returns (value, true) if valid, (0, false) if null or out of bounds.
+func (s *Series) AtI32(index int) (int32, bool) {
+	if s.handle == nil || index < 0 || index >= s.length {
+		return 0, false
+	}
+	if !s.IsValid(index) {
+		return 0, false
+	}
+	return int32(C.galleon_series_get_i32((*C.ManagedArrowArray)(s.handle), C.size_t(index))), true
+}
+
+// AtU64 returns the UInt64 value at the given index.
+// Returns (value, true) if valid, (0, false) if null or out of bounds.
+func (s *Series) AtU64(index int) (uint64, bool) {
+	if s.handle == nil || index < 0 || index >= s.length {
+		return 0, false
+	}
+	if !s.IsValid(index) {
+		return 0, false
+	}
+	return uint64(C.galleon_series_get_u64((*C.ManagedArrowArray)(s.handle), C.size_t(index))), true
+}
+
+// AtU32 returns the UInt32 value at the given index.
+// Returns (value, true) if valid, (0, false) if null or out of bounds.
+func (s *Series) AtU32(index int) (uint32, bool) {
+	if s.handle == nil || index < 0 || index >= s.length {
+		return 0, false
+	}
+	if !s.IsValid(index) {
+		return 0, false
+	}
+	return uint32(C.galleon_series_get_u32((*C.ManagedArrowArray)(s.handle), C.size_t(index))), true
+}
+
+// Slice returns a new Series containing elements [start, end).
+// The new series owns its own memory.
+func (s *Series) Slice(start, end int) *Series {
+	if s.handle == nil {
+		return &Series{
+			handle: nil,
+			name:   s.name,
+			dtype:  s.dtype,
+			length: 0,
+		}
+	}
+
+	// Clamp bounds
+	if start < 0 {
+		start = 0
+	}
+	if end > s.length {
+		end = s.length
+	}
+	if start >= end {
+		return &Series{
+			handle: nil,
+			name:   s.name,
+			dtype:  s.dtype,
+			length: 0,
+		}
+	}
+
+	var newHandle *C.ManagedArrowArray
+	switch s.dtype {
+	case Float64:
+		newHandle = C.galleon_series_slice_f64((*C.ManagedArrowArray)(s.handle), C.size_t(start), C.size_t(end))
+	case Float32:
+		newHandle = C.galleon_series_slice_f32((*C.ManagedArrowArray)(s.handle), C.size_t(start), C.size_t(end))
+	case Int64:
+		newHandle = C.galleon_series_slice_i64((*C.ManagedArrowArray)(s.handle), C.size_t(start), C.size_t(end))
+	case Int32:
+		newHandle = C.galleon_series_slice_i32((*C.ManagedArrowArray)(s.handle), C.size_t(start), C.size_t(end))
+	case UInt64:
+		newHandle = C.galleon_series_slice_u64((*C.ManagedArrowArray)(s.handle), C.size_t(start), C.size_t(end))
+	case UInt32:
+		newHandle = C.galleon_series_slice_u32((*C.ManagedArrowArray)(s.handle), C.size_t(start), C.size_t(end))
+	default:
+		return nil
+	}
+
+	if newHandle == nil {
+		return nil
+	}
+
+	sliced := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: end - start,
+	}
+
+	runtime.SetFinalizer(sliced, func(s *Series) {
+		s.Release()
+	})
+
+	return sliced
+}
+
+// ToFloat64 copies all data to a Go float64 slice.
+// Null values are represented as NaN.
+func (s *Series) ToFloat64() []float64 {
+	if s.handle == nil || s.length == 0 {
+		return []float64{}
+	}
+
+	result := make([]float64, s.length)
+	C.galleon_series_copy_f64(
+		(*C.ManagedArrowArray)(s.handle),
+		(*C.double)(unsafe.Pointer(&result[0])),
+		C.size_t(len(result)),
+	)
 	return result
 }
 
-// NumCategories returns the number of unique categories.
-// Returns 0 for non-categorical series.
-func (s *Series) NumCategories() int {
-	if s.dtype != Categorical || s.catData == nil {
-		return 0
+// ToInt64 copies all data to a Go int64 slice.
+// Null values are represented as 0.
+func (s *Series) ToInt64() []int64 {
+	if s.handle == nil || s.length == 0 {
+		return []int64{}
 	}
-	return len(s.catData.Dictionary)
+
+	result := make([]int64, s.length)
+	C.galleon_series_copy_i64(
+		(*C.ManagedArrowArray)(s.handle),
+		(*C.int64_t)(unsafe.Pointer(&result[0])),
+		C.size_t(len(result)),
+	)
+	return result
 }
 
-// CategoricalIndices returns the underlying integer indices for a Categorical series.
-// Each value is an index into Categories(). Returns nil for non-categorical series.
-func (s *Series) CategoricalIndices() []int32 {
-	if s.dtype != Categorical || s.catData == nil {
+// Values returns the underlying data as a slice.
+// Returns the appropriate slice type based on the series DType.
+func (s *Series) Values() interface{} {
+	switch s.dtype {
+	case Float64:
+		return s.ToFloat64()
+	case Float32:
+		return s.ToFloat32()
+	case Int64:
+		return s.ToInt64()
+	case Int32:
+		return s.ToInt32()
+	case UInt64:
+		return s.ToUInt64()
+	case UInt32:
+		return s.ToUInt32()
+	default:
 		return nil
 	}
-	return s.catData.Indices
 }
 
-// GetCategoryIndex returns the category index for a value at the given position.
-// Returns -1 for non-categorical series or out of bounds index.
-func (s *Series) GetCategoryIndex(index int) int32 {
-	if s.dtype != Categorical || s.catData == nil || index < 0 || index >= s.length {
-		return -1
+// ToFloat32 copies all data to a Go float32 slice.
+func (s *Series) ToFloat32() []float32 {
+	if s.handle == nil || s.length == 0 {
+		return []float32{}
 	}
-	return s.catData.Indices[index]
+
+	result := make([]float32, s.length)
+	C.galleon_series_copy_f32(
+		(*C.ManagedArrowArray)(s.handle),
+		(*C.float)(unsafe.Pointer(&result[0])),
+		C.size_t(len(result)),
+	)
+	return result
 }
 
-// AsCategorical converts a String series to a Categorical series.
-// Returns a new series with dictionary-encoded data.
-// Returns nil if the series is not of String type.
-func (s *Series) AsCategorical() *Series {
-	if s.dtype != String {
+// ToInt32 copies all data to a Go int32 slice.
+func (s *Series) ToInt32() []int32 {
+	if s.handle == nil || s.length == 0 {
+		return []int32{}
+	}
+
+	result := make([]int32, s.length)
+	C.galleon_series_copy_i32(
+		(*C.ManagedArrowArray)(s.handle),
+		(*C.int32_t)(unsafe.Pointer(&result[0])),
+		C.size_t(len(result)),
+	)
+	return result
+}
+
+// ToUInt64 copies all data to a Go uint64 slice.
+func (s *Series) ToUInt64() []uint64 {
+	if s.handle == nil || s.length == 0 {
+		return []uint64{}
+	}
+
+	result := make([]uint64, s.length)
+	C.galleon_series_copy_u64(
+		(*C.ManagedArrowArray)(s.handle),
+		(*C.uint64_t)(unsafe.Pointer(&result[0])),
+		C.size_t(len(result)),
+	)
+	return result
+}
+
+// ToUInt32 copies all data to a Go uint32 slice.
+func (s *Series) ToUInt32() []uint32 {
+	if s.handle == nil || s.length == 0 {
+		return []uint32{}
+	}
+
+	result := make([]uint32, s.length)
+	C.galleon_series_copy_u32(
+		(*C.ManagedArrowArray)(s.handle),
+		(*C.uint32_t)(unsafe.Pointer(&result[0])),
+		C.size_t(len(result)),
+	)
+	return result
+}
+
+// Head returns a new Series with the first n elements.
+func (s *Series) Head(n int) *Series {
+	if n < 0 {
+		n = 0
+	}
+	if n > s.length {
+		n = s.length
+	}
+	return s.Slice(0, n)
+}
+
+// Tail returns a new Series with the last n elements.
+func (s *Series) Tail(n int) *Series {
+	if n < 0 {
+		n = 0
+	}
+	if n > s.length {
+		n = s.length
+	}
+	return s.Slice(s.length-n, s.length)
+}
+
+// --- Filter Operations ---
+
+// extractMask extracts a boolean mask from a C SeriesFilterResult
+func extractMask(result *C.SeriesFilterResult) []bool {
+	if result == nil {
 		return nil
 	}
-	return NewSeriesCategorical(s.name, s.strData)
-}
+	defer C.galleon_series_filter_result_destroy(result)
 
-// AsString converts a Categorical series back to a String series.
-// Returns a new series with expanded string data.
-// Returns nil if the series is not of Categorical type.
-func (s *Series) AsString() *Series {
-	if s.dtype != Categorical || s.catData == nil {
-		return nil
+	length := int(C.galleon_series_filter_result_len(result))
+	if length == 0 {
+		return []bool{}
 	}
 
-	// Expand indices to full strings
-	strData := make([]string, s.length)
-	for i, idx := range s.catData.Indices {
-		strData[i] = s.catData.Dictionary[idx]
-	}
-
-	return &Series{
-		name:    s.name,
-		dtype:   String,
-		length:  s.length,
-		strData: strData,
-	}
-}
-
-// Get returns the value at index as interface{}
-func (s *Series) Get(index int) interface{} {
-	if index < 0 || index >= s.length {
-		return nil
-	}
-
-	switch s.dtype {
-	case Float64:
-		if s.chunkedF64 != nil {
-			return s.chunkedF64.Get(index)
-		}
-		if s.f64Col != nil {
-			return float64(C.galleon_column_f64_get(s.f64Col, C.size_t(index)))
-		}
-	case Float32:
-		if s.f32Col != nil {
-			return float32(C.galleon_column_f32_get(s.f32Col, C.size_t(index)))
-		}
-	case Int64:
-		if s.i64Col != nil {
-			return int64(C.galleon_column_i64_get(s.i64Col, C.size_t(index)))
-		}
-	case Int32:
-		if s.i32Col != nil {
-			return int32(C.galleon_column_i32_get(s.i32Col, C.size_t(index)))
-		}
-	case Bool:
-		if s.boolCol != nil {
-			return bool(C.galleon_column_bool_get(s.boolCol, C.size_t(index)))
-		}
-	case String:
-		if s.strData != nil {
-			return s.strData[index]
-		}
-	case Categorical:
-		if s.catData != nil {
-			idx := s.catData.Indices[index]
-			return s.catData.Dictionary[idx]
-		}
-	}
-	return nil
-}
-
-// GetFloat64 returns the value at index as float64
-func (s *Series) GetFloat64(index int) (float64, bool) {
-	if s.dtype != Float64 || index < 0 || index >= s.length {
-		return 0, false
-	}
-	if s.chunkedF64 != nil {
-		return s.chunkedF64.Get(index), true
-	}
-	if s.f64Col == nil {
-		return 0, false
-	}
-	return float64(C.galleon_column_f64_get(s.f64Col, C.size_t(index))), true
-}
-
-// GetInt64 returns the value at index as int64
-func (s *Series) GetInt64(index int) (int64, bool) {
-	if s.dtype != Int64 || s.i64Col == nil || index < 0 || index >= s.length {
-		return 0, false
-	}
-	return int64(C.galleon_column_i64_get(s.i64Col, C.size_t(index))), true
-}
-
-// GetString returns the value at index as string
-func (s *Series) GetString(index int) (string, bool) {
-	if s.dtype != String || s.strData == nil || index < 0 || index >= s.length {
-		return "", false
-	}
-	return s.strData[index], true
-}
-
-// ============================================================================
-// Aggregation Operations
-// ============================================================================
-
-// Sum returns the sum of all values
-func (s *Series) Sum() float64 {
-	if s.length == 0 {
-		return 0
-	}
-
-	switch s.dtype {
-	case Float64:
-		// Use chunked storage if available
-		if s.chunkedF64 != nil {
-			return s.chunkedF64.Sum()
-		}
-		data := s.Float64()
-		if data == nil {
-			return 0
-		}
-		return SumF64(data)
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return 0
-		}
-		return float64(SumF32(data))
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return 0
-		}
-		return float64(SumI64(data))
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return 0
-		}
-		return float64(SumI32(data))
-	}
-	return 0
-}
-
-// SumInt returns the sum as int64 (for integer types)
-func (s *Series) SumInt() int64 {
-	if s.length == 0 {
-		return 0
-	}
-
-	switch s.dtype {
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return 0
-		}
-		return SumI64(data)
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return 0
-		}
-		return int64(SumI32(data))
-	}
-	return 0
-}
-
-// Min returns the minimum value
-func (s *Series) Min() float64 {
-	if s.length == 0 {
-		return 0
-	}
-
-	switch s.dtype {
-	case Float64:
-		// Use chunked storage if available
-		if s.chunkedF64 != nil {
-			return s.chunkedF64.Min()
-		}
-		data := s.Float64()
-		if data == nil {
-			return 0
-		}
-		return MinF64(data)
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return 0
-		}
-		return float64(MinF32(data))
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return 0
-		}
-		return float64(MinI64(data))
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return 0
-		}
-		return float64(MinI32(data))
-	}
-	return 0
-}
-
-// Max returns the maximum value
-func (s *Series) Max() float64 {
-	if s.length == 0 {
-		return 0
-	}
-
-	switch s.dtype {
-	case Float64:
-		// Use chunked storage if available
-		if s.chunkedF64 != nil {
-			return s.chunkedF64.Max()
-		}
-		data := s.Float64()
-		if data == nil {
-			return 0
-		}
-		return MaxF64(data)
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return 0
-		}
-		return float64(MaxF32(data))
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return 0
-		}
-		return float64(MaxI64(data))
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return 0
-		}
-		return float64(MaxI32(data))
-	}
-	return 0
-}
-
-// Mean returns the arithmetic mean
-func (s *Series) Mean() float64 {
-	if s.length == 0 {
-		return 0
-	}
-
-	switch s.dtype {
-	case Float64:
-		// Use chunked storage if available
-		if s.chunkedF64 != nil {
-			return s.chunkedF64.Mean()
-		}
-		data := s.Float64()
-		if data == nil {
-			return 0
-		}
-		return MeanF64(data)
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return 0
-		}
-		return float64(MeanF32(data))
-	case Int64, Int32:
-		return s.Sum() / float64(s.length)
-	}
-	return 0
-}
-
-// CountTrue returns the count of true values (for Bool series)
-func (s *Series) CountTrue() int {
-	if s.dtype != Bool || s.boolCol == nil || s.length == 0 {
-		return 0
-	}
-	data := s.Bool()
-	return CountTrue(data)
-}
-
-// ============================================================================
-// Filter Operations
-// ============================================================================
-
-// Gt returns indices where the condition is true
-func (s *Series) Gt(threshold float64) []uint32 {
-	if s.length == 0 {
-		return nil
-	}
-
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		return FilterGreaterThanF64(data, threshold)
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		return FilterGreaterThanF32(data, float32(threshold))
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		return FilterGreaterThanI64(data, int64(threshold))
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		return FilterGreaterThanI32(data, int32(threshold))
-	}
-	return nil
-}
-
-// GtMask returns a byte mask (0/1) where values are greater than threshold
-func (s *Series) GtMask(threshold float64, mask []byte) []byte {
-	if s.length == 0 {
-		return mask
-	}
-
-	if len(mask) < s.length {
-		mask = make([]byte, s.length)
-	}
-
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		if data == nil {
-			return mask
-		}
-		return FilterMaskU8GreaterThanF64Into(data, threshold, mask)
+	maskPtr := C.galleon_series_filter_result_mask(result)
+	mask := make([]bool, length)
+	for i := 0; i < length; i++ {
+		mask[i] = bool(*(*C.bool)(unsafe.Pointer(uintptr(unsafe.Pointer(maskPtr)) + uintptr(i))))
 	}
 	return mask
 }
 
-// Lt returns indices where values are less than threshold
-func (s *Series) Lt(threshold float64) []uint32 {
-	if s.length == 0 {
-		return nil
+// GtF64 returns a boolean mask where values are greater than the given value.
+// For Int64 series, use GtI64.
+func (s *Series) GtF64(value float64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_gt_f64((*C.ManagedArrowArray)(s.handle), C.double(value))
+	return extractMask(result)
+}
+
+// GeF64 returns a boolean mask where values are greater than or equal to the given value.
+func (s *Series) GeF64(value float64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_ge_f64((*C.ManagedArrowArray)(s.handle), C.double(value))
+	return extractMask(result)
+}
+
+// LtF64 returns a boolean mask where values are less than the given value.
+func (s *Series) LtF64(value float64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_lt_f64((*C.ManagedArrowArray)(s.handle), C.double(value))
+	return extractMask(result)
+}
+
+// LeF64 returns a boolean mask where values are less than or equal to the given value.
+func (s *Series) LeF64(value float64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_le_f64((*C.ManagedArrowArray)(s.handle), C.double(value))
+	return extractMask(result)
+}
+
+// EqF64 returns a boolean mask where values are equal to the given value.
+func (s *Series) EqF64(value float64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_eq_f64((*C.ManagedArrowArray)(s.handle), C.double(value))
+	return extractMask(result)
+}
+
+// NeF64 returns a boolean mask where values are not equal to the given value.
+func (s *Series) NeF64(value float64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_ne_f64((*C.ManagedArrowArray)(s.handle), C.double(value))
+	return extractMask(result)
+}
+
+// GtI64 returns a boolean mask where values are greater than the given value.
+func (s *Series) GtI64(value int64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_gt_i64((*C.ManagedArrowArray)(s.handle), C.int64_t(value))
+	return extractMask(result)
+}
+
+// GeI64 returns a boolean mask where values are greater than or equal to the given value.
+func (s *Series) GeI64(value int64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_ge_i64((*C.ManagedArrowArray)(s.handle), C.int64_t(value))
+	return extractMask(result)
+}
+
+// LtI64 returns a boolean mask where values are less than the given value.
+func (s *Series) LtI64(value int64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_lt_i64((*C.ManagedArrowArray)(s.handle), C.int64_t(value))
+	return extractMask(result)
+}
+
+// LeI64 returns a boolean mask where values are less than or equal to the given value.
+func (s *Series) LeI64(value int64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_le_i64((*C.ManagedArrowArray)(s.handle), C.int64_t(value))
+	return extractMask(result)
+}
+
+// EqI64 returns a boolean mask where values are equal to the given value.
+func (s *Series) EqI64(value int64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_eq_i64((*C.ManagedArrowArray)(s.handle), C.int64_t(value))
+	return extractMask(result)
+}
+
+// NeI64 returns a boolean mask where values are not equal to the given value.
+func (s *Series) NeI64(value int64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_ne_i64((*C.ManagedArrowArray)(s.handle), C.int64_t(value))
+	return extractMask(result)
+}
+
+// GtF32 returns a boolean mask where values are greater than the given value.
+func (s *Series) GtF32(value float32) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_gt_f32((*C.ManagedArrowArray)(s.handle), C.float(value))
+	return extractMask(result)
+}
+
+// EqF32 returns a boolean mask where values are equal to the given value.
+func (s *Series) EqF32(value float32) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_eq_f32((*C.ManagedArrowArray)(s.handle), C.float(value))
+	return extractMask(result)
+}
+
+// GtI32 returns a boolean mask where values are greater than the given value.
+func (s *Series) GtI32(value int32) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_gt_i32((*C.ManagedArrowArray)(s.handle), C.int32_t(value))
+	return extractMask(result)
+}
+
+// EqI32 returns a boolean mask where values are equal to the given value.
+func (s *Series) EqI32(value int32) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_eq_i32((*C.ManagedArrowArray)(s.handle), C.int32_t(value))
+	return extractMask(result)
+}
+
+// GtU64 returns a boolean mask where values are greater than the given value.
+func (s *Series) GtU64(value uint64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_gt_u64((*C.ManagedArrowArray)(s.handle), C.uint64_t(value))
+	return extractMask(result)
+}
+
+// EqU64 returns a boolean mask where values are equal to the given value.
+func (s *Series) EqU64(value uint64) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_eq_u64((*C.ManagedArrowArray)(s.handle), C.uint64_t(value))
+	return extractMask(result)
+}
+
+// GtU32 returns a boolean mask where values are greater than the given value.
+func (s *Series) GtU32(value uint32) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_gt_u32((*C.ManagedArrowArray)(s.handle), C.uint32_t(value))
+	return extractMask(result)
+}
+
+// EqU32 returns a boolean mask where values are equal to the given value.
+func (s *Series) EqU32(value uint32) []bool {
+	if s.handle == nil || s.length == 0 {
+		return []bool{}
+	}
+	result := C.galleon_series_eq_u32((*C.ManagedArrowArray)(s.handle), C.uint32_t(value))
+	return extractMask(result)
+}
+
+// Filter returns a new Series with only elements where mask is true.
+func (s *Series) Filter(mask []bool) *Series {
+	if s.handle == nil || s.length == 0 || len(mask) == 0 {
+		return &Series{
+			handle: nil,
+			name:   s.name,
+			dtype:  s.dtype,
+			length: 0,
+		}
 	}
 
-	var indices []uint32
+	// Convert Go bool slice to C bool array
+	cMask := make([]C.bool, len(mask))
+	for i, v := range mask {
+		cMask[i] = C.bool(v)
+	}
+
+	var newHandle *C.ManagedArrowArray
 	switch s.dtype {
 	case Float64:
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		for i, v := range data {
-			if v < threshold {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		t := float32(threshold)
-		for i, v := range data {
-			if v < t {
-				indices = append(indices, uint32(i))
-			}
-		}
+		newHandle = C.galleon_series_filter_f64(
+			(*C.ManagedArrowArray)(s.handle),
+			(*C.bool)(unsafe.Pointer(&cMask[0])),
+			C.size_t(len(cMask)),
+		)
 	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		t := int64(threshold)
-		for i, v := range data {
-			if v < t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		t := int32(threshold)
-		for i, v := range data {
-			if v < t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	}
-	return indices
-}
-
-// Lte returns indices where values are less than or equal to threshold
-func (s *Series) Lte(threshold float64) []uint32 {
-	if s.length == 0 {
+		newHandle = C.galleon_series_filter_i64(
+			(*C.ManagedArrowArray)(s.handle),
+			(*C.bool)(unsafe.Pointer(&cMask[0])),
+			C.size_t(len(cMask)),
+		)
+	default:
 		return nil
 	}
 
-	var indices []uint32
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		for i, v := range data {
-			if v <= threshold {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		t := float32(threshold)
-		for i, v := range data {
-			if v <= t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		t := int64(threshold)
-		for i, v := range data {
-			if v <= t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		t := int32(threshold)
-		for i, v := range data {
-			if v <= t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	}
-	return indices
-}
-
-// Gte returns indices where values are greater than or equal to threshold
-func (s *Series) Gte(threshold float64) []uint32 {
-	if s.length == 0 {
+	if newHandle == nil {
 		return nil
 	}
 
-	var indices []uint32
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		for i, v := range data {
-			if v >= threshold {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		t := float32(threshold)
-		for i, v := range data {
-			if v >= t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		t := int64(threshold)
-		for i, v := range data {
-			if v >= t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		t := int32(threshold)
-		for i, v := range data {
-			if v >= t {
-				indices = append(indices, uint32(i))
-			}
+	// Count true values to get new length
+	newLen := 0
+	for _, v := range mask[:min(len(mask), s.length)] {
+		if v {
+			newLen++
 		}
 	}
-	return indices
+
+	filtered := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: newLen,
+	}
+
+	runtime.SetFinalizer(filtered, func(s *Series) {
+		s.Release()
+	})
+
+	return filtered
 }
 
-// Eq returns indices where values equal the threshold
-func (s *Series) Eq(threshold float64) []uint32 {
-	if s.length == 0 {
-		return nil
-	}
-
-	var indices []uint32
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		for i, v := range data {
-			if v == threshold {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		t := float32(threshold)
-		for i, v := range data {
-			if v == t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		t := int64(threshold)
-		for i, v := range data {
-			if v == t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		t := int32(threshold)
-		for i, v := range data {
-			if v == t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	}
-	return indices
+// Where is an alias for Filter - returns elements where mask is true.
+func (s *Series) Where(mask []bool) *Series {
+	return s.Filter(mask)
 }
 
-// Neq returns indices where values do not equal the threshold
-func (s *Series) Neq(threshold float64) []uint32 {
-	if s.length == 0 {
-		return nil
-	}
-
-	var indices []uint32
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		for i, v := range data {
-			if v != threshold {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		t := float32(threshold)
-		for i, v := range data {
-			if v != t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		t := int64(threshold)
-		for i, v := range data {
-			if v != t {
-				indices = append(indices, uint32(i))
-			}
-		}
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		t := int32(threshold)
-		for i, v := range data {
-			if v != t {
-				indices = append(indices, uint32(i))
-			}
+// CountMask returns the number of true values in the mask.
+func CountMask(mask []bool) int {
+	count := 0
+	for _, v := range mask {
+		if v {
+			count++
 		}
 	}
-	return indices
-}
-
-// EqString returns indices where string values equal the target (for String series)
-func (s *Series) EqString(target string) []uint32 {
-	if s.dtype != String || s.length == 0 {
-		return nil
-	}
-
-	var indices []uint32
-	for i, v := range s.strData {
-		if v == target {
-			indices = append(indices, uint32(i))
-		}
-	}
-	return indices
-}
-
-// NeqString returns indices where string values do not equal the target (for String series)
-func (s *Series) NeqString(target string) []uint32 {
-	if s.dtype != String || s.length == 0 {
-		return nil
-	}
-
-	var indices []uint32
-	for i, v := range s.strData {
-		if v != target {
-			indices = append(indices, uint32(i))
-		}
-	}
-	return indices
+	return count
 }
 
 // ============================================================================
-// Sort Operations
+// Arithmetic Operations
 // ============================================================================
 
-// Sort returns a new sorted series.
-// For chunked Float64 series, uses optimized chunk-based sorting with k-way merge.
-func (s *Series) Sort() *Series {
-	if s.length == 0 {
-		return &Series{name: s.name, dtype: s.dtype, length: 0}
+// Add performs element-wise addition of two Series.
+// Both series must have the same length and type.
+// Null values propagate: if either operand is null, the result is null.
+func (s *Series) Add(other *Series) *Series {
+	if s.length != other.length {
+		return nil
 	}
-
-	switch s.dtype {
-	case Float64:
-		// Use chunked storage if available
-		if s.chunkedF64 != nil {
-			sorted := s.chunkedF64.Sort()
-			if sorted == nil {
-				return nil
-			}
-			return &Series{
-				name:       s.name,
-				dtype:      Float64,
-				length:     sorted.Len(),
-				chunkedF64: sorted,
-			}
-		}
-		// Fall back to regular sort via argsort + gather
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		indices := ArgsortF64(data, true)
-		result := make([]float64, len(data))
-		for i, idx := range indices {
-			result[i] = data[idx]
-		}
-		return NewSeriesFloat64(s.name, result)
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		indices := ArgsortF32(data, true)
-		result := make([]float32, len(data))
-		for i, idx := range indices {
-			result[i] = data[idx]
-		}
-		return NewSeriesFloat32(s.name, result)
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		indices := ArgsortI64(data, true)
-		result := make([]int64, len(data))
-		for i, idx := range indices {
-			result[i] = data[idx]
-		}
-		return NewSeriesInt64(s.name, result)
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		indices := ArgsortI32(data, true)
-		result := make([]int32, len(data))
-		for i, idx := range indices {
-			result[i] = data[idx]
-		}
-		return NewSeriesInt32(s.name, result)
-	}
-	return nil
-}
-
-// Argsort returns indices that would sort the series
-func (s *Series) Argsort(ascending bool) []uint32 {
-	if s.length == 0 {
+	if s.dtype != other.dtype {
 		return nil
 	}
 
+	var newHandle *C.ManagedArrowArray
 	switch s.dtype {
 	case Float64:
-		// Use chunked storage if available (ascending only for now)
-		if s.chunkedF64 != nil && ascending {
-			result := s.chunkedF64.Argsort()
-			if result == nil {
-				return nil
-			}
-			return result.Indices()
-		}
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		return ArgsortF64(data, ascending)
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		return ArgsortF32(data, ascending)
+		newHandle = C.galleon_series_add_f64(
+			(*C.ManagedArrowArray)(s.handle),
+			(*C.ManagedArrowArray)(other.handle),
+		)
 	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		return ArgsortI64(data, ascending)
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		return ArgsortI32(data, ascending)
-	}
-	return nil
-}
-
-// ============================================================================
-// Arithmetic Operations (return new Series)
-// ============================================================================
-
-// Add returns a new series with scalar added to each element
-func (s *Series) Add(scalar float64) *Series {
-	if s.length == 0 {
+		newHandle = C.galleon_series_add_i64(
+			(*C.ManagedArrowArray)(s.handle),
+			(*C.ManagedArrowArray)(other.handle),
+		)
+	default:
 		return nil
 	}
 
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		newData := make([]float64, len(data))
-		copy(newData, data)
-		AddScalarF64(newData, scalar)
-		return NewSeriesFloat64(s.name, newData)
-	case Float32:
-		data := s.Float32()
-		newData := make([]float32, len(data))
-		copy(newData, data)
-		AddScalarF32(newData, float32(scalar))
-		return NewSeriesFloat32(s.name, newData)
-	case Int64:
-		data := s.Int64()
-		newData := make([]int64, len(data))
-		copy(newData, data)
-		AddScalarI64(newData, int64(scalar))
-		return NewSeriesInt64(s.name, newData)
-	case Int32:
-		data := s.Int32()
-		newData := make([]int32, len(data))
-		copy(newData, data)
-		AddScalarI32(newData, int32(scalar))
-		return NewSeriesInt32(s.name, newData)
-	}
-	return nil
-}
-
-// Mul returns a new series with each element multiplied by scalar
-func (s *Series) Mul(scalar float64) *Series {
-	if s.length == 0 {
+	if newHandle == nil {
 		return nil
 	}
 
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		newData := make([]float64, len(data))
-		copy(newData, data)
-		MulScalarF64(newData, scalar)
-		return NewSeriesFloat64(s.name, newData)
-	case Float32:
-		data := s.Float32()
-		newData := make([]float32, len(data))
-		copy(newData, data)
-		MulScalarF32(newData, float32(scalar))
-		return NewSeriesFloat32(s.name, newData)
-	case Int64:
-		data := s.Int64()
-		newData := make([]int64, len(data))
-		copy(newData, data)
-		MulScalarI64(newData, int64(scalar))
-		return NewSeriesInt64(s.name, newData)
-	case Int32:
-		data := s.Int32()
-		newData := make([]int32, len(data))
-		copy(newData, data)
-		MulScalarI32(newData, int32(scalar))
-		return NewSeriesInt32(s.name, newData)
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
 	}
-	return nil
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
 }
 
-// ============================================================================
-// Display
-// ============================================================================
-
-// String returns a string representation of the series
-// String returns a string representation of the Series using global display settings.
-// Use StringWithConfig for custom display options.
-func (s *Series) String() string {
-	return s.StringWithConfig(GetDisplayConfig())
-}
-
-// StringWithConfig formats the Series using the provided configuration.
-func (s *Series) StringWithConfig(cfg DisplayConfig) string {
-	return SeriesStringWithConfig(s, cfg)
-}
-
-// Head returns a new series with the first n elements
-func (s *Series) Head(n int) *Series {
-	if n <= 0 || s.length == 0 {
-		return &Series{name: s.name, dtype: s.dtype, length: 0}
+// Sub performs element-wise subtraction of two Series.
+// Both series must have the same length and type.
+// Null values propagate: if either operand is null, the result is null.
+func (s *Series) Sub(other *Series) *Series {
+	if s.length != other.length {
+		return nil
 	}
-	if n > s.length {
-		n = s.length
-	}
-
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesFloat64(s.name, data[:n])
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesFloat32(s.name, data[:n])
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesInt64(s.name, data[:n])
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesInt32(s.name, data[:n])
-	case Bool:
-		data := s.Bool()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesBool(s.name, data[:n])
-	case String:
-		return NewSeriesString(s.name, s.strData[:n])
-	}
-	return nil
-}
-
-// Tail returns a new series with the last n elements
-func (s *Series) Tail(n int) *Series {
-	if n <= 0 || s.length == 0 {
-		return &Series{name: s.name, dtype: s.dtype, length: 0}
-	}
-	if n > s.length {
-		n = s.length
-	}
-
-	switch s.dtype {
-	case Float64:
-		data := s.Float64()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesFloat64(s.name, data[s.length-n:])
-	case Float32:
-		data := s.Float32()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesFloat32(s.name, data[s.length-n:])
-	case Int64:
-		data := s.Int64()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesInt64(s.name, data[s.length-n:])
-	case Int32:
-		data := s.Int32()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesInt32(s.name, data[s.length-n:])
-	case Bool:
-		data := s.Bool()
-		if data == nil {
-			return nil
-		}
-		return NewSeriesBool(s.name, data[s.length-n:])
-	case String:
-		return NewSeriesString(s.name, s.strData[s.length-n:])
-	}
-	return nil
-}
-
-// Describe returns summary statistics
-func (s *Series) Describe() map[string]float64 {
-	if s.length == 0 || !s.dtype.IsNumeric() {
+	if s.dtype != other.dtype {
 		return nil
 	}
 
-	return map[string]float64{
-		"count": float64(s.length),
-		"sum":   s.Sum(),
-		"min":   s.Min(),
-		"max":   s.Max(),
-		"mean":  s.Mean(),
+	var newHandle *C.ManagedArrowArray
+	switch s.dtype {
+	case Float64:
+		newHandle = C.galleon_series_sub_f64(
+			(*C.ManagedArrowArray)(s.handle),
+			(*C.ManagedArrowArray)(other.handle),
+		)
+	case Int64:
+		newHandle = C.galleon_series_sub_i64(
+			(*C.ManagedArrowArray)(s.handle),
+			(*C.ManagedArrowArray)(other.handle),
+		)
+	default:
+		return nil
 	}
+
+	if newHandle == nil {
+		return nil
+	}
+
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
 }
+
+// Mul performs element-wise multiplication of two Series.
+// Both series must have the same length and type.
+// Null values propagate: if either operand is null, the result is null.
+func (s *Series) Mul(other *Series) *Series {
+	if s.length != other.length {
+		return nil
+	}
+	if s.dtype != other.dtype {
+		return nil
+	}
+
+	var newHandle *C.ManagedArrowArray
+	switch s.dtype {
+	case Float64:
+		newHandle = C.galleon_series_mul_f64(
+			(*C.ManagedArrowArray)(s.handle),
+			(*C.ManagedArrowArray)(other.handle),
+		)
+	case Int64:
+		newHandle = C.galleon_series_mul_i64(
+			(*C.ManagedArrowArray)(s.handle),
+			(*C.ManagedArrowArray)(other.handle),
+		)
+	default:
+		return nil
+	}
+
+	if newHandle == nil {
+		return nil
+	}
+
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
+}
+
+// Div performs element-wise division of two Series.
+// Both series must be Float64 type.
+// Null values propagate: if either operand is null, the result is null.
+// Division by zero produces Inf or NaN as per IEEE 754.
+func (s *Series) Div(other *Series) *Series {
+	if s.length != other.length {
+		return nil
+	}
+	if s.dtype != Float64 || other.dtype != Float64 {
+		return nil // Division only supported for Float64
+	}
+
+	newHandle := C.galleon_series_div_f64(
+		(*C.ManagedArrowArray)(s.handle),
+		(*C.ManagedArrowArray)(other.handle),
+	)
+
+	if newHandle == nil {
+		return nil
+	}
+
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
+}
+
+// AddScalar adds a scalar value to each element in the series.
+// Null values remain null.
+func (s *Series) AddScalar(value float64) *Series {
+	if s.dtype != Float64 {
+		return nil
+	}
+
+	newHandle := C.galleon_series_add_scalar_f64(
+		(*C.ManagedArrowArray)(s.handle),
+		C.double(value),
+	)
+
+	if newHandle == nil {
+		return nil
+	}
+
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
+}
+
+// SubScalar subtracts a scalar value from each element in the series.
+// Null values remain null.
+func (s *Series) SubScalar(value float64) *Series {
+	if s.dtype != Float64 {
+		return nil
+	}
+
+	newHandle := C.galleon_series_sub_scalar_f64(
+		(*C.ManagedArrowArray)(s.handle),
+		C.double(value),
+	)
+
+	if newHandle == nil {
+		return nil
+	}
+
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
+}
+
+// MulScalar multiplies each element in the series by a scalar value.
+// Null values remain null.
+func (s *Series) MulScalar(value float64) *Series {
+	if s.dtype != Float64 {
+		return nil
+	}
+
+	newHandle := C.galleon_series_mul_scalar_f64(
+		(*C.ManagedArrowArray)(s.handle),
+		C.double(value),
+	)
+
+	if newHandle == nil {
+		return nil
+	}
+
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
+}
+
+// DivScalar divides each element in the series by a scalar value.
+// Null values remain null.
+// Division by zero produces Inf or NaN as per IEEE 754.
+func (s *Series) DivScalar(value float64) *Series {
+	if s.dtype != Float64 {
+		return nil
+	}
+
+	newHandle := C.galleon_series_div_scalar_f64(
+		(*C.ManagedArrowArray)(s.handle),
+		C.double(value),
+	)
+
+	if newHandle == nil {
+		return nil
+	}
+
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
+}
+
+// AddScalarI64 adds a scalar value to each element in an Int64 series.
+// Null values remain null.
+func (s *Series) AddScalarI64(value int64) *Series {
+	if s.dtype != Int64 {
+		return nil
+	}
+
+	newHandle := C.galleon_series_add_scalar_i64(
+		(*C.ManagedArrowArray)(s.handle),
+		C.int64_t(value),
+	)
+
+	if newHandle == nil {
+		return nil
+	}
+
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
+}
+
+// MulScalarI64 multiplies each element in an Int64 series by a scalar value.
+// Null values remain null.
+func (s *Series) MulScalarI64(value int64) *Series {
+	if s.dtype != Int64 {
+		return nil
+	}
+
+	newHandle := C.galleon_series_mul_scalar_i64(
+		(*C.ManagedArrowArray)(s.handle),
+		C.int64_t(value),
+	)
+
+	if newHandle == nil {
+		return nil
+	}
+
+	result := &Series{
+		handle: unsafe.Pointer(newHandle),
+		name:   s.name,
+		dtype:  s.dtype,
+		length: s.length,
+	}
+
+	runtime.SetFinalizer(result, func(s *Series) {
+		s.Release()
+	})
+
+	return result
+}
+

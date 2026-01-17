@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const blitz = @import("blitz/mod.zig");
+const blitz = @import("blitz.zig");
 
 // ============================================================================
 // Chunked Column - Cache-Friendly Columnar Storage
@@ -381,7 +381,7 @@ pub fn ChunkedOps(comptime T: type) type {
             const chunk_sums = blitz.parallelChunkReduce(
                 T,
                 T,
-                @constCast(@ptrCast(col.chunks)),
+                col.chunks,
                 col.chunk_sizes,
                 std.heap.c_allocator,
                 0,
@@ -437,7 +437,7 @@ pub fn ChunkedOps(comptime T: type) type {
             const chunk_mins = blitz.parallelChunkReduce(
                 T,
                 T,
-                @constCast(@ptrCast(col.chunks)),
+                col.chunks,
                 col.chunk_sizes,
                 std.heap.c_allocator,
                 identity,
@@ -494,7 +494,7 @@ pub fn ChunkedOps(comptime T: type) type {
             const chunk_maxs = blitz.parallelChunkReduce(
                 T,
                 T,
-                @constCast(@ptrCast(col.chunks)),
+                col.chunks,
                 col.chunk_sizes,
                 std.heap.c_allocator,
                 identity,

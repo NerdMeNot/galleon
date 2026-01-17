@@ -1,429 +1,265 @@
-//! Job Abstraction for Blitz
+//! Branch-Free Job Queue for Blitz2
 //!
-//! Since Zig doesn't have closures, we use function pointers with explicit
-//! context structs. This module provides abstractions for defining and
-//! executing parallel tasks.
+//! Implements a doubly-linked list of jobs with three states:
+//! - pending: Job not yet queued (handler = null)
+//! - queued: Job in the local queue (prev_or_null != null)
+//! - executing: Job being executed by another worker (prev_or_null = null)
+//!
+//! The key insight from Spice is that this queue is purely local - no atomics needed.
+//! Push/pop are O(1) operations on the tail. Shift (for stealing) works from the head.
+//! A sentinel head node eliminates null checks in the hot path.
 
 const std = @import("std");
-const latch = @import("latch.zig");
-const OnceLatch = latch.OnceLatch;
-const CountLatch = latch.CountLatch;
+const Task = @import("worker.zig").Task;
 
-// ============================================================================
-// Core Job Types
-// ============================================================================
+/// Maximum size for return values stored in JobExecuteState.
+/// 4 words (32 bytes) fits most return types including small structs.
+const max_result_words = 4;
 
-/// A job represents a unit of work that can be executed.
-/// Jobs are placed in work-stealing deques and executed by worker threads.
+/// Job represents a unit of work that can potentially be executed on a different thread.
+///
+/// Jobs form a doubly-linked list with a sentinel head for branch-free operations.
+/// Size: 24 bytes (3 pointers) - compact enough to be stack-allocated in every frame.
 pub const Job = struct {
-    /// Function pointer to execute
-    execute_fn: *const fn (*anyopaque) void,
+    /// Function to execute. null = pending state.
+    handler: ?*const fn (*Task, *Job) void,
 
-    /// Opaque context pointer
-    context: *anyopaque,
+    /// In queued state: pointer to previous job
+    /// In executing state: null (distinguishes from queued)
+    /// In pending state: undefined
+    prev_or_null: ?*anyopaque,
 
-    /// Execute the job
-    pub fn execute(self: *const Job) void {
-        self.execute_fn(self.context);
-    }
+    /// In queued state: pointer to next job (null if tail)
+    /// In executing state: pointer to JobExecuteState
+    /// In pending state: undefined
+    next_or_state: ?*anyopaque,
 
-    /// Create a job from a typed context and function
-    pub fn from(
-        comptime Context: type,
-        context: *Context,
-        comptime execute_fn: fn (*Context) void,
-    ) Job {
+    /// Job state enumeration
+    pub const State = enum {
+        pending,
+        queued,
+        executing,
+    };
+
+    /// Create a sentinel head node for starting a job queue.
+    /// The head is special: it's never executed, just marks the start.
+    pub fn head() Job {
         return Job{
-            .execute_fn = @ptrCast(&execute_fn),
-            .context = @ptrCast(context),
-        };
-    }
-};
-
-/// A job with an associated completion latch.
-/// Used when the caller needs to wait for the job to complete.
-pub const LatchedJob = struct {
-    job: Job,
-    latch: *OnceLatch,
-
-    /// Execute the job and signal completion
-    pub fn execute(self: *const LatchedJob) void {
-        self.job.execute();
-        self.latch.setDone();
-    }
-
-    pub fn asJob(self: *LatchedJob) Job {
-        return Job{
-            .execute_fn = @ptrCast(&executeWrapper),
-            .context = @ptrCast(self),
+            .handler = undefined, // Not used for head
+            .prev_or_null = null, // No previous (we are the head)
+            .next_or_state = null, // No next yet (we are also the tail)
         };
     }
 
-    fn executeWrapper(self: *LatchedJob) void {
-        self.execute();
+    /// Create a pending job (not yet queued).
+    pub fn pending() Job {
+        return Job{
+            .handler = null,
+            .prev_or_null = undefined,
+            .next_or_state = undefined,
+        };
+    }
+
+    /// Get the current state of this job.
+    pub fn state(self: Job) State {
+        if (self.handler == null) return .pending;
+        if (self.prev_or_null != null) return .queued;
+        return .executing;
+    }
+
+    /// Check if this job is the tail of the queue (next is null).
+    pub fn isTail(self: Job) bool {
+        return self.next_or_state == null;
+    }
+
+    /// Get the execute state for an executing job.
+    /// Caller must ensure job is in executing state.
+    pub fn getExecuteState(self: *Job) *JobExecuteState {
+        std.debug.assert(self.state() == .executing);
+        return @ptrCast(@alignCast(self.next_or_state));
+    }
+
+    /// Set the execute state for an executing job.
+    pub fn setExecuteState(self: *Job, execute_state: *JobExecuteState) void {
+        std.debug.assert(self.state() == .executing);
+        self.next_or_state = execute_state;
+    }
+
+    /// Push this job onto the queue (append at tail).
+    /// This is the hot path - no branches, no atomics.
+    ///
+    /// Before: head -> ... -> tail (where tail.next = null)
+    /// After:  head -> ... -> tail -> self (where self.next = null)
+    pub fn push(self: *Job, tail: **Job, handler: *const fn (*Task, *Job) void) void {
+        std.debug.assert(self.state() == .pending);
+
+        self.handler = handler;
+        tail.*.next_or_state = self; // tail.next = self
+        self.prev_or_null = tail.*; // self.prev = tail
+        self.next_or_state = null; // self.next = null (new tail)
+        tail.* = self; // Update tail pointer
+
+        std.debug.assert(self.state() == .queued);
+    }
+
+    /// Pop this job from the queue (remove from tail).
+    /// This is called when we want to execute a job locally instead of letting it be stolen.
+    ///
+    /// Before: ... -> prev -> self (where self = tail)
+    /// After:  ... -> prev (where prev = new tail)
+    pub fn pop(self: *Job, tail: **Job) void {
+        std.debug.assert(self.state() == .queued);
+        std.debug.assert(tail.* == self);
+
+        const prev: *Job = @ptrCast(@alignCast(self.prev_or_null));
+        prev.next_or_state = null; // prev.next = null (prev is new tail)
+        tail.* = prev; // Update tail pointer
+
+        self.* = undefined; // Clear for safety
+    }
+
+    /// Shift the oldest job from the queue (remove from head).
+    /// This is used by the heartbeat to find a job to share.
+    ///
+    /// Before: head -> job -> next -> ... -> tail
+    /// After:  head -> next -> ... -> tail (job is returned in executing state)
+    ///
+    /// Returns null if:
+    /// - Queue is empty (head.next = null)
+    /// - Only one job (can't remove because we can't update tail)
+    pub fn shift(self: *Job) ?*Job {
+        const job: *Job = @as(?*Job, @ptrCast(@alignCast(self.next_or_state))) orelse return null;
+
+        std.debug.assert(job.state() == .queued);
+
+        // Get the job after the one we're removing
+        const next: ?*Job = @ptrCast(@alignCast(job.next_or_state));
+
+        // Can't remove if job is the tail (would need to update tail pointer)
+        if (next == null) return null;
+
+        // Unlink job from the list
+        next.?.prev_or_null = self; // next.prev = head
+        self.next_or_state = next; // head.next = next
+
+        // Transition job to executing state
+        job.prev_or_null = null; // Mark as executing (not queued)
+        job.next_or_state = undefined; // Will be set to JobExecuteState
+
+        std.debug.assert(job.state() == .executing);
+        return job;
     }
 };
 
-// ============================================================================
-// Stack-Allocated Jobs (for join())
-// ============================================================================
+/// State for a job that's being executed by another worker.
+/// This is allocated from a pool and holds the return value.
+pub const JobExecuteState = struct {
+    /// Signaled when execution completes.
+    done: std.Thread.ResetEvent = .{},
 
-/// A job that stores its context inline (no heap allocation).
-/// Used for join() where the job lives on the stack.
-pub fn StackJob(comptime Context: type, comptime execute_fn: fn (*Context) void) type {
-    return struct {
-        const Self = @This();
+    /// Storage for the return value.
+    result: ResultType,
 
-        context: Context,
-        latch: OnceLatch,
-        job: Job,
+    const ResultType = [max_result_words]u64;
 
-        pub fn init(ctx: Context) Self {
-            return Self{
-                .context = ctx,
-                .latch = OnceLatch.init(),
-                // Job context is set to a sentinel; executeWrapper uses @fieldParentPtr
-                .job = Job{
-                    .execute_fn = @ptrCast(&executeWrapper),
-                    .context = undefined, // Will use @fieldParentPtr instead
-                },
-            };
+    /// Get a typed pointer to the result storage.
+    pub fn resultPtr(self: *JobExecuteState, comptime T: type) *T {
+        if (@sizeOf(T) > @sizeOf(ResultType)) {
+            @compileError("return type is too large to be passed between threads (max 32 bytes)");
         }
-
-        fn executeWrapper(ctx: *anyopaque) void {
-            // The Job stores a pointer to its own location, use @fieldParentPtr
-            // to get the containing StackJob from the job field
-            const job_ptr: *Job = @alignCast(@ptrCast(ctx));
-            const self: *Self = @fieldParentPtr("job", job_ptr);
-            execute_fn(&self.context);
-        }
-
-        /// Get a pointer to the job
-        pub fn getJob(self: *Self) *Job {
-            // Set context to point to the job itself (for @fieldParentPtr)
-            self.job.context = @ptrCast(&self.job);
-            return &self.job;
-        }
-
-        /// Wait for the job to complete
-        pub fn wait(self: *Self) void {
-            self.latch.wait();
-        }
-
-        /// Check if done without blocking
-        pub fn isDone(self: *const Self) bool {
-            return self.latch.isDone();
-        }
-
-        /// Signal completion (called when job finishes)
-        pub fn complete(self: *Self) void {
-            self.latch.setDone();
-        }
-    };
-}
-
-// ============================================================================
-// Heap-Allocated Jobs (for spawn())
-// ============================================================================
-
-/// A heap-allocated job with inline context.
-/// Used for fire-and-forget spawned tasks.
-pub fn HeapJob(comptime Context: type, comptime execute_fn: fn (*Context) void) type {
-    return struct {
-        const Self = @This();
-
-        context: Context,
-        job: Job,
-        allocator: std.mem.Allocator,
-
-        pub fn create(allocator: std.mem.Allocator, ctx: Context) !*Self {
-            const self = try allocator.create(Self);
-            self.* = Self{
-                .context = ctx,
-                .job = undefined,
-                .allocator = allocator,
-            };
-            self.job = Job{
-                .execute_fn = @ptrCast(&executeAndDestroy),
-                .context = @ptrCast(self),
-            };
-            return self;
-        }
-
-        fn executeAndDestroy(self: *Self) void {
-            execute_fn(&self.context);
-            self.allocator.destroy(self);
-        }
-
-        pub fn getJob(self: *Self) *Job {
-            return &self.job;
-        }
-    };
-}
-
-// ============================================================================
-// Join Job (for fork-join parallelism)
-// ============================================================================
-
-/// Context for the right side of a join operation.
-/// The left side is executed directly, the right side may be stolen.
-pub fn JoinJob(
-    comptime ContextA: type,
-    comptime ContextB: type,
-    comptime fn_a: fn (*ContextA) void,
-    comptime fn_b: fn (*ContextB) void,
-) type {
-    return struct {
-        const Self = @This();
-
-        ctx_a: *ContextA,
-        ctx_b: *ContextB,
-        latch: CountLatch,
-        job_b: Job,
-
-        pub fn init(ctx_a: *ContextA, ctx_b: *ContextB) Self {
-            var self = Self{
-                .ctx_a = ctx_a,
-                .ctx_b = ctx_b,
-                .latch = CountLatch.init(2), // Wait for both A and B
-                .job_b = undefined,
-            };
-            self.job_b = Job{
-                .execute_fn = @ptrCast(&executeBAndSignal),
-                .context = @ptrCast(&self),
-            };
-            return self;
-        }
-
-        fn executeBAndSignal(self: *Self) void {
-            fn_b(self.ctx_b);
-            self.latch.countDown();
-        }
-
-        /// Execute A directly (owner thread)
-        pub fn executeA(self: *Self) void {
-            fn_a(self.ctx_a);
-            self.latch.countDown();
-        }
-
-        /// Execute B directly (if not stolen)
-        pub fn executeB(self: *Self) void {
-            fn_b(self.ctx_b);
-            self.latch.countDown();
-        }
-
-        /// Get the job for B (to be pushed to deque)
-        pub fn getJobB(self: *Self) *Job {
-            return &self.job_b;
-        }
-
-        /// Wait for both tasks to complete
-        pub fn wait(self: *Self) void {
-            self.latch.wait();
-        }
-
-        /// Check if both tasks are done
-        pub fn isDone(self: *const Self) bool {
-            return self.latch.isDone();
-        }
-    };
-}
-
-// ============================================================================
-// Parallel For Job
-// ============================================================================
-
-/// Context for a parallel for iteration.
-pub fn ForEachContext(comptime T: type, comptime body_fn: fn (T, usize, usize) void) type {
-    return struct {
-        const Self = @This();
-
-        user_context: T,
-        start: usize,
-        end: usize,
-        grain_size: usize,
-        latch: *CountLatch,
-
-        pub fn init(
-            user_ctx: T,
-            start: usize,
-            end: usize,
-            grain_size: usize,
-            count_latch: *CountLatch,
-        ) Self {
-            return Self{
-                .user_context = user_ctx,
-                .start = start,
-                .end = end,
-                .grain_size = grain_size,
-                .latch = count_latch,
-            };
-        }
-
-        pub fn execute(self: *Self) void {
-            const len = self.end - self.start;
-
-            if (len <= self.grain_size) {
-                // Base case: execute sequentially
-                body_fn(self.user_context, self.start, self.end);
-                self.latch.countDown();
-            } else {
-                // Recursive case: split and potentially parallelize
-                // This would be handled by the scheduler
-                body_fn(self.user_context, self.start, self.end);
-                self.latch.countDown();
-            }
-        }
-    };
-}
-
-// ============================================================================
-// Parallel Reduce Job
-// ============================================================================
-
-/// Context for a parallel reduce operation.
-pub fn ReduceContext(
-    comptime T: type,
-    comptime Context: type,
-    comptime map_fn: fn (Context, usize) T,
-    comptime combine_fn: fn (T, T) T,
-) type {
-    return struct {
-        const Self = @This();
-
-        user_context: Context,
-        start: usize,
-        end: usize,
-        identity: T,
-        grain_size: usize,
-        result: T,
-        latch: *CountLatch,
-
-        pub fn init(
-            user_ctx: Context,
-            start: usize,
-            end: usize,
-            identity: T,
-            grain_size: usize,
-            count_latch: *CountLatch,
-        ) Self {
-            return Self{
-                .user_context = user_ctx,
-                .start = start,
-                .end = end,
-                .identity = identity,
-                .grain_size = grain_size,
-                .result = identity,
-                .latch = count_latch,
-            };
-        }
-
-        pub fn execute(self: *Self) void {
-            // Sequential execution within this chunk
-            var result = self.identity;
-            for (self.start..self.end) |i| {
-                result = combine_fn(result, map_fn(self.user_context, i));
-            }
-            self.result = result;
-            self.latch.countDown();
-        }
-
-        pub fn getResult(self: *const Self) T {
-            return self.result;
-        }
-    };
-}
+        const bytes = std.mem.sliceAsBytes(&self.result);
+        return std.mem.bytesAsValue(T, bytes);
+    }
+};
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-test "Job - basic execution" {
-    const Context = struct {
-        value: u32,
-        executed: bool,
-    };
+test "Job - state transitions" {
+    var job = Job.pending();
+    try std.testing.expectEqual(Job.State.pending, job.state());
 
-    var ctx = Context{ .value = 42, .executed = false };
+    // Simulate push
+    var head = Job.head();
+    var tail: *Job = &head;
+    const handler = struct {
+        fn h(_: *Task, _: *Job) void {}
+    }.h;
 
-    const job = Job.from(Context, &ctx, struct {
-        fn exec(c: *Context) void {
-            c.executed = true;
-        }
-    }.exec);
-
-    try std.testing.expect(!ctx.executed);
-    job.execute();
-    try std.testing.expect(ctx.executed);
+    job.push(&tail, handler);
+    try std.testing.expectEqual(Job.State.queued, job.state());
+    try std.testing.expect(tail == &job);
 }
 
-test "StackJob - inline context" {
-    const Context = struct {
-        value: u32,
-        result: u32,
-    };
+test "Job - push and pop" {
+    var head = Job.head();
+    var tail: *Job = &head;
+    const handler = struct {
+        fn h(_: *Task, _: *Job) void {}
+    }.h;
 
-    var stack_job = StackJob(Context, struct {
-        fn exec(c: *Context) void {
-            c.result = c.value * 2;
-        }
-    }.exec).init(Context{ .value = 21, .result = 0 });
+    // Push 3 jobs
+    var jobs: [3]Job = .{ Job.pending(), Job.pending(), Job.pending() };
+    for (&jobs) |*j| {
+        j.push(&tail, handler);
+    }
 
-    // Must call getJob() to set up the context pointer before executing
-    const job = stack_job.getJob();
-    job.execute();
-    stack_job.complete();
+    try std.testing.expect(tail == &jobs[2]);
 
-    try std.testing.expectEqual(@as(u32, 42), stack_job.context.result);
-    try std.testing.expect(stack_job.isDone());
+    // Pop them in reverse order (LIFO)
+    jobs[2].pop(&tail);
+    try std.testing.expect(tail == &jobs[1]);
+
+    jobs[1].pop(&tail);
+    try std.testing.expect(tail == &jobs[0]);
+
+    jobs[0].pop(&tail);
+    try std.testing.expect(tail == &head);
 }
 
-test "HeapJob - heap allocated" {
-    const Context = struct {
-        counter: *std.atomic.Value(u32),
-    };
+test "Job - shift (steal from head)" {
+    var head = Job.head();
+    var tail: *Job = &head;
+    const handler = struct {
+        fn h(_: *Task, _: *Job) void {}
+    }.h;
 
-    var counter = std.atomic.Value(u32).init(0);
+    // With empty queue, shift returns null
+    try std.testing.expect(head.shift() == null);
 
-    const heap_job = try HeapJob(Context, struct {
-        fn exec(c: *Context) void {
-            _ = c.counter.fetchAdd(1, .acq_rel);
-        }
-    }.exec).create(std.testing.allocator, Context{ .counter = &counter });
+    // Push 2 jobs
+    var job1 = Job.pending();
+    var job2 = Job.pending();
+    job1.push(&tail, handler);
+    job2.push(&tail, handler);
 
-    heap_job.job.execute();
+    // Shift returns job1 (oldest)
+    const shifted = head.shift();
+    try std.testing.expect(shifted == &job1);
+    try std.testing.expectEqual(Job.State.executing, job1.state());
 
-    try std.testing.expectEqual(@as(u32, 1), counter.load(.acquire));
-    // HeapJob self-destructs, no need to free
+    // Can't shift job2 because it's the tail
+    try std.testing.expect(head.shift() == null);
 }
 
-test "JoinJob - both tasks complete" {
-    const CtxA = struct { done: bool };
-    const CtxB = struct { done: bool };
+test "Job - sentinel head is branch-free" {
+    var head = Job.head();
+    var tail: *Job = &head;
 
-    var ctx_a = CtxA{ .done = false };
-    var ctx_b = CtxB{ .done = false };
+    // Head is always valid, tail is always valid
+    // This means we never have null checks in push/pop
+    try std.testing.expect(head.isTail());
+    try std.testing.expect(tail.isTail());
 
-    var join_job = JoinJob(
-        CtxA,
-        CtxB,
-        struct {
-            fn exec(c: *CtxA) void {
-                c.done = true;
-            }
-        }.exec,
-        struct {
-            fn exec(c: *CtxB) void {
-                c.done = true;
-            }
-        }.exec,
-    ).init(&ctx_a, &ctx_b);
+    const handler = struct {
+        fn h(_: *Task, _: *Job) void {}
+    }.h;
 
-    // Execute both directly (simulating no stealing)
-    join_job.executeA();
-    join_job.executeB();
+    var job = Job.pending();
+    job.push(&tail, handler);
 
-    try std.testing.expect(ctx_a.done);
-    try std.testing.expect(ctx_b.done);
-    try std.testing.expect(join_job.isDone());
+    // After push, head still valid, tail points to job
+    try std.testing.expect(!head.isTail());
+    try std.testing.expect(job.isTail());
 }

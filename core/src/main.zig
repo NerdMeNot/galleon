@@ -5,13 +5,14 @@ const Allocator = std.mem.Allocator;
 pub const column = @import("column.zig");
 pub const simd = @import("simd.zig");
 pub const groupby = @import("groupby.zig");
+pub const arrow = @import("arrow.zig");
 
 // Runtime dispatch system
 pub const cpuid = @import("cpuid.zig");
 pub const dispatch = @import("dispatch.zig");
 
-// Work-stealing parallel execution
-pub const blitz = @import("blitz/mod.zig");
+// Blitz: Heartbeat-based work-stealing + SIMD-parallel operations
+pub const blitz = @import("blitz.zig");
 
 // ============================================================================
 // C ABI Exports - These are called from Go via CGO
@@ -557,13 +558,67 @@ export fn galleon_filter_mask_u8_gt_f64(
 
 // --- Sort Operations ---
 
+/// Argsort for f64 - returns indices that would sort the array
+/// Optimized with 11-bit radix, skip-pass, parallel scatter, and Verge detection
 export fn galleon_argsort_f64(
     data: [*]const f64,
     len: usize,
     out_indices: [*]u32,
     ascending: bool,
 ) void {
-    simd.argsort(f64, data[0..len], out_indices[0..len], ascending);
+    simd.argsortF64(data[0..len], out_indices[0..len], ascending);
+}
+
+/// Argsort for i64 - returns indices that would sort the array
+export fn galleon_argsort_i64(
+    data: [*]const i64,
+    len: usize,
+    out_indices: [*]u32,
+    ascending: bool,
+) void {
+    simd.argsortI64(data[0..len], out_indices[0..len], ascending);
+}
+
+/// Direct sort for f64 - sorts values directly (faster than argsort, no index tracking)
+export fn galleon_sort_f64(
+    data: [*]const f64,
+    len: usize,
+    out: [*]f64,
+    ascending: bool,
+) void {
+    simd.sortF64(data[0..len], out[0..len], ascending);
+}
+
+/// Direct sort for i64 - sorts values directly (faster than argsort, no index tracking)
+export fn galleon_sort_i64(
+    data: [*]const i64,
+    len: usize,
+    out: [*]i64,
+    ascending: bool,
+) void {
+    simd.sortI64(data[0..len], out[0..len], ascending);
+}
+
+/// Parallel gather for f64 - uses work-stealing parallelism
+export fn galleon_gather_f64_parallel(
+    src: [*]const f64,
+    src_len: usize,
+    indices: [*]const u32,
+    indices_len: usize,
+    dst: [*]f64,
+) void {
+    simd.gatherF64Parallel(src[0..src_len], indices[0..indices_len], dst[0..indices_len]);
+}
+
+/// Parallel gather for i64 - uses work-stealing parallelism
+export fn galleon_gather_i64_parallel(
+    src: [*]const i64,
+    src_len: usize,
+    indices: [*]const u32,
+    indices_len: usize,
+    dst: [*]i64,
+) void {
+    simd.gatherI64Parallel(src[0..src_len], indices[0..indices_len], dst[0..indices_len]);
 }
 
 // --- Mask to Indices Operations ---
@@ -649,15 +704,6 @@ export fn galleon_filter_mask_u8_gt_i64(
     simd.filterMaskU8GreaterThanInt(i64, data[0..len], threshold, out_mask[0..len]);
 }
 
-export fn galleon_argsort_i64(
-    data: [*]const i64,
-    len: usize,
-    out_indices: [*]u32,
-    ascending: bool,
-) void {
-    simd.argsortInt(i64, data[0..len], out_indices[0..len], ascending);
-}
-
 // ============================================================================
 // Int32 Operations
 // ============================================================================
@@ -737,7 +783,7 @@ export fn galleon_argsort_i32(
     out_indices: [*]u32,
     ascending: bool,
 ) void {
-    simd.argsortInt(i32, data[0..len], out_indices[0..len], ascending);
+    simd.argsortI32(data[0..len], out_indices[0..len], ascending);
 }
 
 // ============================================================================
@@ -827,7 +873,7 @@ export fn galleon_argsort_f32(
     out_indices: [*]u32,
     ascending: bool,
 ) void {
-    simd.argsort(f32, data[0..len], out_indices[0..len], ascending);
+    simd.argsortF32(data[0..len], out_indices[0..len], ascending);
 }
 
 // ============================================================================
@@ -1044,153 +1090,6 @@ export fn galleon_gather_f32(
     simd.gatherF32(src[0..1 << 30], indices[0..dst_len], dst[0..dst_len]);
 }
 
-export fn galleon_build_join_hash_table(
-    hashes: [*]const u64,
-    hashes_len: usize,
-    table: [*]i32,
-    next: [*]i32,
-    table_size: u32,
-) void {
-    simd.buildJoinHashTable(hashes[0..hashes_len], table[0..table_size], next[0..hashes_len], table_size);
-}
-
-export fn galleon_probe_join_hash_table(
-    probe_hashes: [*]const u64,
-    probe_keys: [*]const i64,
-    probe_len: usize,
-    build_keys: [*]const i64,
-    build_len: usize,
-    table: [*]const i32,
-    next: [*]const i32,
-    table_size: u32,
-    out_probe_indices: [*]i32,
-    out_build_indices: [*]i32,
-    max_matches: u32,
-) u32 {
-    _ = build_len;
-    return simd.probeJoinHashTable(
-        probe_hashes[0..probe_len],
-        probe_keys[0..probe_len],
-        build_keys[0..1 << 30],
-        table[0..table_size],
-        next[0..1 << 30],
-        table_size,
-        out_probe_indices[0..max_matches],
-        out_build_indices[0..max_matches],
-        max_matches,
-    );
-}
-
-// ============================================================================
-// End-to-End Inner Join (Single CGO Call - Phase 3)
-// ============================================================================
-
-/// Handle for end-to-end inner join result
-pub const InnerJoinResultHandle = struct {
-    result: simd.InnerJoinResult,
-};
-
-/// End-to-end inner join: pass left and right key columns, get matched indices
-/// Single CGO call - hash both sides, build table, probe, return indices
-export fn galleon_inner_join_e2e_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*InnerJoinResultHandle {
-    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
-    handle.result = simd.innerJoinI64(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
-
-export fn galleon_inner_join_result_num_matches(handle: *const InnerJoinResultHandle) u32 {
-    return handle.result.num_matches;
-}
-
-export fn galleon_inner_join_result_left_indices(handle: *const InnerJoinResultHandle) [*]const i32 {
-    return handle.result.left_indices.ptr;
-}
-
-export fn galleon_inner_join_result_right_indices(handle: *const InnerJoinResultHandle) [*]const i32 {
-    return handle.result.right_indices.ptr;
-}
-
-export fn galleon_inner_join_result_destroy(handle: *InnerJoinResultHandle) void {
-    handle.result.deinit();
-    std.heap.c_allocator.destroy(handle);
-}
-
-// ============================================================================
-// Left Join Operations
-// ============================================================================
-
-/// Handle for left join result
-pub const LeftJoinResultHandle = struct {
-    result: simd.LeftJoinResult,
-};
-
-/// Single-threaded left join
-export fn galleon_left_join_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*LeftJoinResultHandle {
-    const handle = std.heap.c_allocator.create(LeftJoinResultHandle) catch return null;
-    handle.result = simd.leftJoinI64(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
-
-/// Parallel left join
-export fn galleon_parallel_left_join_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*LeftJoinResultHandle {
-    const handle = std.heap.c_allocator.create(LeftJoinResultHandle) catch return null;
-    handle.result = simd.parallelLeftJoinI64(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
-
-export fn galleon_left_join_result_num_rows(handle: *const LeftJoinResultHandle) u32 {
-    return handle.result.num_rows;
-}
-
-export fn galleon_left_join_result_left_indices(handle: *const LeftJoinResultHandle) [*]const i32 {
-    return handle.result.left_indices.ptr;
-}
-
-export fn galleon_left_join_result_right_indices(handle: *const LeftJoinResultHandle) [*]const i32 {
-    return handle.result.right_indices.ptr;
-}
-
-export fn galleon_left_join_result_destroy(handle: *LeftJoinResultHandle) void {
-    handle.result.deinit();
-    std.heap.c_allocator.destroy(handle);
-}
-
 // ============================================================================
 // GroupBy Operations (Full Zig Implementation)
 // ============================================================================
@@ -1395,148 +1294,8 @@ export fn galleon_groupby_multi_agg_result_destroy(handle: *GroupByMultiAggResul
 }
 
 // ============================================================================
-// Parallel Operations (Multi-threaded)
+// GroupBy Operations
 // ============================================================================
-
-/// Parallel inner join with multi-threaded probing
-export fn galleon_parallel_inner_join_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*InnerJoinResultHandle {
-    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
-    // Use parallel probing for large datasets
-    handle.result = simd.parallelInnerJoinI64(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
-
-/// Check if i64 array is sorted (ascending)
-/// Returns true if sorted, false otherwise
-export fn galleon_is_sorted_i64(keys: [*]const i64, len: usize) bool {
-    return simd.joins.isSortedI64(keys[0..len]);
-}
-
-/// Radix inner join with inline keys - better cache performance
-export fn galleon_inner_join_radix_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*InnerJoinResultHandle {
-    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
-    handle.result = simd.innerJoinI64Radix(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
-
-/// Sort-merge inner join - excellent cache locality
-export fn galleon_inner_join_sort_merge_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*InnerJoinResultHandle {
-    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
-    handle.result = simd.innerJoinI64SortMerge(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
-
-/// Sort-merge left join - excellent cache locality
-export fn galleon_left_join_sort_merge_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*LeftJoinResultHandle {
-    const handle = std.heap.c_allocator.create(LeftJoinResultHandle) catch return null;
-    handle.result = simd.leftJoinI64SortMerge(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
-
-/// Swiss Table inner join - SIMD control byte probing
-export fn galleon_inner_join_swiss_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*InnerJoinResultHandle {
-    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
-    handle.result = simd.innerJoinI64Swiss(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
-
-/// Two-pass inner join with open-addressing hash table - pre-sized allocation
-export fn galleon_inner_join_two_pass_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*InnerJoinResultHandle {
-    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
-    handle.result = simd.innerJoinI64TwoPass(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
-
-/// SIMD-accelerated inner join with inline keys
-export fn galleon_inner_join_simd_i64(
-    left_keys: [*]const i64,
-    left_len: usize,
-    right_keys: [*]const i64,
-    right_len: usize,
-) ?*InnerJoinResultHandle {
-    const handle = std.heap.c_allocator.create(InnerJoinResultHandle) catch return null;
-    handle.result = simd.innerJoinI64Simd(
-        std.heap.c_allocator,
-        left_keys[0..left_len],
-        right_keys[0..right_len],
-    ) catch {
-        std.heap.c_allocator.destroy(handle);
-        return null;
-    };
-    return handle;
-}
 
 /// Aggregate sum f64 by group (uses group IDs from groupby result)
 export fn galleon_groupby_sum_f64(
@@ -1684,15 +1443,15 @@ export fn galleon_chunked_f64_filter_lt(col: *const ChunkedColumnF64Handle, thre
 }
 
 /// Argsort result handle
-pub const ChunkedArgsortResult = struct {
+pub const ChunkedSeriesArgsortResult = struct {
     indices: []u32,
     allocator: Allocator,
 };
 
 /// Argsort - returns indices that would sort the column
-export fn galleon_chunked_f64_argsort(col: *chunked.ChunkedColumn(f64)) ?*ChunkedArgsortResult {
+export fn galleon_chunked_f64_argsort(col: *chunked.ChunkedColumn(f64)) ?*ChunkedSeriesArgsortResult {
     const result = chunked.OpsF64.argsort(col, std.heap.c_allocator) catch return null;
-    const handle = std.heap.c_allocator.create(ChunkedArgsortResult) catch {
+    const handle = std.heap.c_allocator.create(ChunkedSeriesArgsortResult) catch {
         result.allocator.free(result.indices);
         return null;
     };
@@ -1702,17 +1461,17 @@ export fn galleon_chunked_f64_argsort(col: *chunked.ChunkedColumn(f64)) ?*Chunke
 }
 
 /// Get argsort result length
-export fn galleon_chunked_argsort_len(handle: *const ChunkedArgsortResult) usize {
+export fn galleon_chunked_argsort_len(handle: *const ChunkedSeriesArgsortResult) usize {
     return handle.indices.len;
 }
 
 /// Get argsort result indices pointer
-export fn galleon_chunked_argsort_indices(handle: *const ChunkedArgsortResult) [*]const u32 {
+export fn galleon_chunked_argsort_indices(handle: *const ChunkedSeriesArgsortResult) [*]const u32 {
     return handle.indices.ptr;
 }
 
 /// Free argsort result
-export fn galleon_chunked_argsort_destroy(handle: *ChunkedArgsortResult) void {
+export fn galleon_chunked_argsort_destroy(handle: *ChunkedSeriesArgsortResult) void {
     handle.allocator.free(handle.indices);
     std.heap.c_allocator.destroy(handle);
 }
@@ -1720,6 +1479,1078 @@ export fn galleon_chunked_argsort_destroy(handle: *ChunkedArgsortResult) void {
 /// Sort - returns new sorted chunked column
 export fn galleon_chunked_f64_sort(col: *chunked.ChunkedColumn(f64)) ?*ChunkedColumnF64Handle {
     return chunked.OpsF64.sort(col, std.heap.c_allocator) catch null;
+}
+
+// ============================================================================
+// Arrow C Data Interface Operations (Zig-Managed)
+// ============================================================================
+// Go sends raw data to Zig. Zig creates and manages Arrow arrays.
+// This ensures all Arrow operations happen in Zig, not Go.
+
+/// Re-export Arrow types for CGO
+pub const ArrowSchema = arrow.ArrowSchema;
+pub const ArrowArray = arrow.ArrowArray;
+pub const ManagedArrowArray = arrow.ManagedArrowArray;
+
+// --- Managed Arrow Array Creation (Go sends raw data, Zig creates Arrow array) ---
+
+/// Create a Float64 Arrow array from raw data
+/// Go passes a pointer to float64 data, Zig copies it into an Arrow-managed buffer
+export fn galleon_series_create_f64(data: [*]const f64, len: usize) ?*ManagedArrowArray {
+    return ManagedArrowArray.createF64(std.heap.c_allocator, data[0..len]) catch null;
+}
+
+/// Create an Int64 Arrow array from raw data
+export fn galleon_series_create_i64(data: [*]const i64, len: usize) ?*ManagedArrowArray {
+    return ManagedArrowArray.createI64(std.heap.c_allocator, data[0..len]) catch null;
+}
+
+/// Create a Float64 Arrow array with null values
+/// valid_bitmap: packed bits where 1=valid, 0=null (LSB first, Arrow format)
+export fn galleon_series_create_f64_with_nulls(
+    data: [*]const f64,
+    len: usize,
+    valid_bitmap: [*]const u8,
+    bitmap_len: usize,
+    null_count: i64,
+) ?*ManagedArrowArray {
+    return ManagedArrowArray.createF64WithNulls(
+        std.heap.c_allocator,
+        data[0..len],
+        valid_bitmap[0..bitmap_len],
+        null_count,
+    ) catch null;
+}
+
+/// Create an Int64 Arrow array with null values
+export fn galleon_series_create_i64_with_nulls(
+    data: [*]const i64,
+    len: usize,
+    valid_bitmap: [*]const u8,
+    bitmap_len: usize,
+    null_count: i64,
+) ?*ManagedArrowArray {
+    return ManagedArrowArray.createI64WithNulls(
+        std.heap.c_allocator,
+        data[0..len],
+        valid_bitmap[0..bitmap_len],
+        null_count,
+    ) catch null;
+}
+
+/// Destroy a managed Arrow array (frees all memory)
+export fn galleon_series_destroy(arr: *ManagedArrowArray) void {
+    arr.deinit();
+}
+
+// --- Managed Arrow Array Properties ---
+
+/// Get length of managed Arrow array
+export fn galleon_series_len(arr: *const ManagedArrowArray) usize {
+    return arr.len();
+}
+
+/// Get null count of managed Arrow array
+export fn galleon_series_null_count(arr: *const ManagedArrowArray) i64 {
+    return arr.nullCount();
+}
+
+/// Check if managed Arrow array has nulls
+export fn galleon_series_has_nulls(arr: *const ManagedArrowArray) bool {
+    return arr.hasNulls();
+}
+
+// --- Managed Arrow Array SIMD Operations ---
+
+/// Sum Float64 managed Arrow array using SIMD
+export fn galleon_series_sum_f64(arr: *const ManagedArrowArray) f64 {
+    return arr.sumF64();
+}
+
+/// Min Float64 managed Arrow array using SIMD
+export fn galleon_series_min_f64(arr: *const ManagedArrowArray) f64 {
+    return arr.minF64();
+}
+
+/// Max Float64 managed Arrow array using SIMD
+export fn galleon_series_max_f64(arr: *const ManagedArrowArray) f64 {
+    return arr.maxF64();
+}
+
+/// Mean Float64 managed Arrow array
+export fn galleon_series_mean_f64(arr: *const ManagedArrowArray) f64 {
+    return arr.meanF64();
+}
+
+/// Sum Int64 managed Arrow array using SIMD
+export fn galleon_series_sum_i64(arr: *const ManagedArrowArray) i64 {
+    return arr.sumI64();
+}
+
+/// Min Int64 managed Arrow array
+export fn galleon_series_min_i64(arr: *const ManagedArrowArray) i64 {
+    return arr.minI64();
+}
+
+/// Max Int64 managed Arrow array
+export fn galleon_series_max_i64(arr: *const ManagedArrowArray) i64 {
+    return arr.maxI64();
+}
+
+// --- Arrow Sort Operations ---
+
+/// Argsort result handle - owns the indices array
+pub const SeriesArgsortResult = struct {
+    indices: []u32,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *SeriesArgsortResult) void {
+        if (self.indices.len > 0) {
+            self.allocator.free(self.indices);
+        }
+        self.allocator.destroy(self);
+    }
+};
+
+/// Argsort Float64 Arrow array - returns indices that would sort the array
+export fn galleon_series_argsort_f64(arr: *const ManagedArrowArray, ascending: bool) ?*SeriesArgsortResult {
+    const result = std.heap.c_allocator.create(SeriesArgsortResult) catch return null;
+    result.allocator = std.heap.c_allocator;
+    result.indices = arr.argsortF64(ascending) catch {
+        std.heap.c_allocator.destroy(result);
+        return null;
+    };
+    return result;
+}
+
+/// Argsort Int64 Arrow array
+export fn galleon_series_argsort_i64(arr: *const ManagedArrowArray, ascending: bool) ?*SeriesArgsortResult {
+    const result = std.heap.c_allocator.create(SeriesArgsortResult) catch return null;
+    result.allocator = std.heap.c_allocator;
+    result.indices = arr.argsortI64(ascending) catch {
+        std.heap.c_allocator.destroy(result);
+        return null;
+    };
+    return result;
+}
+
+/// Get argsort result length
+export fn galleon_series_argsort_len(result: *const SeriesArgsortResult) usize {
+    return result.indices.len;
+}
+
+/// Get argsort result indices pointer
+export fn galleon_series_argsort_indices(result: *const SeriesArgsortResult) [*]const u32 {
+    return result.indices.ptr;
+}
+
+/// Free argsort result
+export fn galleon_series_argsort_destroy(result: *SeriesArgsortResult) void {
+    result.deinit();
+}
+
+/// Sort Float64 Arrow array - returns new sorted ManagedArrowArray
+export fn galleon_series_sort_f64(arr: *const ManagedArrowArray, ascending: bool) ?*ManagedArrowArray {
+    return arr.sortF64(ascending) catch null;
+}
+
+/// Sort Int64 Arrow array - returns new sorted ManagedArrowArray
+export fn galleon_series_sort_i64(arr: *const ManagedArrowArray, ascending: bool) ?*ManagedArrowArray {
+    return arr.sortI64(ascending) catch null;
+}
+
+// --- Arrow Data Access ---
+
+/// Check if value at index is valid (not null)
+export fn galleon_series_is_valid(arr: *const ManagedArrowArray, index: usize) bool {
+    return arr.isValidAt(index);
+}
+
+/// Get Float64 value at index, returns NaN if null or out of bounds
+export fn galleon_series_get_f64(arr: *const ManagedArrowArray, index: usize) f64 {
+    return arr.getF64(index) orelse std.math.nan(f64);
+}
+
+/// Get Int64 value at index, returns 0 if null or out of bounds
+/// Use galleon_series_is_valid to check validity first
+export fn galleon_series_get_i64(arr: *const ManagedArrowArray, index: usize) i64 {
+    return arr.getI64(index) orelse 0;
+}
+
+/// Get raw pointer to Float64 data buffer (for zero-copy access)
+export fn galleon_series_data_ptr_f64(arr: *const ManagedArrowArray) ?[*]const f64 {
+    return arr.getDataPtrF64();
+}
+
+/// Get raw pointer to Int64 data buffer
+export fn galleon_series_data_ptr_i64(arr: *const ManagedArrowArray) ?[*]const i64 {
+    return arr.getDataPtrI64();
+}
+
+/// Create a slice of Float64 array [start, end)
+export fn galleon_series_slice_f64(arr: *const ManagedArrowArray, start: usize, end: usize) ?*ManagedArrowArray {
+    return arr.sliceF64(start, end) catch null;
+}
+
+/// Create a slice of Int64 array [start, end)
+export fn galleon_series_slice_i64(arr: *const ManagedArrowArray, start: usize, end: usize) ?*ManagedArrowArray {
+    return arr.sliceI64(start, end) catch null;
+}
+
+/// Copy Float64 data to provided buffer, returns number of elements copied
+export fn galleon_series_copy_f64(arr: *const ManagedArrowArray, dest: [*]f64, dest_len: usize) usize {
+    return arr.copyToF64(dest[0..dest_len]);
+}
+
+/// Copy Int64 data to provided buffer, returns number of elements copied
+export fn galleon_series_copy_i64(arr: *const ManagedArrowArray, dest: [*]i64, dest_len: usize) usize {
+    return arr.copyToI64(dest[0..dest_len]);
+}
+
+// ============================================================================
+// Float32 Series Operations
+// ============================================================================
+
+/// Create a Float32 Arrow array from raw data
+export fn galleon_series_create_f32(data: [*]const f32, len: usize) ?*ManagedArrowArray {
+    return ManagedArrowArray.createF32(std.heap.c_allocator, data[0..len]) catch null;
+}
+
+/// Create a Float32 Arrow array with null values
+export fn galleon_series_create_f32_with_nulls(
+    data: [*]const f32,
+    len: usize,
+    valid_bitmap: [*]const u8,
+    bitmap_len: usize,
+    null_count: i64,
+) ?*ManagedArrowArray {
+    return ManagedArrowArray.createF32WithNulls(
+        std.heap.c_allocator,
+        data[0..len],
+        valid_bitmap[0..bitmap_len],
+        null_count,
+    ) catch null;
+}
+
+/// Sum Float32 managed Arrow array
+export fn galleon_series_sum_f32(arr: *const ManagedArrowArray) f32 {
+    return arr.sumF32();
+}
+
+/// Min Float32 managed Arrow array
+export fn galleon_series_min_f32(arr: *const ManagedArrowArray) f32 {
+    return arr.minF32();
+}
+
+/// Max Float32 managed Arrow array
+export fn galleon_series_max_f32(arr: *const ManagedArrowArray) f32 {
+    return arr.maxF32();
+}
+
+/// Mean Float32 managed Arrow array
+export fn galleon_series_mean_f32(arr: *const ManagedArrowArray) f32 {
+    return arr.meanF32();
+}
+
+/// Argsort Float32 Arrow array
+export fn galleon_series_argsort_f32(arr: *const ManagedArrowArray, ascending: bool) ?*SeriesArgsortResult {
+    const result = std.heap.c_allocator.create(SeriesArgsortResult) catch return null;
+    result.allocator = std.heap.c_allocator;
+    result.indices = arr.argsortF32(ascending) catch {
+        std.heap.c_allocator.destroy(result);
+        return null;
+    };
+    return result;
+}
+
+/// Sort Float32 Arrow array
+export fn galleon_series_sort_f32(arr: *const ManagedArrowArray, ascending: bool) ?*ManagedArrowArray {
+    return arr.sortF32(ascending) catch null;
+}
+
+/// Get Float32 value at index
+export fn galleon_series_get_f32(arr: *const ManagedArrowArray, index: usize) f32 {
+    return arr.getF32(index) orelse std.math.nan(f32);
+}
+
+/// Get raw pointer to Float32 data buffer
+export fn galleon_series_data_ptr_f32(arr: *const ManagedArrowArray) ?[*]const f32 {
+    return arr.getDataPtrF32();
+}
+
+/// Create a slice of Float32 array
+export fn galleon_series_slice_f32(arr: *const ManagedArrowArray, start: usize, end: usize) ?*ManagedArrowArray {
+    return arr.sliceF32(start, end) catch null;
+}
+
+/// Copy Float32 data to provided buffer
+export fn galleon_series_copy_f32(arr: *const ManagedArrowArray, dest: [*]f32, dest_len: usize) usize {
+    return arr.copyToF32(dest[0..dest_len]);
+}
+
+// ============================================================================
+// Int32 Series Operations
+// ============================================================================
+
+/// Create an Int32 Arrow array from raw data
+export fn galleon_series_create_i32(data: [*]const i32, len: usize) ?*ManagedArrowArray {
+    return ManagedArrowArray.createI32(std.heap.c_allocator, data[0..len]) catch null;
+}
+
+/// Create an Int32 Arrow array with null values
+export fn galleon_series_create_i32_with_nulls(
+    data: [*]const i32,
+    len: usize,
+    valid_bitmap: [*]const u8,
+    bitmap_len: usize,
+    null_count: i64,
+) ?*ManagedArrowArray {
+    return ManagedArrowArray.createI32WithNulls(
+        std.heap.c_allocator,
+        data[0..len],
+        valid_bitmap[0..bitmap_len],
+        null_count,
+    ) catch null;
+}
+
+/// Sum Int32 managed Arrow array
+export fn galleon_series_sum_i32(arr: *const ManagedArrowArray) i32 {
+    return arr.sumI32();
+}
+
+/// Min Int32 managed Arrow array
+export fn galleon_series_min_i32(arr: *const ManagedArrowArray) i32 {
+    return arr.minI32();
+}
+
+/// Max Int32 managed Arrow array
+export fn galleon_series_max_i32(arr: *const ManagedArrowArray) i32 {
+    return arr.maxI32();
+}
+
+/// Argsort Int32 Arrow array
+export fn galleon_series_argsort_i32(arr: *const ManagedArrowArray, ascending: bool) ?*SeriesArgsortResult {
+    const result = std.heap.c_allocator.create(SeriesArgsortResult) catch return null;
+    result.allocator = std.heap.c_allocator;
+    result.indices = arr.argsortI32(ascending) catch {
+        std.heap.c_allocator.destroy(result);
+        return null;
+    };
+    return result;
+}
+
+/// Sort Int32 Arrow array
+export fn galleon_series_sort_i32(arr: *const ManagedArrowArray, ascending: bool) ?*ManagedArrowArray {
+    return arr.sortI32(ascending) catch null;
+}
+
+/// Get Int32 value at index
+export fn galleon_series_get_i32(arr: *const ManagedArrowArray, index: usize) i32 {
+    return arr.getI32(index) orelse 0;
+}
+
+/// Get raw pointer to Int32 data buffer
+export fn galleon_series_data_ptr_i32(arr: *const ManagedArrowArray) ?[*]const i32 {
+    return arr.getDataPtrI32();
+}
+
+/// Create a slice of Int32 array
+export fn galleon_series_slice_i32(arr: *const ManagedArrowArray, start: usize, end: usize) ?*ManagedArrowArray {
+    return arr.sliceI32(start, end) catch null;
+}
+
+/// Copy Int32 data to provided buffer
+export fn galleon_series_copy_i32(arr: *const ManagedArrowArray, dest: [*]i32, dest_len: usize) usize {
+    return arr.copyToI32(dest[0..dest_len]);
+}
+
+// ============================================================================
+// UInt64 Series Operations
+// ============================================================================
+
+/// Create a UInt64 Arrow array from raw data
+export fn galleon_series_create_u64(data: [*]const u64, len: usize) ?*ManagedArrowArray {
+    return ManagedArrowArray.createU64(std.heap.c_allocator, data[0..len]) catch null;
+}
+
+/// Create a UInt64 Arrow array with null values
+export fn galleon_series_create_u64_with_nulls(
+    data: [*]const u64,
+    len: usize,
+    valid_bitmap: [*]const u8,
+    bitmap_len: usize,
+    null_count: i64,
+) ?*ManagedArrowArray {
+    return ManagedArrowArray.createU64WithNulls(
+        std.heap.c_allocator,
+        data[0..len],
+        valid_bitmap[0..bitmap_len],
+        null_count,
+    ) catch null;
+}
+
+/// Sum UInt64 managed Arrow array
+export fn galleon_series_sum_u64(arr: *const ManagedArrowArray) u64 {
+    return arr.sumU64();
+}
+
+/// Min UInt64 managed Arrow array
+export fn galleon_series_min_u64(arr: *const ManagedArrowArray) u64 {
+    return arr.minU64();
+}
+
+/// Max UInt64 managed Arrow array
+export fn galleon_series_max_u64(arr: *const ManagedArrowArray) u64 {
+    return arr.maxU64();
+}
+
+/// Argsort UInt64 Arrow array
+export fn galleon_series_argsort_u64(arr: *const ManagedArrowArray, ascending: bool) ?*SeriesArgsortResult {
+    const result = std.heap.c_allocator.create(SeriesArgsortResult) catch return null;
+    result.allocator = std.heap.c_allocator;
+    result.indices = arr.argsortU64(ascending) catch {
+        std.heap.c_allocator.destroy(result);
+        return null;
+    };
+    return result;
+}
+
+/// Sort UInt64 Arrow array
+export fn galleon_series_sort_u64(arr: *const ManagedArrowArray, ascending: bool) ?*ManagedArrowArray {
+    return arr.sortU64(ascending) catch null;
+}
+
+/// Get UInt64 value at index
+export fn galleon_series_get_u64(arr: *const ManagedArrowArray, index: usize) u64 {
+    return arr.getU64(index) orelse 0;
+}
+
+/// Get raw pointer to UInt64 data buffer
+export fn galleon_series_data_ptr_u64(arr: *const ManagedArrowArray) ?[*]const u64 {
+    return arr.getDataPtrU64();
+}
+
+/// Create a slice of UInt64 array
+export fn galleon_series_slice_u64(arr: *const ManagedArrowArray, start: usize, end: usize) ?*ManagedArrowArray {
+    return arr.sliceU64(start, end) catch null;
+}
+
+/// Copy UInt64 data to provided buffer
+export fn galleon_series_copy_u64(arr: *const ManagedArrowArray, dest: [*]u64, dest_len: usize) usize {
+    return arr.copyToU64(dest[0..dest_len]);
+}
+
+// ============================================================================
+// UInt32 Series Operations
+// ============================================================================
+
+/// Create a UInt32 Arrow array from raw data
+export fn galleon_series_create_u32(data: [*]const u32, len: usize) ?*ManagedArrowArray {
+    return ManagedArrowArray.createU32(std.heap.c_allocator, data[0..len]) catch null;
+}
+
+/// Create a UInt32 Arrow array with null values
+export fn galleon_series_create_u32_with_nulls(
+    data: [*]const u32,
+    len: usize,
+    valid_bitmap: [*]const u8,
+    bitmap_len: usize,
+    null_count: i64,
+) ?*ManagedArrowArray {
+    return ManagedArrowArray.createU32WithNulls(
+        std.heap.c_allocator,
+        data[0..len],
+        valid_bitmap[0..bitmap_len],
+        null_count,
+    ) catch null;
+}
+
+/// Sum UInt32 managed Arrow array
+export fn galleon_series_sum_u32(arr: *const ManagedArrowArray) u32 {
+    return arr.sumU32();
+}
+
+/// Min UInt32 managed Arrow array
+export fn galleon_series_min_u32(arr: *const ManagedArrowArray) u32 {
+    return arr.minU32();
+}
+
+/// Max UInt32 managed Arrow array
+export fn galleon_series_max_u32(arr: *const ManagedArrowArray) u32 {
+    return arr.maxU32();
+}
+
+/// Argsort UInt32 Arrow array
+export fn galleon_series_argsort_u32(arr: *const ManagedArrowArray, ascending: bool) ?*SeriesArgsortResult {
+    const result = std.heap.c_allocator.create(SeriesArgsortResult) catch return null;
+    result.allocator = std.heap.c_allocator;
+    result.indices = arr.argsortU32(ascending) catch {
+        std.heap.c_allocator.destroy(result);
+        return null;
+    };
+    return result;
+}
+
+/// Sort UInt32 Arrow array
+export fn galleon_series_sort_u32(arr: *const ManagedArrowArray, ascending: bool) ?*ManagedArrowArray {
+    return arr.sortU32(ascending) catch null;
+}
+
+/// Get UInt32 value at index
+export fn galleon_series_get_u32(arr: *const ManagedArrowArray, index: usize) u32 {
+    return arr.getU32(index) orelse 0;
+}
+
+/// Get raw pointer to UInt32 data buffer
+export fn galleon_series_data_ptr_u32(arr: *const ManagedArrowArray) ?[*]const u32 {
+    return arr.getDataPtrU32();
+}
+
+/// Create a slice of UInt32 array
+export fn galleon_series_slice_u32(arr: *const ManagedArrowArray, start: usize, end: usize) ?*ManagedArrowArray {
+    return arr.sliceU32(start, end) catch null;
+}
+
+/// Copy UInt32 data to provided buffer
+export fn galleon_series_copy_u32(arr: *const ManagedArrowArray, dest: [*]u32, dest_len: usize) usize {
+    return arr.copyToU32(dest[0..dest_len]);
+}
+
+// --- Arrow Filter Operations ---
+
+/// Result for comparison operations - holds boolean mask
+pub const SeriesFilterResult = struct {
+    mask: []bool,
+    allocator: std.mem.Allocator,
+};
+
+/// Create filter result from mask
+fn createSeriesFilterResult(mask: []bool) ?*SeriesFilterResult {
+    const result = std.heap.c_allocator.create(SeriesFilterResult) catch return null;
+    result.mask = mask;
+    result.allocator = std.heap.c_allocator;
+    return result;
+}
+
+/// Get filter result length
+export fn galleon_series_filter_result_len(result: *const SeriesFilterResult) usize {
+    return result.mask.len;
+}
+
+/// Get filter result mask pointer
+export fn galleon_series_filter_result_mask(result: *const SeriesFilterResult) [*]const bool {
+    return result.mask.ptr;
+}
+
+/// Destroy filter result
+export fn galleon_series_filter_result_destroy(result: *SeriesFilterResult) void {
+    result.allocator.free(result.mask);
+    std.heap.c_allocator.destroy(result);
+}
+
+/// Float64 greater than comparison
+export fn galleon_series_gt_f64(arr: *const ManagedArrowArray, value: f64) ?*SeriesFilterResult {
+    const mask = arr.gtF64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Float64 greater than or equal comparison
+export fn galleon_series_ge_f64(arr: *const ManagedArrowArray, value: f64) ?*SeriesFilterResult {
+    const mask = arr.geF64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Float64 less than comparison
+export fn galleon_series_lt_f64(arr: *const ManagedArrowArray, value: f64) ?*SeriesFilterResult {
+    const mask = arr.ltF64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Float64 less than or equal comparison
+export fn galleon_series_le_f64(arr: *const ManagedArrowArray, value: f64) ?*SeriesFilterResult {
+    const mask = arr.leF64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Float64 equal comparison
+export fn galleon_series_eq_f64(arr: *const ManagedArrowArray, value: f64) ?*SeriesFilterResult {
+    const mask = arr.eqF64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Float64 not equal comparison
+export fn galleon_series_ne_f64(arr: *const ManagedArrowArray, value: f64) ?*SeriesFilterResult {
+    const mask = arr.neF64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Int64 greater than comparison
+export fn galleon_series_gt_i64(arr: *const ManagedArrowArray, value: i64) ?*SeriesFilterResult {
+    const mask = arr.gtI64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Int64 greater than or equal comparison
+export fn galleon_series_ge_i64(arr: *const ManagedArrowArray, value: i64) ?*SeriesFilterResult {
+    const mask = arr.geI64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Int64 less than comparison
+export fn galleon_series_lt_i64(arr: *const ManagedArrowArray, value: i64) ?*SeriesFilterResult {
+    const mask = arr.ltI64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Int64 less than or equal comparison
+export fn galleon_series_le_i64(arr: *const ManagedArrowArray, value: i64) ?*SeriesFilterResult {
+    const mask = arr.leI64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Int64 equal comparison
+export fn galleon_series_eq_i64(arr: *const ManagedArrowArray, value: i64) ?*SeriesFilterResult {
+    const mask = arr.eqI64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Int64 not equal comparison
+export fn galleon_series_ne_i64(arr: *const ManagedArrowArray, value: i64) ?*SeriesFilterResult {
+    const mask = arr.neI64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+// Float32 Comparisons
+export fn galleon_series_gt_f32(arr: *const ManagedArrowArray, value: f32) ?*SeriesFilterResult {
+    const mask = arr.gtF32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_ge_f32(arr: *const ManagedArrowArray, value: f32) ?*SeriesFilterResult {
+    const mask = arr.geF32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_lt_f32(arr: *const ManagedArrowArray, value: f32) ?*SeriesFilterResult {
+    const mask = arr.ltF32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_le_f32(arr: *const ManagedArrowArray, value: f32) ?*SeriesFilterResult {
+    const mask = arr.leF32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_eq_f32(arr: *const ManagedArrowArray, value: f32) ?*SeriesFilterResult {
+    const mask = arr.eqF32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_ne_f32(arr: *const ManagedArrowArray, value: f32) ?*SeriesFilterResult {
+    const mask = arr.neF32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+// Int32 Comparisons
+export fn galleon_series_gt_i32(arr: *const ManagedArrowArray, value: i32) ?*SeriesFilterResult {
+    const mask = arr.gtI32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_ge_i32(arr: *const ManagedArrowArray, value: i32) ?*SeriesFilterResult {
+    const mask = arr.geI32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_lt_i32(arr: *const ManagedArrowArray, value: i32) ?*SeriesFilterResult {
+    const mask = arr.ltI32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_le_i32(arr: *const ManagedArrowArray, value: i32) ?*SeriesFilterResult {
+    const mask = arr.leI32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_eq_i32(arr: *const ManagedArrowArray, value: i32) ?*SeriesFilterResult {
+    const mask = arr.eqI32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_ne_i32(arr: *const ManagedArrowArray, value: i32) ?*SeriesFilterResult {
+    const mask = arr.neI32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+// UInt64 Comparisons
+export fn galleon_series_gt_u64(arr: *const ManagedArrowArray, value: u64) ?*SeriesFilterResult {
+    const mask = arr.gtU64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_ge_u64(arr: *const ManagedArrowArray, value: u64) ?*SeriesFilterResult {
+    const mask = arr.geU64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_lt_u64(arr: *const ManagedArrowArray, value: u64) ?*SeriesFilterResult {
+    const mask = arr.ltU64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_le_u64(arr: *const ManagedArrowArray, value: u64) ?*SeriesFilterResult {
+    const mask = arr.leU64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_eq_u64(arr: *const ManagedArrowArray, value: u64) ?*SeriesFilterResult {
+    const mask = arr.eqU64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_ne_u64(arr: *const ManagedArrowArray, value: u64) ?*SeriesFilterResult {
+    const mask = arr.neU64(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+// UInt32 Comparisons
+export fn galleon_series_gt_u32(arr: *const ManagedArrowArray, value: u32) ?*SeriesFilterResult {
+    const mask = arr.gtU32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_ge_u32(arr: *const ManagedArrowArray, value: u32) ?*SeriesFilterResult {
+    const mask = arr.geU32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_lt_u32(arr: *const ManagedArrowArray, value: u32) ?*SeriesFilterResult {
+    const mask = arr.ltU32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_le_u32(arr: *const ManagedArrowArray, value: u32) ?*SeriesFilterResult {
+    const mask = arr.leU32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_eq_u32(arr: *const ManagedArrowArray, value: u32) ?*SeriesFilterResult {
+    const mask = arr.eqU32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+export fn galleon_series_ne_u32(arr: *const ManagedArrowArray, value: u32) ?*SeriesFilterResult {
+    const mask = arr.neU32(value) catch return null;
+    return createSeriesFilterResult(mask);
+}
+
+/// Filter Float64 array by boolean mask
+export fn galleon_series_filter_f64(arr: *const ManagedArrowArray, mask: [*]const bool, mask_len: usize) ?*ManagedArrowArray {
+    return arr.filterF64(mask[0..mask_len]) catch null;
+}
+
+/// Filter Int64 array by boolean mask
+export fn galleon_series_filter_i64(arr: *const ManagedArrowArray, mask: [*]const bool, mask_len: usize) ?*ManagedArrowArray {
+    return arr.filterI64(mask[0..mask_len]) catch null;
+}
+
+// ============================================================================
+// Arrow Arithmetic Operations
+// ============================================================================
+
+/// Add two Float64 arrays element-wise
+export fn galleon_series_add_f64(arr1: *const ManagedArrowArray, arr2: *const ManagedArrowArray) ?*ManagedArrowArray {
+    return arr1.addF64(arr2) catch null;
+}
+
+/// Subtract two Float64 arrays element-wise
+export fn galleon_series_sub_f64(arr1: *const ManagedArrowArray, arr2: *const ManagedArrowArray) ?*ManagedArrowArray {
+    return arr1.subF64(arr2) catch null;
+}
+
+/// Multiply two Float64 arrays element-wise
+export fn galleon_series_mul_f64(arr1: *const ManagedArrowArray, arr2: *const ManagedArrowArray) ?*ManagedArrowArray {
+    return arr1.mulF64(arr2) catch null;
+}
+
+/// Divide two Float64 arrays element-wise
+export fn galleon_series_div_f64(arr1: *const ManagedArrowArray, arr2: *const ManagedArrowArray) ?*ManagedArrowArray {
+    return arr1.divF64(arr2) catch null;
+}
+
+/// Add scalar to Float64 array
+export fn galleon_series_add_scalar_f64(arr: *const ManagedArrowArray, value: f64) ?*ManagedArrowArray {
+    return arr.addScalarF64(value) catch null;
+}
+
+/// Subtract scalar from Float64 array
+export fn galleon_series_sub_scalar_f64(arr: *const ManagedArrowArray, value: f64) ?*ManagedArrowArray {
+    return arr.subScalarF64(value) catch null;
+}
+
+/// Multiply Float64 array by scalar
+export fn galleon_series_mul_scalar_f64(arr: *const ManagedArrowArray, value: f64) ?*ManagedArrowArray {
+    return arr.mulScalarF64(value) catch null;
+}
+
+/// Divide Float64 array by scalar
+export fn galleon_series_div_scalar_f64(arr: *const ManagedArrowArray, value: f64) ?*ManagedArrowArray {
+    return arr.divScalarF64(value) catch null;
+}
+
+/// Add two Int64 arrays element-wise
+export fn galleon_series_add_i64(arr1: *const ManagedArrowArray, arr2: *const ManagedArrowArray) ?*ManagedArrowArray {
+    return arr1.addI64(arr2) catch null;
+}
+
+/// Subtract two Int64 arrays element-wise
+export fn galleon_series_sub_i64(arr1: *const ManagedArrowArray, arr2: *const ManagedArrowArray) ?*ManagedArrowArray {
+    return arr1.subI64(arr2) catch null;
+}
+
+/// Multiply two Int64 arrays element-wise
+export fn galleon_series_mul_i64(arr1: *const ManagedArrowArray, arr2: *const ManagedArrowArray) ?*ManagedArrowArray {
+    return arr1.mulI64(arr2) catch null;
+}
+
+/// Add scalar to Int64 array
+export fn galleon_series_add_scalar_i64(arr: *const ManagedArrowArray, value: i64) ?*ManagedArrowArray {
+    return arr.addScalarI64(value) catch null;
+}
+
+/// Multiply Int64 array by scalar
+export fn galleon_series_mul_scalar_i64(arr: *const ManagedArrowArray, value: i64) ?*ManagedArrowArray {
+    return arr.mulScalarI64(value) catch null;
+}
+
+// ============================================================================
+// Full Join Operations (Join + Materialize in one call)
+// ============================================================================
+
+const FullJoinResult = arrow.FullJoinResult;
+
+/// Perform complete inner join: join + materialize all columns in one call
+/// This minimizes CGO overhead by doing everything in Zig
+export fn galleon_inner_join_full(
+    left_key: *const ManagedArrowArray,
+    right_key: *const ManagedArrowArray,
+    left_columns: [*]const *const ManagedArrowArray,
+    left_col_count: usize,
+    right_columns: [*]const *const ManagedArrowArray,
+    right_col_count: usize,
+) ?*FullJoinResult {
+    return arrow.arrowInnerJoinFull(
+        std.heap.c_allocator,
+        left_key,
+        right_key,
+        left_columns,
+        left_col_count,
+        right_columns,
+        right_col_count,
+    ) catch null;
+}
+
+/// Perform complete left join: join + materialize all columns in one call
+export fn galleon_left_join_full(
+    left_key: *const ManagedArrowArray,
+    right_key: *const ManagedArrowArray,
+    left_columns: [*]const *const ManagedArrowArray,
+    left_col_count: usize,
+    right_columns: [*]const *const ManagedArrowArray,
+    right_col_count: usize,
+) ?*FullJoinResult {
+    return arrow.arrowLeftJoinFull(
+        std.heap.c_allocator,
+        left_key,
+        right_key,
+        left_columns,
+        left_col_count,
+        right_columns,
+        right_col_count,
+    ) catch null;
+}
+
+/// Get the number of result columns
+export fn galleon_full_join_result_num_columns(result: *const FullJoinResult) usize {
+    return result.num_columns;
+}
+
+/// Get the number of result rows
+export fn galleon_full_join_result_num_rows(result: *const FullJoinResult) usize {
+    return result.num_rows;
+}
+
+/// Get a result column by index (returns ManagedArrowArray pointer)
+/// Note: This just returns the pointer, ownership is NOT transferred
+export fn galleon_full_join_result_column(result: *const FullJoinResult, index: usize) ?*ManagedArrowArray {
+    if (index >= result.num_columns) return null;
+    return result.result_columns[index];
+}
+
+/// Take ownership of a result column by index (transfers ownership to caller)
+/// The column is set to null in the result so destroy won't free it
+export fn galleon_full_join_result_take_column(result: *FullJoinResult, index: usize) ?*ManagedArrowArray {
+    if (index >= result.num_columns) return null;
+    const col = result.result_columns[index];
+    result.result_columns[index] = undefined; // Clear the pointer
+    return col;
+}
+
+/// Free full join result structure only (use after taking all columns)
+export fn galleon_full_join_result_destroy_struct(result: *FullJoinResult) void {
+    result.allocator.free(result.result_columns);
+    result.allocator.destroy(result);
+}
+
+/// Free full join result (also frees all result columns that haven't been taken)
+export fn galleon_full_join_result_destroy(result: *FullJoinResult) void {
+    result.deinit();
+}
+
+// ============================================================================
+// Full DataFrame Sort (Sort + Gather all columns in one call)
+// ============================================================================
+
+const SortResult = arrow.SortResult;
+
+/// Complete DataFrame sort: argsort + gather all columns in one call
+/// This minimizes CGO overhead by doing everything in Zig
+export fn galleon_sort_dataframe_full(
+    sort_column: *const ManagedArrowArray,
+    columns: [*]const *const ManagedArrowArray,
+    col_count: usize,
+    ascending: bool,
+) ?*SortResult {
+    return arrow.arrowSortDataFrameFull(
+        std.heap.c_allocator,
+        sort_column,
+        columns,
+        col_count,
+        ascending,
+    ) catch null;
+}
+
+/// Get number of columns in sort result
+export fn galleon_sort_result_num_columns(result: *const SortResult) usize {
+    return result.num_columns;
+}
+
+/// Get number of rows in sort result
+export fn galleon_sort_result_num_rows(result: *const SortResult) usize {
+    return result.num_rows;
+}
+
+/// Take ownership of a column from sort result (transfers ownership to caller)
+/// The column at this index becomes null in the result
+export fn galleon_sort_result_take_column(result: *SortResult, index: usize) ?*ManagedArrowArray {
+    if (index >= result.num_columns) return null;
+    const col = result.result_columns[index];
+    result.result_columns[index] = undefined;
+    return col;
+}
+
+/// Free sort result struct only (use after taking all columns)
+export fn galleon_sort_result_destroy_struct(result: *SortResult) void {
+    result.allocator.free(result.result_columns);
+    result.allocator.destroy(result);
+}
+
+/// Free sort result (also frees all result columns that haven't been taken)
+export fn galleon_sort_result_destroy(result: *SortResult) void {
+    result.deinit();
+}
+
+// ============================================================================
+// Arrow GroupBy Operations
+// ============================================================================
+
+const GroupBySumResult = arrow.GroupBySumResult;
+const GroupByMultiAggResult = arrow.GroupByMultiAggResult;
+
+/// GroupBy Sum: groups by Int64 key, sums Float64 values
+export fn galleon_series_groupby_sum_i64_f64(
+    keys: *const ManagedArrowArray,
+    values: *const ManagedArrowArray,
+) ?*GroupBySumResult {
+    return arrow.arrowGroupBySumI64KeyF64Value(std.heap.c_allocator, keys, values) catch null;
+}
+
+/// GroupBy Count: groups by Int64 key, counts occurrences
+export fn galleon_series_groupby_count_i64(
+    keys: *const ManagedArrowArray,
+) ?*GroupBySumResult {
+    return arrow.arrowGroupByCountI64Key(std.heap.c_allocator, keys) catch null;
+}
+
+/// GroupBy Mean: groups by Int64 key, computes mean of Float64 values
+export fn galleon_series_groupby_mean_i64_f64(
+    keys: *const ManagedArrowArray,
+    values: *const ManagedArrowArray,
+) ?*GroupBySumResult {
+    return arrow.arrowGroupByMeanI64KeyF64Value(std.heap.c_allocator, keys, values) catch null;
+}
+
+/// GroupBy Multi-Agg: groups by Int64 key, computes sum/min/max/count of Float64 values
+export fn galleon_series_groupby_multi_agg_i64_f64(
+    keys: *const ManagedArrowArray,
+    values: *const ManagedArrowArray,
+) ?*GroupByMultiAggResult {
+    return arrow.arrowGroupByMultiAggI64KeyF64Value(std.heap.c_allocator, keys, values) catch null;
+}
+
+/// Get number of groups in groupby sum result
+export fn galleon_series_groupby_sum_result_num_groups(result: *const GroupBySumResult) u32 {
+    return result.num_groups;
+}
+
+/// Get keys array from groupby sum result
+export fn galleon_series_groupby_sum_result_keys(result: *const GroupBySumResult) *const ManagedArrowArray {
+    return result.keys;
+}
+
+/// Get values array from groupby sum result (sums, means, or counts depending on operation)
+export fn galleon_series_groupby_sum_result_values(result: *const GroupBySumResult) *const ManagedArrowArray {
+    return result.sums;
+}
+
+/// Free groupby sum result
+export fn galleon_series_groupby_sum_result_destroy(result: *GroupBySumResult) void {
+    result.deinit();
+}
+
+/// Get number of groups in groupby multi-agg result
+export fn galleon_series_groupby_multi_agg_result_num_groups(result: *const GroupByMultiAggResult) u32 {
+    return result.num_groups;
+}
+
+/// Get keys array from groupby multi-agg result
+export fn galleon_series_groupby_multi_agg_result_keys(result: *const GroupByMultiAggResult) *const ManagedArrowArray {
+    return result.keys;
+}
+
+/// Get sums array from groupby multi-agg result
+export fn galleon_series_groupby_multi_agg_result_sums(result: *const GroupByMultiAggResult) *const ManagedArrowArray {
+    return result.sums;
+}
+
+/// Get mins array from groupby multi-agg result
+export fn galleon_series_groupby_multi_agg_result_mins(result: *const GroupByMultiAggResult) *const ManagedArrowArray {
+    return result.mins;
+}
+
+/// Get maxs array from groupby multi-agg result
+export fn galleon_series_groupby_multi_agg_result_maxs(result: *const GroupByMultiAggResult) *const ManagedArrowArray {
+    return result.maxs;
+}
+
+/// Get counts array from groupby multi-agg result
+export fn galleon_series_groupby_multi_agg_result_counts(result: *const GroupByMultiAggResult) *const ManagedArrowArray {
+    return result.counts;
+}
+
+/// Free groupby multi-agg result
+export fn galleon_series_groupby_multi_agg_result_destroy(result: *GroupByMultiAggResult) void {
+    result.deinit();
 }
 
 // ============================================================================
