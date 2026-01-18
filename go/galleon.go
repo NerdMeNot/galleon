@@ -51,6 +51,37 @@ func GetThreadConfig() ThreadConfig {
 }
 
 // ============================================================================
+// Blitz Parallel Runtime
+// ============================================================================
+
+// BlitzInit initializes the Blitz parallel runtime for work-stealing parallelism.
+// This enables parallel execution for joins and other operations.
+// Returns true if initialization succeeded (or was already initialized).
+func BlitzInit() bool {
+	return bool(C.blitz_init())
+}
+
+// BlitzDeinit shuts down the Blitz parallel runtime.
+func BlitzDeinit() {
+	C.blitz_deinit()
+}
+
+// BlitzIsInitialized returns true if the Blitz runtime is initialized.
+func BlitzIsInitialized() bool {
+	return bool(C.blitz_is_initialized())
+}
+
+// BlitzNumWorkers returns the number of Blitz worker threads.
+func BlitzNumWorkers() int {
+	return int(C.blitz_num_workers())
+}
+
+// init automatically initializes the Blitz parallel runtime when the package loads.
+func init() {
+	BlitzInit()
+}
+
+// ============================================================================
 // SIMD Level Configuration
 // ============================================================================
 

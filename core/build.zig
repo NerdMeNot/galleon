@@ -69,4 +69,42 @@ pub fn build(b: *std.Build) void {
     const run_bench_blitz = b.addRunArtifact(bench_blitz);
     const bench_blitz_step = b.step("bench-blitz", "Run blitz parallel runtime benchmarks");
     bench_blitz_step.dependOn(&run_bench_blitz.step);
+
+    // Join benchmarks
+    const bench_join_mod = b.addModule("bench_join", .{
+        .root_source_file = b.path("src/bench_join.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+
+    const bench_join = b.addExecutable(.{
+        .name = "bench_join",
+        .root_module = bench_join_mod,
+    });
+    bench_join.linkLibC();
+    b.installArtifact(bench_join);
+
+    const run_bench_join = b.addRunArtifact(bench_join);
+    const bench_join_step = b.step("bench-join", "Run join benchmarks (sequential vs parallel)");
+    bench_join_step.dependOn(&run_bench_join.step);
+
+    // Debug join
+    const debug_join_mod = b.addModule("debug_join", .{
+        .root_source_file = b.path("src/debug_join.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+
+    const debug_join = b.addExecutable(.{
+        .name = "debug_join",
+        .root_module = debug_join_mod,
+    });
+    debug_join.linkLibC();
+    b.installArtifact(debug_join);
+
+    const run_debug_join = b.addRunArtifact(debug_join);
+    const debug_join_step = b.step("debug-join", "Debug join performance");
+    debug_join_step.dependOn(&run_debug_join.step);
 }

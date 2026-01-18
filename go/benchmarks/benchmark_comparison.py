@@ -284,6 +284,13 @@ def run_galleon_benchmarks(sizes: List[int]) -> Dict[Tuple[str, int], float]:
 
         # Parse JSON from output
         output = proc.stdout
+
+        # Debug: print if there was an error
+        if proc.returncode != 0:
+            print(f"DEBUG: Go test failed with return code {proc.returncode}", file=sys.stderr)
+            print(f"DEBUG: stderr: {proc.stderr[:500] if proc.stderr else 'empty'}", file=sys.stderr)
+            print(f"DEBUG: stdout: {output[:500] if output else 'empty'}", file=sys.stderr)
+
         # Find JSON array in output
         start_idx = output.find('[')
         end_idx = output.rfind(']') + 1
@@ -297,6 +304,11 @@ def run_galleon_benchmarks(sizes: List[int]) -> Dict[Tuple[str, int], float]:
                 results[key] = item['time_ms']
     except Exception as e:
         print(f"Warning: Could not run Galleon benchmarks: {e}", file=sys.stderr)
+        # Debug: show what we tried to parse
+        if 'json_str' in dir():
+            print(f"DEBUG: json_str first 200 chars: {json_str[:200]}", file=sys.stderr)
+        if 'output' in dir():
+            print(f"DEBUG: output first 500 chars: {output[:500] if output else 'empty'}", file=sys.stderr)
 
         # Fallback: parse standard Go benchmark output
         try:

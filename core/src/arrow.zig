@@ -3343,6 +3343,14 @@ pub const FullJoinResult = struct {
     }
 };
 
+// Profiling disabled for production
+const JOIN_PROFILING = false;
+
+fn writeProfile(comptime fmt: []const u8, args: anytype) void {
+    _ = fmt;
+    _ = args;
+}
+
 /// Perform a complete inner join: join + materialize all columns
 /// This does everything in Zig to minimize CGO overhead
 pub fn arrowInnerJoinFull(
@@ -3354,16 +3362,23 @@ pub fn arrowInnerJoinFull(
     right_columns: [*]const *const ManagedArrowArray,
     right_col_count: usize,
 ) !*FullJoinResult {
+    var timer = std.time.Timer.start() catch unreachable;
+
     // Get key data
     const left_keys = getInt64Buffer(&left_key.array) orelse return error.InvalidData;
     const right_keys = getInt64Buffer(&right_key.array) orelse return error.InvalidData;
 
-    // Perform the join using SIMD-accelerated SwissTable version
-    const join_result = try simd.parallelInnerJoinSwiss(allocator, left_keys, right_keys);
+    // Perform the join using single-pass parallel join (thread-local buffers)
+    var join_result = try simd.singlePassParallelInnerJoin(allocator, left_keys, right_keys);
     defer {
-        allocator.free(join_result.left_indices);
-        allocator.free(join_result.right_indices);
+        if (join_result.owns_memory) {
+            if (join_result.left_indices.len > 0) allocator.free(join_result.left_indices);
+            if (join_result.right_indices.len > 0) allocator.free(join_result.right_indices);
+        }
     }
+
+    const join_time_us = timer.read() / 1000;
+    timer.reset();
 
     const num_rows = join_result.num_matches;
     const total_columns = left_col_count + right_col_count;
@@ -3387,10 +3402,25 @@ pub fn arrowInnerJoinFull(
         col_idx += 1;
     }
 
+    const left_gather_time_us = timer.read() / 1000;
+    timer.reset();
+
     // Gather right columns
     for (right_columns[0..right_col_count]) |src_col| {
         result.result_columns[col_idx] = try gatherColumn(allocator, src_col, join_result.right_indices[0..num_rows]);
         col_idx += 1;
+    }
+
+    const right_gather_time_us = timer.read() / 1000;
+
+    if (JOIN_PROFILING) {
+        writeProfile("[INNER JOIN] rows={d} join={d}us left_gather={d}us right_gather={d}us total={d}us\n", .{
+            num_rows,
+            join_time_us,
+            left_gather_time_us,
+            right_gather_time_us,
+            join_time_us + left_gather_time_us + right_gather_time_us,
+        });
     }
 
     return result;
@@ -3407,16 +3437,23 @@ pub fn arrowLeftJoinFull(
     right_columns: [*]const *const ManagedArrowArray,
     right_col_count: usize,
 ) !*FullJoinResult {
+    var timer = std.time.Timer.start() catch unreachable;
+
     // Get key data
     const left_keys = getInt64Buffer(&left_key.array) orelse return error.InvalidData;
     const right_keys = getInt64Buffer(&right_key.array) orelse return error.InvalidData;
 
-    // Perform the join using SIMD-accelerated SwissTable version
-    const join_result = try simd.parallelLeftJoinSwiss(allocator, left_keys, right_keys);
+    // Perform the join using single-pass parallel join (thread-local buffers)
+    var join_result = try simd.singlePassParallelLeftJoin(allocator, left_keys, right_keys);
     defer {
-        allocator.free(join_result.left_indices);
-        allocator.free(join_result.right_indices);
+        if (join_result.owns_memory) {
+            if (join_result.left_indices.len > 0) allocator.free(join_result.left_indices);
+            if (join_result.right_indices.len > 0) allocator.free(join_result.right_indices);
+        }
     }
+
+    const join_time_us = timer.read() / 1000;
+    timer.reset();
 
     const num_rows: usize = join_result.num_rows;
     const total_columns = left_col_count + right_col_count;
@@ -3440,10 +3477,25 @@ pub fn arrowLeftJoinFull(
         col_idx += 1;
     }
 
+    const left_gather_time_us = timer.read() / 1000;
+    timer.reset();
+
     // Gather right columns (with null handling for unmatched rows)
     for (right_columns[0..right_col_count]) |src_col| {
         result.result_columns[col_idx] = try gatherColumnWithNulls(allocator, src_col, join_result.right_indices[0..num_rows]);
         col_idx += 1;
+    }
+
+    const right_gather_time_us = timer.read() / 1000;
+
+    if (JOIN_PROFILING) {
+        writeProfile("[LEFT JOIN] rows={d} join={d}us left_gather={d}us right_gather={d}us total={d}us\n", .{
+            num_rows,
+            join_time_us,
+            left_gather_time_us,
+            right_gather_time_us,
+            join_time_us + left_gather_time_us + right_gather_time_us,
+        });
     }
 
     return result;
@@ -3487,11 +3539,11 @@ fn gatherColumnWithNulls(
 ) !*ManagedArrowArray {
     const len = indices.len;
 
-    // Count nulls (indices == -1)
-    var null_count: usize = 0;
-    for (indices) |idx| {
-        if (idx < 0) null_count += 1;
-    }
+    // Create validity bitmap and count nulls in one SIMD pass
+    const bitmap_result = try createValidityBitmapAndCountNulls(allocator, indices);
+    const validity = bitmap_result.validity;
+    const null_count = bitmap_result.null_count;
+    errdefer allocator.free(validity);
 
     // Determine type and gather
     if (getFloat64Buffer(&src.array)) |src_data| {
@@ -3502,10 +3554,9 @@ fn gatherColumnWithNulls(
         simd.gather.gatherF64(src_data, indices, result_data);
 
         if (null_count > 0) {
-            // Create validity bitmap
-            const validity = try createValidityBitmap(allocator, indices);
             return ManagedArrowArray.createF64WithValidityFromOwned(allocator, result_data, validity, null_count);
         } else {
+            allocator.free(validity);
             return ManagedArrowArray.createF64FromOwned(allocator, result_data);
         }
     } else if (getInt64Buffer(&src.array)) |src_data| {
@@ -3516,31 +3567,60 @@ fn gatherColumnWithNulls(
         simd.gather.gatherI64(src_data, indices, result_data);
 
         if (null_count > 0) {
-            // Create validity bitmap
-            const validity = try createValidityBitmap(allocator, indices);
             return ManagedArrowArray.createI64WithValidityFromOwned(allocator, result_data, validity, null_count);
         } else {
+            allocator.free(validity);
             return ManagedArrowArray.createI64FromOwned(allocator, result_data);
         }
     } else {
+        allocator.free(validity);
         return error.UnsupportedType;
     }
 }
 
-/// Create a validity bitmap from indices (valid if idx >= 0)
-fn createValidityBitmap(allocator: std.mem.Allocator, indices: []const i32) ![]u8 {
-    const num_bytes = (indices.len + 7) / 8;
+/// Create a validity bitmap from indices AND count nulls in one pass using SIMD
+/// Returns the validity bitmap and null count
+fn createValidityBitmapAndCountNulls(allocator: std.mem.Allocator, indices: []const i32) !struct { validity: []u8, null_count: usize } {
+    const len = indices.len;
+    const num_bytes = (len + 7) / 8;
     const validity = try allocator.alloc(u8, num_bytes);
-    @memset(validity, 0);
 
-    // Set bits for valid indices (idx >= 0)
-    for (indices, 0..) |idx, i| {
-        if (idx >= 0) {
-            validity[i / 8] |= @as(u8, 1) << @intCast(i % 8);
-        }
+    var total_valid: usize = 0;
+    const VecSize = 8;
+
+    // Process 8 indices at a time (produces 1 validity byte)
+    var byte_idx: usize = 0;
+    var i: usize = 0;
+    while (i + VecSize <= len) : ({
+        i += VecSize;
+        byte_idx += 1;
+    }) {
+        const chunk: @Vector(VecSize, i32) = indices[i..][0..VecSize].*;
+        // valid if idx >= 0 (i.e., idx != -1 for our case, but >= 0 is more correct)
+        const valid_mask = chunk >= @as(@Vector(VecSize, i32), @splat(0));
+        // Convert bool vector to u8 - each bit represents validity
+        const byte: u8 = @bitCast(valid_mask);
+        validity[byte_idx] = byte;
+        total_valid += @popCount(byte);
     }
 
-    return validity;
+    // Handle remaining elements
+    if (i < len) {
+        var byte: u8 = 0;
+        var bit: u3 = 0;
+        while (i < len) : ({
+            i += 1;
+            bit +%= 1;
+        }) {
+            if (indices[i] >= 0) {
+                byte |= @as(u8, 1) << bit;
+                total_valid += 1;
+            }
+        }
+        validity[byte_idx] = byte;
+    }
+
+    return .{ .validity = validity, .null_count = len - total_valid };
 }
 
 // ============================================================================

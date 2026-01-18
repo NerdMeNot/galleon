@@ -178,6 +178,35 @@ cd go && go test -bench=. ./benchmarks/
 - Use parallel operations for data > 10K rows
 - Profile with `go test -bench -cpuprofile`
 
+## Benchmarking Guidelines
+
+**CRITICAL: The ONLY proper way to run comparative benchmarks is using the containerized benchmark.**
+
+```bash
+# Build the benchmark container (from repo root)
+podman build -f go/benchmarks/Dockerfile -t galleon-bench .
+
+# Run comparative benchmarks (Galleon vs Polars vs Pandas)
+podman run --rm galleon-bench
+```
+
+**Why container-only?**
+- Polars and Galleon run in the SAME environment with identical resources
+- Local `go test -bench=...` only measures Galleon, not Polars
+- Container ensures reproducible, fair comparisons
+
+**Local benchmarks are ONLY for:**
+- Quick iteration during development
+- Galleon-to-Galleon comparisons (before/after a change)
+- NOT for comparing against Polars numbers
+
+**Current performance gaps (container, 1M elements):**
+- Sort F64: Galleon ~20ms vs Polars ~5ms (3.8x slower) - uses parallel quicksort
+- Argsort F64: Galleon ~86ms vs Polars ~18ms (4.8x slower)
+- Left Join: Galleon ~21ms vs Polars ~5ms (4.2x slower)
+- Inner Join: Galleon ~4ms vs Polars ~2.7ms (1.5x slower)
+- Median: Galleon ~4.4ms vs Polars ~2.5ms (1.8x slower)
+
 ## Testing Changes
 
 Always verify after changes:

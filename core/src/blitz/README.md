@@ -66,13 +66,20 @@ Blitz is a work-stealing parallel runtime for Zig, designed for low-overhead for
 | File | Purpose |
 |------|---------|
 | `mod.zig` | Module exports |
-| `job.zig` | Branch-free Job struct with state machine |
-| `latch.zig` | Synchronization primitives (OnceLatch, CountLatch) |
-| `future.zig` | Future(Input, Output) for fork-join with return values |
-| `worker.zig` | Worker and Task types |
-| `pool.zig` | ThreadPool with heartbeat thread |
 | `api.zig` | High-level API (join, parallelFor, parallelReduce) |
+| `pool.zig` | ThreadPool with heartbeat thread |
+| `job.zig` | Branch-free Job struct with state machine |
+| `worker.zig` | Worker and Task types |
+| `future.zig` | Future(Input, Output) for fork-join with return values |
+| `latch.zig` | Synchronization primitives (OnceLatch, CountLatch) |
+| `sync.zig` | SyncPtr for lock-free parallel writes |
 | `threshold.zig` | Parallelization threshold heuristics |
+| `iter.zig` | Parallel iterators (Rayon-style) |
+| `scope.zig` | Scope-based parallelism (join2, join3, joinN) |
+| `algorithms.zig` | Parallel algorithms (sort, scan, find, partition) |
+| `bench.zig` | Comprehensive benchmarks |
+| `build.zig` | Standalone build configuration |
+| `rust_bench/` | Rust Rayon benchmarks for comparison |
 
 ## API Reference
 
@@ -286,6 +293,102 @@ _ = pool.call(ResultType, struct {
 }.compute, arg);
 ```
 
+## Parallel Iterators (Rayon-style)
+
+Blitz provides composable parallel iterators similar to Rayon:
+
+```zig
+const blitz = @import("blitz");
+
+// Parallel sum
+const sum = blitz.iter(i64, data).sum();
+
+// Parallel min/max
+const min = blitz.iter(i64, data).min();
+const max = blitz.iter(i64, data).max();
+
+// Map and collect
+var result = try blitz.iter(i64, data)
+    .map(square)
+    .collect(allocator);
+defer allocator.free(result);
+
+// In-place mutation
+blitz.iterMut(i64, data).mapInPlace(double);
+blitz.iterMut(i64, data).fill(42);
+
+// Range iteration
+blitz.range(0, 1000).forEach(processIndex);
+const total = blitz.range(0, 100).sum(i64, valueAtIndex);
+```
+
+## Scope-Based Parallelism
+
+Execute multiple tasks in parallel:
+
+```zig
+// Execute 2 tasks in parallel
+const results = blitz.join2(A, B, fnA, fnB);
+
+// Execute 3 tasks in parallel
+const results = blitz.join3(A, B, C, fnA, fnB, fnC);
+
+// Execute N tasks in parallel
+const funcs = [_]fn() i64{ fn1, fn2, fn3, fn4 };
+const results = blitz.joinN(i64, 4, &funcs);
+
+// Parallel for over index range
+blitz.parallelForRange(0, 1000, processIndex);
+blitz.parallelForRangeWithContext(MyCtx, ctx, 0, 1000, processWithContext);
+```
+
+## Parallel Algorithms
+
+```zig
+// Parallel merge sort
+try blitz.parallelSort(i64, data, allocator);
+
+// With custom comparator
+try blitz.parallelSortBy(i64, data, allocator, myLessThan);
+
+// Parallel prefix sum (scan)
+blitz.parallelScan(i64, input, output);           // inclusive
+blitz.parallelScanExclusive(i64, input, output);  // exclusive
+
+// Parallel find
+if (blitz.parallelFind(i64, data, isTarget)) |index| {
+    // Found at index
+}
+
+// Parallel partition
+const pivot = blitz.parallelPartition(i64, data, lessThanFive);
+```
+
+## Lock-Free Parallel Writes
+
+For parallel materialization patterns (like Polars):
+
+```zig
+// SyncPtr for parallel writes to disjoint regions
+var buffer: [1000]u64 = undefined;
+const ptr = blitz.SyncPtr(u64).init(&buffer);
+
+// Each thread writes to its region
+blitz.parallelFor(num_chunks, Context, ctx, struct {
+    fn body(c: Context, chunk_start: usize, chunk_end: usize) void {
+        for (c.values[chunk_start..chunk_end], 0..) |val, i| {
+            ptr.writeAt(c.offsets[chunk_start] + i, val);
+        }
+    }
+}.body);
+
+// Parallel flatten nested slices
+blitz.parallelFlatten(u64, slices, output);
+
+// Parallel scatter
+blitz.parallelScatter(u64, values, indices, output);
+```
+
 ## Comparison with Other Libraries
 
 | Feature | Blitz | Rayon (Rust) | Spice (Zig) |
@@ -294,8 +397,10 @@ _ = pool.call(ResultType, struct {
 | Work stealing | Hybrid | Chase-Lev | Heartbeat |
 | Idle latency | Low | Low | High |
 | API ergonomics | Good | Excellent | Minimal |
-| Parallel iterators | No | Yes | No |
-| Scope/spawn | No | Yes | Yes |
+| Parallel iterators | Yes | Yes | No |
+| Scope/spawn | Yes | Yes | Yes |
+| Parallel sort | Yes | Yes | No |
+| Parallel scan | Yes | Yes | No |
 
 ## Implementation Notes
 
@@ -320,18 +425,42 @@ The default 10μs heartbeat interval balances:
 
 For specialized workloads, adjust via `ThreadPoolConfig.heartbeat_interval`.
 
-## Building
+## Building and Benchmarking
+
+### Zig Blitz
 
 ```bash
 # Build the library
 cd core && zig build -Doptimize=ReleaseFast
 
 # Run tests
-zig build test
+cd core/src/blitz && zig test mod.zig
 
 # Run benchmarks
-./zig-out/bin/bench_blitz
+cd core/src/blitz && zig build-exe bench.zig -O ReleaseFast && ./bench
 ```
+
+### Rust Rayon (for comparison)
+
+```bash
+# Build and run Rayon benchmarks
+cd core/src/blitz/rust_bench
+cargo build --release
+./target/release/blitz_bench
+```
+
+### Comparing Results
+
+Both benchmark suites measure the same operations:
+- Join overhead
+- Parallel sum
+- Parallel map
+- Parallel reduce (find max)
+- Parallel for (write indices)
+- Parallel sort
+- Parallel iterators
+
+This allows direct comparison of Blitz vs Rayon performance.
 
 ## License
 

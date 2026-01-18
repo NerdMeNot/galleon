@@ -558,6 +558,10 @@ func BenchmarkAll_InnerJoin(b *testing.B) {
 		rightDf := galleon.FromColumns(rightKeyS, rightValS)
 
 		b.Run(fmt.Sprintf("%d", size), func(b *testing.B) {
+			// Warmup: run 3 iterations to stabilize caches and thread pool
+			for w := 0; w < 3; w++ {
+				_ = galleon.InnerJoin(leftDf, rightDf, "key", "key")
+			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				_ = galleon.InnerJoin(leftDf, rightDf, "key", "key")
@@ -584,6 +588,10 @@ func BenchmarkAll_LeftJoin(b *testing.B) {
 		rightDf := galleon.FromColumns(rightKeyS, rightValS)
 
 		b.Run(fmt.Sprintf("%d", size), func(b *testing.B) {
+			// Warmup: run 3 iterations to stabilize caches and thread pool
+			for w := 0; w < 3; w++ {
+				_ = galleon.LeftJoin(leftDf, rightDf, "key", "key")
+			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				_ = galleon.LeftJoin(leftDf, rightDf, "key", "key")

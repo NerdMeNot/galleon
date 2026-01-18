@@ -191,17 +191,15 @@ pub const gatherI64Parallel = mod.gatherI64Parallel;
 // Re-export join types and functions
 pub const InnerJoinResult = mod.InnerJoinResult;
 pub const LeftJoinResult = mod.LeftJoinResult;
-pub const innerJoinI64 = mod.innerJoinI64;
-pub const parallelInnerJoinI64 = mod.parallelInnerJoinI64;
-pub const leftJoinI64 = mod.leftJoinI64;
-pub const parallelLeftJoinI64 = mod.parallelLeftJoinI64;
-
-// SwissTable-based joins (SIMD-accelerated)
 pub const JoinSwissTable = mod.JoinSwissTable;
+
+// Single-threaded joins (used as fallback for small data)
 pub const innerJoinSwiss = mod.innerJoinSwiss;
 pub const leftJoinSwiss = mod.leftJoinSwiss;
-pub const parallelInnerJoinSwiss = mod.parallelInnerJoinSwiss;
-pub const parallelLeftJoinSwiss = mod.parallelLeftJoinSwiss;
+
+// Single-pass parallel joins (optimized - no counting phase)
+pub const singlePassParallelInnerJoin = mod.singlePassParallelInnerJoin;
+pub const singlePassParallelLeftJoin = mod.singlePassParallelLeftJoin;
 
 // ============================================================================
 // Tests - run all submodule tests

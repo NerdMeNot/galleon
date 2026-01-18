@@ -224,14 +224,34 @@ avgSales, _ := cached.Select(galleon.Col("total_sales").Mean()).Collect()
 
 ## Performance
 
-Galleon achieves significant speedups over pure Go implementations:
+Galleon achieves significant speedups over pure Go implementations and competes with Polars on many operations.
 
-| Operation | Speedup vs Go |
-|-----------|---------------|
-| Min/Max | 2-3x |
-| Filtering | 10-15x |
-| Inner Join (1M rows) | ~60ms |
-| Left Join (1M rows) | ~60ms |
+### Running Benchmarks
+
+**The only proper way to run comparative benchmarks is using the containerized benchmark:**
+
+```bash
+# Build the benchmark container (from repo root)
+podman build -f go/benchmarks/Dockerfile -t galleon-bench .
+
+# Run comparative benchmarks (Galleon vs Polars vs Pandas)
+podman run --rm galleon-bench
+```
+
+This ensures Galleon, Polars, and Pandas all run in the same environment with identical resources for fair comparison.
+
+### Performance vs Polars (1M elements)
+
+| Operation | Galleon | Polars | Ratio |
+|-----------|---------|--------|-------|
+| **Variance** | 196 µs | 650 µs | **3.3x faster** |
+| **Rolling Sum** | 1.4 ms | 9.6 ms | **6.7x faster** |
+| **Rank** | 441 µs | 23 ms | **52x faster** |
+| **FilterGt** | 620 µs | 3.9 ms | **6.3x faster** |
+| **GroupBy Sum** | 2.9 ms | 4.7 ms | **1.6x faster** |
+| Sort F64 | 20 ms | 5.4 ms | 3.8x slower |
+| Inner Join | 4.1 ms | 2.7 ms | 1.5x slower |
+| Left Join | 21 ms | 4.9 ms | 4.2x slower |
 
 ### Thread Configuration
 
