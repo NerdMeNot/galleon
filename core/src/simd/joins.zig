@@ -1,878 +1,918 @@
-//! Join Operations for Galleon DataFrame Library
+//! Polars-Style Parallel Hash Join Implementation
 //!
-//! This module implements high-performance join algorithms using SIMD-accelerated
-//! Swiss Tables. The implementation supports both single-threaded and parallel
-//! execution paths, with automatic selection based on data size.
+//! This module implements a partitioned hash join algorithm matching Polars' design:
 //!
-//! Key features:
-//! - SIMD-accelerated Swiss Table for O(1) lookups
-//! - Single-pass probe with growable output (no counting pass)
-//! - Partitioned parallel build for large datasets (>2M elements)
-//! - Aggressive prefetching for cache efficiency
+//! BUILD Phase (fully parallel):
+//! 1. Parallel count - Each thread counts partition sizes for its chunk
+//! 2. Compute offsets - Build 2D offset table (thread × partition)
+//! 3. Parallel scatter - Each thread scatters its chunk using SyncPtr
+//! 4. Parallel build - Each partition builds its hash table independently
+//!
+//! PROBE Phase (fully parallel):
+//! 1. Parallel count - Count result sizes per thread
+//! 2. Parallel probe - Each thread probes and writes results via SyncPtr
+//!
+//! Key optimizations:
+//! - Build the smaller relation
+//! - Lock-free parallel writes with pre-computed offsets (SyncPtr)
+//! - No sequential bottlenecks for large inputs
+//! - IdxVec (SmallVec) avoids heap allocation for duplicates
 
 const std = @import("std");
-const swiss_table = @import("swiss_table.zig");
-const core = @import("core.zig");
+const Allocator = std.mem.Allocator;
 
-// Re-export swiss table types
-pub const JoinSwissTable = swiss_table.JoinSwissTable;
-pub const IdxVec = swiss_table.IdxVec;
+// Import Swiss Table from the swisstable module (pure Swiss Table implementation)
+const swisstable = @import("../swisstable/lib.zig");
+const SwissTable = swisstable.Table;
+const hashToPartition = swisstable.hashToPartition;
+const dirtyHash = swisstable.dirtyHash;
 
-// ============================================================================
-// Constants
-// ============================================================================
+// Import IdxVec from local module
+const idx_vec_mod = @import("idx_vec.zig");
+const IdxVec4 = idx_vec_mod.IdxVec4;
+const IdxSize = idx_vec_mod.IdxSize;
+const NULL_IDX = idx_vec_mod.NULL_IDX;
 
-/// Hash multiplier for partitioning (wyhash-style)
-const DIRTY_HASH_MULT: u64 = 0x9E3779B97F4A7C15;
-
-/// Number of partitions for parallel build
-const DEFAULT_NUM_PARTITIONS: usize = 16;
-
-/// Minimum size for parallel execution
-const MIN_PARALLEL_SIZE: usize = 10_000;
-
-/// Threshold for using partitioned build (elements)
-const PARTITIONED_BUILD_THRESHOLD: usize = 2_000_000;
+const blitz = @import("../blitz/mod.zig");
 
 // ============================================================================
-// Helper Functions
+// Configuration
 // ============================================================================
 
-/// Fast hash for partitioning - just needs decent distribution
-inline fn dirtyHash(key: i64) u64 {
-    const k: u64 = @bitCast(key);
-    return k *% DIRTY_HASH_MULT;
+/// Minimum total elements to justify parallelism.
+/// For workloads < 2M elements, sequential is typically faster due to lower overhead.
+const MIN_TOTAL_ELEMENTS_FOR_PARALLEL: usize = 2_000_000;
+
+/// Get number of threads/partitions
+fn getNumThreads() usize {
+    if (blitz.isInitialized()) {
+        return @max(1, blitz.numWorkers());
+    }
+    return 1;
 }
 
-/// Map hash to partition index
-inline fn hashToPartition(h: u64, num_partitions: usize) usize {
-    return @as(usize, @truncate(h >> 48)) % num_partitions;
+/// Check if we should use parallel execution
+fn shouldParallelize(n: usize) bool {
+    if (!blitz.isInitialized()) return false;
+    return n >= MIN_TOTAL_ELEMENTS_FOR_PARALLEL;
 }
 
 // ============================================================================
-// Result Types
+// Join Result Types
 // ============================================================================
 
-/// Result of an inner join operation
 pub const InnerJoinResult = struct {
-    left_indices: []i32,
-    right_indices: []i32,
-    num_matches: usize,
-    owns_memory: bool = true,
+    left_indices: []IdxSize,
+    right_indices: []IdxSize,
+    allocator: Allocator,
 
-    pub fn deinit(self: *InnerJoinResult, allocator: std.mem.Allocator) void {
-        if (self.owns_memory) {
-            if (self.left_indices.len > 0) allocator.free(self.left_indices);
-            if (self.right_indices.len > 0) allocator.free(self.right_indices);
-        }
+    pub fn deinit(self: *InnerJoinResult) void {
+        self.allocator.free(self.left_indices);
+        self.allocator.free(self.right_indices);
+        self.* = undefined;
+    }
+
+    pub fn len(self: *const InnerJoinResult) usize {
+        return self.left_indices.len;
     }
 };
 
-/// Result of a left join operation
-/// Note: right_indices uses -1 to indicate null (unmatched left rows)
 pub const LeftJoinResult = struct {
-    left_indices: []i32,
-    right_indices: []i32, // -1 indicates null (no match)
-    num_rows: usize,
-    owns_memory: bool = true,
+    left_indices: []IdxSize,
+    right_indices: []IdxSize,
+    allocator: Allocator,
 
-    pub fn deinit(self: *LeftJoinResult, allocator: std.mem.Allocator) void {
-        if (self.owns_memory) {
-            if (self.left_indices.len > 0) allocator.free(self.left_indices);
-            if (self.right_indices.len > 0) allocator.free(self.right_indices);
-        }
+    pub fn deinit(self: *LeftJoinResult) void {
+        self.allocator.free(self.left_indices);
+        self.allocator.free(self.right_indices);
+        self.* = undefined;
+    }
+
+    pub fn len(self: *const LeftJoinResult) usize {
+        return self.left_indices.len;
     }
 };
 
 // ============================================================================
-// Partitioned Join Tables (for parallel build)
+// Hash Table Type
 // ============================================================================
 
-/// Multiple Swiss Tables, one per partition
-pub const PartitionedJoinTables = struct {
-    tables: []JoinSwissTable,
-    num_partitions: usize,
-    allocator: std.mem.Allocator,
+fn JoinHashTable(comptime K: type) type {
+    return SwissTable(K, IdxVec4);
+}
 
-    const Self = @This();
+/// Compute hash for a key
+inline fn computeHash(comptime K: type, key: K) u64 {
+    if (@typeInfo(K) == .int) {
+        return dirtyHash(@as(u64, @bitCast(@as(i64, @intCast(key)))));
+    } else {
+        var bits: u64 = 0;
+        const key_bytes = std.mem.asBytes(&key);
+        @memcpy(std.mem.asBytes(&bits)[0..@min(@sizeOf(K), 8)], key_bytes[0..@min(@sizeOf(K), 8)]);
+        return dirtyHash(bits);
+    }
+}
 
-    pub fn init(allocator: std.mem.Allocator, num_partitions: usize, estimated_per_partition: usize) !Self {
-        const tables = try allocator.alloc(JoinSwissTable, num_partitions);
-        errdefer allocator.free(tables);
+// ============================================================================
+// Sequential Implementation (for small inputs)
+// ============================================================================
 
-        var initialized: usize = 0;
-        errdefer {
-            for (tables[0..initialized]) |*t| t.deinit();
+fn innerJoinSequential(
+    comptime K: type,
+    build_keys: []const K,
+    probe_keys: []const K,
+    allocator: Allocator,
+) !InnerJoinResult {
+    // Pre-size the table to avoid rehashing during build
+    var table = try JoinHashTable(K).initCapacity(allocator, build_keys.len);
+    defer {
+        var it = table.iterator();
+        while (it.next()) |entry| {
+            var vec = &entry.value;
+            vec.deinit();
         }
-
-        for (tables) |*t| {
-            t.* = try JoinSwissTable.init(allocator, estimated_per_partition);
-            initialized += 1;
-        }
-
-        return Self{
-            .tables = tables,
-            .num_partitions = num_partitions,
-            .allocator = allocator,
-        };
+        table.deinit();
     }
 
-    pub fn deinit(self: *Self) void {
-        for (self.tables) |*t| {
+    for (build_keys, 0..) |key, idx| {
+        const entry_vec = try table.getOrInsertDefault(key, IdxVec4.init());
+        try entry_vec.push(allocator, @intCast(idx));
+    }
+
+    var left_indices = std.ArrayListUnmanaged(IdxSize){};
+    var right_indices = std.ArrayListUnmanaged(IdxSize){};
+    errdefer left_indices.deinit(allocator);
+    errdefer right_indices.deinit(allocator);
+
+    try left_indices.ensureTotalCapacity(allocator, @min(build_keys.len, probe_keys.len));
+    try right_indices.ensureTotalCapacity(allocator, @min(build_keys.len, probe_keys.len));
+
+    for (probe_keys, 0..) |key, probe_idx| {
+        if (table.getPtr(key)) |match_vec| {
+            for (match_vec.slice()) |build_idx| {
+                try left_indices.append(allocator, @intCast(probe_idx));
+                try right_indices.append(allocator, build_idx);
+            }
+        }
+    }
+
+    return InnerJoinResult{
+        .left_indices = try left_indices.toOwnedSlice(allocator),
+        .right_indices = try right_indices.toOwnedSlice(allocator),
+        .allocator = allocator,
+    };
+}
+
+fn leftJoinSequential(
+    comptime K: type,
+    build_keys: []const K,
+    probe_keys: []const K,
+    allocator: Allocator,
+) !LeftJoinResult {
+    // Pre-size the table to avoid rehashing during build
+    var table = try JoinHashTable(K).initCapacity(allocator, build_keys.len);
+    defer {
+        var it = table.iterator();
+        while (it.next()) |entry| {
+            var vec = &entry.value;
+            vec.deinit();
+        }
+        table.deinit();
+    }
+
+    for (build_keys, 0..) |key, idx| {
+        const entry_vec = try table.getOrInsertDefault(key, IdxVec4.init());
+        try entry_vec.push(allocator, @intCast(idx));
+    }
+
+    var left_indices = std.ArrayListUnmanaged(IdxSize){};
+    var right_indices = std.ArrayListUnmanaged(IdxSize){};
+    errdefer left_indices.deinit(allocator);
+    errdefer right_indices.deinit(allocator);
+
+    try left_indices.ensureTotalCapacity(allocator, probe_keys.len);
+    try right_indices.ensureTotalCapacity(allocator, probe_keys.len);
+
+    for (probe_keys, 0..) |key, probe_idx| {
+        if (table.getPtr(key)) |match_vec| {
+            for (match_vec.slice()) |build_idx| {
+                try left_indices.append(allocator, @intCast(probe_idx));
+                try right_indices.append(allocator, build_idx);
+            }
+        } else {
+            try left_indices.append(allocator, @intCast(probe_idx));
+            try right_indices.append(allocator, NULL_IDX);
+        }
+    }
+
+    return LeftJoinResult{
+        .left_indices = try left_indices.toOwnedSlice(allocator),
+        .right_indices = try right_indices.toOwnedSlice(allocator),
+        .allocator = allocator,
+    };
+}
+
+// ============================================================================
+// Parallel BUILD Phase (Polars-style)
+// ============================================================================
+
+/// Build partitioned hash tables using full parallel pipeline
+fn buildTablesParallel(
+    comptime K: type,
+    keys: []const K,
+    n_partitions: usize,
+    allocator: Allocator,
+) !struct {
+    tables: []JoinHashTable(K),
+    scatter_indices: []IdxSize,
+    partition_offsets: []usize,
+} {
+    const n = keys.len;
+    const n_threads = n_partitions;
+
+    // ========================================================================
+    // Step 1: Parallel count partition sizes
+    // ========================================================================
+
+    const per_thread_counts = try allocator.alloc([]usize, n_threads);
+    defer allocator.free(per_thread_counts);
+
+    for (0..n_threads) |t| {
+        per_thread_counts[t] = try allocator.alloc(usize, n_partitions);
+        @memset(per_thread_counts[t], 0);
+    }
+    defer {
+        for (0..n_threads) |t| {
+            allocator.free(per_thread_counts[t]);
+        }
+    }
+
+    const chunk_size = (n + n_threads - 1) / n_threads;
+
+    const CountCtx = struct {
+        keys: []const K,
+        per_thread_counts: [][]usize,
+        chunk_size: usize,
+        n_partitions: usize,
+        n: usize,
+    };
+
+    var count_ctx = CountCtx{
+        .keys = keys,
+        .per_thread_counts = per_thread_counts,
+        .chunk_size = chunk_size,
+        .n_partitions = n_partitions,
+        .n = n,
+    };
+
+    blitz.parallelFor(n_threads, *CountCtx, &count_ctx, struct {
+        fn count(ctx: *CountCtx, start_t: usize, end_t: usize) void {
+            for (start_t..end_t) |t| {
+                const key_start = t * ctx.chunk_size;
+                const key_end = @min(key_start + ctx.chunk_size, ctx.n);
+                const counts = ctx.per_thread_counts[t];
+
+                for (ctx.keys[key_start..key_end]) |key| {
+                    const hash = computeHash(K, key);
+                    const p = hashToPartition(hash, ctx.n_partitions);
+                    counts[p] += 1;
+                }
+            }
+        }
+    }.count);
+
+    // ========================================================================
+    // Step 2: Compute 2D offset table
+    // ========================================================================
+
+    const per_thread_offsets = try allocator.alloc(usize, n_threads * n_partitions);
+    defer allocator.free(per_thread_offsets);
+
+    const partition_offsets = try allocator.alloc(usize, n_partitions + 1);
+    errdefer allocator.free(partition_offsets);
+
+    var cum_offset: usize = 0;
+    for (0..n_partitions) |p| {
+        partition_offsets[p] = cum_offset;
+        for (0..n_threads) |t| {
+            per_thread_offsets[t * n_partitions + p] = cum_offset;
+            cum_offset += per_thread_counts[t][p];
+        }
+    }
+    partition_offsets[n_partitions] = cum_offset;
+
+    // ========================================================================
+    // Step 3: Parallel scatter using SyncPtr
+    // ========================================================================
+
+    const scatter_keys = try allocator.alloc(K, n);
+    errdefer allocator.free(scatter_keys);
+
+    const scatter_indices = try allocator.alloc(IdxSize, n);
+    errdefer allocator.free(scatter_indices);
+
+    const thread_offsets_copy = try allocator.alloc(usize, n_threads * n_partitions);
+    defer allocator.free(thread_offsets_copy);
+    @memcpy(thread_offsets_copy, per_thread_offsets);
+
+    const keys_ptr = blitz.SyncPtr(K).init(scatter_keys);
+    const indices_ptr = blitz.SyncPtr(IdxSize).init(scatter_indices);
+
+    const ScatterCtx = struct {
+        keys: []const K,
+        keys_ptr: blitz.SyncPtr(K),
+        indices_ptr: blitz.SyncPtr(IdxSize),
+        thread_offsets: []usize,
+        chunk_size: usize,
+        n_partitions: usize,
+        n: usize,
+    };
+
+    var scatter_ctx = ScatterCtx{
+        .keys = keys,
+        .keys_ptr = keys_ptr,
+        .indices_ptr = indices_ptr,
+        .thread_offsets = thread_offsets_copy,
+        .chunk_size = chunk_size,
+        .n_partitions = n_partitions,
+        .n = n,
+    };
+
+    blitz.parallelFor(n_threads, *ScatterCtx, &scatter_ctx, struct {
+        fn scatter(ctx: *ScatterCtx, start_t: usize, end_t: usize) void {
+            for (start_t..end_t) |t| {
+                const key_start = t * ctx.chunk_size;
+                const key_end = @min(key_start + ctx.chunk_size, ctx.n);
+                const offsets = ctx.thread_offsets[t * ctx.n_partitions .. (t + 1) * ctx.n_partitions];
+
+                for (key_start..key_end) |i| {
+                    const key = ctx.keys[i];
+                    const hash = computeHash(K, key);
+                    const p = hashToPartition(hash, ctx.n_partitions);
+                    const off = offsets[p];
+
+                    ctx.keys_ptr.writeAt(off, key);
+                    ctx.indices_ptr.writeAt(off, @intCast(i));
+                    offsets[p] = off + 1;
+                }
+            }
+        }
+    }.scatter);
+
+    defer allocator.free(scatter_keys);
+
+    // ========================================================================
+    // Step 4: Parallel build hash tables
+    // ========================================================================
+
+    const tables = try allocator.alloc(JoinHashTable(K), n_partitions);
+    errdefer {
+        for (tables) |*t| {
+            var it = t.iterator();
+            while (it.next()) |entry| {
+                var vec = &entry.value;
+                vec.deinit();
+            }
             t.deinit();
         }
-        self.allocator.free(self.tables);
+        allocator.free(tables);
     }
 
-    /// Get the table for a given key
-    pub inline fn getTable(self: *Self, key: i64) *JoinSwissTable {
-        const h = dirtyHash(key);
-        const partition = hashToPartition(h, self.num_partitions);
-        return &self.tables[partition];
+    for (tables) |*t| {
+        t.* = JoinHashTable(K).init(allocator);
     }
 
-    /// Get the table (const) for a given key
-    pub inline fn getTableConst(self: *const Self, key: i64) *const JoinSwissTable {
-        const h = dirtyHash(key);
-        const partition = hashToPartition(h, self.num_partitions);
-        return &self.tables[partition];
-    }
+    const BuildCtx = struct {
+        tables: []JoinHashTable(K),
+        scatter_keys: []const K,
+        scatter_indices: []const IdxSize,
+        partition_offsets: []const usize,
+        allocator: Allocator,
+        had_error: bool = false,
+    };
 
-    /// Probe for a key across partitions
-    pub inline fn probe(self: *const Self, key: i64) ?[]const i32 {
-        const table = self.getTableConst(key);
-        return table.probe(key);
-    }
-};
+    var build_ctx = BuildCtx{
+        .tables = tables,
+        .scatter_keys = scatter_keys,
+        .scatter_indices = scatter_indices,
+        .partition_offsets = partition_offsets,
+        .allocator = allocator,
+    };
 
-// ============================================================================
-// Utility Functions
-// ============================================================================
+    blitz.parallelFor(n_partitions, *BuildCtx, &build_ctx, struct {
+        fn build(ctx: *BuildCtx, start_p: usize, end_p: usize) void {
+            for (start_p..end_p) |p| {
+                const p_start = ctx.partition_offsets[p];
+                const p_end = ctx.partition_offsets[p + 1];
 
-/// Check if an i64 array is sorted in ascending order
-pub fn isSortedI64(data: []const i64) bool {
-    if (data.len <= 1) return true;
-    for (0..data.len - 1) |i| {
-        if (data[i] > data[i + 1]) return false;
-    }
-    return true;
-}
+                for (p_start..p_end) |i| {
+                    const key = ctx.scatter_keys[i];
+                    const idx = ctx.scatter_indices[i];
 
-// ============================================================================
-// Single-Threaded Join Implementations
-// ============================================================================
-
-/// Inner join using Swiss Table - single-threaded
-/// Single-pass probe with growable output
-pub fn innerJoinSwiss(
-    allocator: std.mem.Allocator,
-    left_keys: []const i64,
-    right_keys: []const i64,
-) !InnerJoinResult {
-    if (left_keys.len == 0 or right_keys.len == 0) {
-        return InnerJoinResult{
-            .left_indices = &[_]i32{},
-            .right_indices = &[_]i32{},
-            .num_matches = 0,
-            .owns_memory = false,
-        };
-    }
-
-    // Build hash table from right side
-    var table = try JoinSwissTable.init(allocator, right_keys.len);
-    defer table.deinit();
-
-    for (right_keys, 0..) |key, i| {
-        try table.insertOrAppend(key, @intCast(i));
-    }
-
-    // Single-pass probe with growable output
-    // Estimate: assume ~1 match per left row on average
-    var capacity: usize = left_keys.len;
-    var left_out = try allocator.alloc(i32, capacity);
-    errdefer allocator.free(left_out);
-    var right_out = try allocator.alloc(i32, capacity);
-    errdefer allocator.free(right_out);
-
-    var idx: usize = 0;
-    const prefetch_distance: usize = 8;
-
-    for (left_keys, 0..) |left_key, left_idx| {
-        // Prefetch ahead
-        if (left_idx + prefetch_distance < left_keys.len) {
-            const future_key = left_keys[left_idx + prefetch_distance];
-            _ = table.getWithPrefetch(left_key, future_key);
-        }
-
-        if (table.probe(left_key)) |right_indices| {
-            // Ensure capacity
-            const needed = idx + right_indices.len;
-            if (needed > capacity) {
-                capacity = @max(capacity * 2, needed);
-                left_out = try allocator.realloc(left_out, capacity);
-                right_out = try allocator.realloc(right_out, capacity);
-            }
-
-            // Write matches
-            const li: i32 = @intCast(left_idx);
-            for (right_indices) |ri| {
-                left_out[idx] = li;
-                right_out[idx] = ri;
-                idx += 1;
+                    const entry_vec = ctx.tables[p].getOrInsertDefault(key, IdxVec4.init()) catch {
+                        ctx.had_error = true;
+                        return;
+                    };
+                    entry_vec.push(ctx.allocator, idx) catch {
+                        ctx.had_error = true;
+                        return;
+                    };
+                }
             }
         }
+    }.build);
+
+    if (build_ctx.had_error) {
+        return error.OutOfMemory;
     }
 
-    // Shrink to exact size
-    const final_left = if (idx < capacity and idx > 0) try allocator.realloc(left_out, idx) else left_out;
-    const final_right = if (idx < capacity and idx > 0) try allocator.realloc(right_out, idx) else right_out;
-
-    if (idx == 0) {
-        allocator.free(left_out);
-        allocator.free(right_out);
-        return InnerJoinResult{
-            .left_indices = &[_]i32{},
-            .right_indices = &[_]i32{},
-            .num_matches = 0,
-            .owns_memory = false,
-        };
-    }
-
-    return InnerJoinResult{
-        .left_indices = final_left,
-        .right_indices = final_right,
-        .num_matches = idx,
-        .owns_memory = true,
+    return .{
+        .tables = tables,
+        .scatter_indices = scatter_indices,
+        .partition_offsets = partition_offsets,
     };
 }
 
-/// Left join using Swiss Table - single-threaded
-/// Single-pass probe with growable output
-pub fn leftJoinSwiss(
-    allocator: std.mem.Allocator,
-    left_keys: []const i64,
-    right_keys: []const i64,
-) !LeftJoinResult {
-    if (left_keys.len == 0) {
-        return LeftJoinResult{
-            .left_indices = &[_]i32{},
-            .right_indices = &[_]i32{},
-            .num_rows = 0,
-            .owns_memory = false,
-        };
-    }
-
-    // Build hash table from right side
-    var table = try JoinSwissTable.init(allocator, @max(right_keys.len, 16));
-    defer table.deinit();
-
-    for (right_keys, 0..) |key, i| {
-        try table.insertOrAppend(key, @intCast(i));
-    }
-
-    // Single-pass probe with growable output
-    // Left join produces at least left_keys.len rows
-    var capacity: usize = left_keys.len;
-    var left_out = try allocator.alloc(i32, capacity);
-    errdefer allocator.free(left_out);
-    var right_out = try allocator.alloc(i32, capacity);
-    errdefer allocator.free(right_out);
-
-    var idx: usize = 0;
-    const prefetch_distance: usize = 8;
-
-    for (left_keys, 0..) |left_key, left_idx| {
-        // Prefetch ahead
-        if (left_idx + prefetch_distance < left_keys.len) {
-            const future_key = left_keys[left_idx + prefetch_distance];
-            _ = table.getWithPrefetch(left_key, future_key);
+/// Free hash tables and their IdxVec values
+fn freeTables(comptime K: type, tables: []JoinHashTable(K), allocator: Allocator) void {
+    for (tables) |*t| {
+        var it = t.iterator();
+        while (it.next()) |entry| {
+            var vec = &entry.value;
+            vec.deinit();
         }
-
-        const li: i32 = @intCast(left_idx);
-
-        if (table.probe(left_key)) |right_indices| {
-            // Ensure capacity
-            const needed = idx + right_indices.len;
-            if (needed > capacity) {
-                capacity = @max(capacity * 2, needed);
-                left_out = try allocator.realloc(left_out, capacity);
-                right_out = try allocator.realloc(right_out, capacity);
-            }
-
-            // Write matches
-            for (right_indices) |ri| {
-                left_out[idx] = li;
-                right_out[idx] = ri;
-                idx += 1;
-            }
-        } else {
-            // No match - emit -1 (null indicator)
-            if (idx >= capacity) {
-                capacity = capacity * 2;
-                left_out = try allocator.realloc(left_out, capacity);
-                right_out = try allocator.realloc(right_out, capacity);
-            }
-            left_out[idx] = li;
-            right_out[idx] = -1;
-            idx += 1;
-        }
+        t.deinit();
     }
-
-    // Shrink to exact size
-    const final_left = if (idx < capacity) try allocator.realloc(left_out, idx) else left_out;
-    const final_right = if (idx < capacity) try allocator.realloc(right_out, idx) else right_out;
-
-    return LeftJoinResult{
-        .left_indices = final_left,
-        .right_indices = final_right,
-        .num_rows = idx,
-        .owns_memory = true,
-    };
+    allocator.free(tables);
 }
 
 // ============================================================================
-// Parallel Build
+// Parallel PROBE Phase (Polars-style)
 // ============================================================================
 
-/// Build context for parallel table construction
-const BuildContext = struct {
-    keys: []const i64,
-    tables: *PartitionedJoinTables,
-    start: usize,
-    end: usize,
-    err: ?anyerror = null,
+/// Thread-local probe results
+const ThreadResults = struct {
+    left: std.ArrayListUnmanaged(IdxSize),
+    right: std.ArrayListUnmanaged(IdxSize),
+
+    fn init() ThreadResults {
+        return .{ .left = .{}, .right = .{} };
+    }
+
+    fn deinit(self: *ThreadResults, allocator: Allocator) void {
+        self.left.deinit(allocator);
+        self.right.deinit(allocator);
+    }
 };
 
-/// Worker function for parallel build
-fn buildWorker(ctx: *BuildContext) void {
-    for (ctx.start..ctx.end) |i| {
-        const key = ctx.keys[i];
-        const table = ctx.tables.getTable(key);
-        table.insertOrAppend(key, @intCast(i)) catch |e| {
-            ctx.err = e;
-            return;
-        };
-    }
-}
-
-/// Build partitioned tables in parallel
-pub fn parallelBuildPartitionedTables(
-    allocator: std.mem.Allocator,
-    keys: []const i64,
-    num_partitions: usize,
-) !PartitionedJoinTables {
-    const estimated_per_partition = (keys.len / num_partitions) + 1;
-    var tables = try PartitionedJoinTables.init(allocator, num_partitions, estimated_per_partition);
-    errdefer tables.deinit();
-
-    const num_threads = core.getMaxThreads();
-
-    // For small data or single thread, use sequential build
-    if (keys.len < MIN_PARALLEL_SIZE or num_threads <= 1) {
-        for (keys, 0..) |key, i| {
-            const table = tables.getTable(key);
-            try table.insertOrAppend(key, @intCast(i));
-        }
-        return tables;
-    }
-
-    // Parallel build using thread pool
-    const chunk_size = (keys.len + num_threads - 1) / num_threads;
-    var contexts: [core.MAX_THREADS]BuildContext = undefined;
-    var threads: [core.MAX_THREADS]?std.Thread = [_]?std.Thread{null} ** core.MAX_THREADS;
-
-    const actual_threads = @min(num_threads, (keys.len + chunk_size - 1) / chunk_size);
-
-    // Spawn threads
-    for (0..actual_threads) |t| {
-        const start = t * chunk_size;
-        const end = @min(start + chunk_size, keys.len);
-        if (start >= end) break;
-
-        contexts[t] = BuildContext{
-            .keys = keys,
-            .tables = &tables,
-            .start = start,
-            .end = end,
-        };
-
-        threads[t] = try std.Thread.spawn(.{}, buildWorker, .{&contexts[t]});
-    }
-
-    // Wait for all threads
-    var had_error: ?anyerror = null;
-    for (0..actual_threads) |t| {
-        if (threads[t]) |thread| {
-            thread.join();
-            if (contexts[t].err) |e| had_error = e;
-        }
-    }
-
-    if (had_error) |e| return e;
-    return tables;
-}
-
-// ============================================================================
-// Parallel Join Implementations
-// ============================================================================
-
-/// Probe context for parallel inner join
-const InnerProbeContext = struct {
-    left_keys: []const i64,
-    tables: *const PartitionedJoinTables,
-    left_out: []i32,
-    right_out: []i32,
-    start: usize,
-    end: usize,
-    count: usize = 0,
-};
-
-/// Worker for counting phase of parallel inner join
-fn innerCountWorker(ctx: *InnerProbeContext) void {
-    var count: usize = 0;
-    for (ctx.start..ctx.end) |i| {
-        if (ctx.tables.probe(ctx.left_keys[i])) |indices| {
-            count += indices.len;
-        }
-    }
-    ctx.count = count;
-}
-
-/// Worker for writing phase of parallel inner join
-fn innerWriteWorker(ctx: *InnerProbeContext, offset: usize) void {
-    var idx = offset;
-    for (ctx.start..ctx.end) |i| {
-        if (ctx.tables.probe(ctx.left_keys[i])) |indices| {
-            const li: i32 = @intCast(i);
-            for (indices) |ri| {
-                ctx.left_out[idx] = li;
-                ctx.right_out[idx] = ri;
-                idx += 1;
-            }
-        }
-    }
-}
-
-/// Parallel inner join using partitioned Swiss Tables
-pub fn parallelInnerJoinSwiss(
-    allocator: std.mem.Allocator,
-    left_keys: []const i64,
-    right_keys: []const i64,
+fn probeInnerParallel(
+    comptime K: type,
+    probe_keys: []const K,
+    tables: []JoinHashTable(K),
+    n_partitions: usize,
+    allocator: Allocator,
 ) !InnerJoinResult {
-    if (left_keys.len == 0 or right_keys.len == 0) {
-        return InnerJoinResult{
-            .left_indices = &[_]i32{},
-            .right_indices = &[_]i32{},
-            .num_matches = 0,
-            .owns_memory = false,
-        };
+    const n = probe_keys.len;
+    const n_threads = n_partitions;
+    const chunk_size = (n + n_threads - 1) / n_threads;
+
+    const thread_results = try allocator.alloc(ThreadResults, n_threads);
+    defer allocator.free(thread_results);
+
+    for (thread_results) |*r| {
+        r.* = ThreadResults.init();
     }
-
-    const num_threads = core.getMaxThreads();
-
-    // For small data, use single-threaded version
-    if (left_keys.len < MIN_PARALLEL_SIZE and right_keys.len < MIN_PARALLEL_SIZE) {
-        return innerJoinSwiss(allocator, left_keys, right_keys);
-    }
-
-    // Decide build strategy based on right side size
-    const use_partitioned = right_keys.len >= PARTITIONED_BUILD_THRESHOLD;
-    const num_partitions: usize = if (use_partitioned) DEFAULT_NUM_PARTITIONS else 1;
-
-    // Build phase
-    var tables: PartitionedJoinTables = undefined;
-    var single_table: ?JoinSwissTable = null;
-
-    if (use_partitioned) {
-        tables = try parallelBuildPartitionedTables(allocator, right_keys, num_partitions);
-    } else {
-        single_table = try JoinSwissTable.init(allocator, right_keys.len);
-        for (right_keys, 0..) |key, i| {
-            try single_table.?.insertOrAppend(key, @intCast(i));
+    defer {
+        for (thread_results) |*r| {
+            r.deinit(allocator);
         }
-        // Wrap single table in partitioned structure for uniform probing
-        tables = try PartitionedJoinTables.init(allocator, 1, 1);
-        tables.tables[0].deinit();
-        tables.tables[0] = single_table.?;
-        single_table = null;
-    }
-    defer tables.deinit();
-
-    // Parallel probe - count phase
-    const chunk_size = (left_keys.len + num_threads - 1) / num_threads;
-    var contexts: [core.MAX_THREADS]InnerProbeContext = undefined;
-    var threads: [core.MAX_THREADS]?std.Thread = [_]?std.Thread{null} ** core.MAX_THREADS;
-
-    const actual_threads = @min(num_threads, (left_keys.len + chunk_size - 1) / chunk_size);
-
-    // Count phase
-    for (0..actual_threads) |t| {
-        const start = t * chunk_size;
-        const end = @min(start + chunk_size, left_keys.len);
-        if (start >= end) break;
-
-        contexts[t] = InnerProbeContext{
-            .left_keys = left_keys,
-            .tables = &tables,
-            .left_out = &[_]i32{},
-            .right_out = &[_]i32{},
-            .start = start,
-            .end = end,
-        };
-
-        threads[t] = try std.Thread.spawn(.{}, innerCountWorker, .{&contexts[t]});
     }
 
-    // Wait for count phase
-    for (0..actual_threads) |t| {
-        if (threads[t]) |thread| thread.join();
-        threads[t] = null;
+    const ProbeCtx = struct {
+        probe_keys: []const K,
+        tables: []JoinHashTable(K),
+        thread_results: []ThreadResults,
+        chunk_size: usize,
+        n_partitions: usize,
+        n: usize,
+        allocator: Allocator,
+        had_error: bool = false,
+    };
+
+    var probe_ctx = ProbeCtx{
+        .probe_keys = probe_keys,
+        .tables = tables,
+        .thread_results = thread_results,
+        .chunk_size = chunk_size,
+        .n_partitions = n_partitions,
+        .n = n,
+        .allocator = allocator,
+    };
+
+    blitz.parallelFor(n_threads, *ProbeCtx, &probe_ctx, struct {
+        fn probe(ctx: *ProbeCtx, start_t: usize, end_t: usize) void {
+            for (start_t..end_t) |t| {
+                const key_start = t * ctx.chunk_size;
+                const key_end = @min(key_start + ctx.chunk_size, ctx.n);
+                const result = &ctx.thread_results[t];
+
+                result.left.ensureTotalCapacity(ctx.allocator, (key_end - key_start) / 4) catch {
+                    ctx.had_error = true;
+                    return;
+                };
+                result.right.ensureTotalCapacity(ctx.allocator, (key_end - key_start) / 4) catch {
+                    ctx.had_error = true;
+                    return;
+                };
+
+                for (key_start..key_end) |i| {
+                    const key = ctx.probe_keys[i];
+                    const hash = computeHash(K, key);
+                    const p = hashToPartition(hash, ctx.n_partitions);
+
+                    if (ctx.tables[p].getPtr(key)) |match_vec| {
+                        for (match_vec.slice()) |build_idx| {
+                            result.left.append(ctx.allocator, @intCast(i)) catch {
+                                ctx.had_error = true;
+                                return;
+                            };
+                            result.right.append(ctx.allocator, build_idx) catch {
+                                ctx.had_error = true;
+                                return;
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }.probe);
+
+    if (probe_ctx.had_error) {
+        return error.OutOfMemory;
     }
 
-    // Calculate total and offsets
+    // Merge results
     var total: usize = 0;
-    var offsets: [core.MAX_THREADS]usize = undefined;
-    for (0..actual_threads) |t| {
-        offsets[t] = total;
-        total += contexts[t].count;
+    for (thread_results) |*r| {
+        total += r.left.items.len;
     }
 
-    if (total == 0) {
-        return InnerJoinResult{
-            .left_indices = &[_]i32{},
-            .right_indices = &[_]i32{},
-            .num_matches = 0,
-            .owns_memory = false,
-        };
-    }
-
-    // Allocate output
-    const left_out = try allocator.alloc(i32, total);
+    const left_out = try allocator.alloc(IdxSize, total);
     errdefer allocator.free(left_out);
-    const right_out = try allocator.alloc(i32, total);
+    const right_out = try allocator.alloc(IdxSize, total);
     errdefer allocator.free(right_out);
 
-    // Write phase
-    for (0..actual_threads) |t| {
-        if (contexts[t].start >= contexts[t].end) continue;
-        contexts[t].left_out = left_out;
-        contexts[t].right_out = right_out;
-        threads[t] = try std.Thread.spawn(.{}, innerWriteWorker, .{ &contexts[t], offsets[t] });
+    const thread_offsets = try allocator.alloc(usize, n_threads);
+    defer allocator.free(thread_offsets);
+
+    var offset: usize = 0;
+    for (0..n_threads) |t| {
+        thread_offsets[t] = offset;
+        offset += thread_results[t].left.items.len;
     }
 
-    // Wait for write phase
-    for (0..actual_threads) |t| {
-        if (threads[t]) |thread| thread.join();
-    }
+    const left_ptr = blitz.SyncPtr(IdxSize).init(left_out);
+    const right_ptr = blitz.SyncPtr(IdxSize).init(right_out);
+
+    const MergeCtx = struct {
+        thread_results: []ThreadResults,
+        thread_offsets: []usize,
+        left_ptr: blitz.SyncPtr(IdxSize),
+        right_ptr: blitz.SyncPtr(IdxSize),
+    };
+
+    var merge_ctx = MergeCtx{
+        .thread_results = thread_results,
+        .thread_offsets = thread_offsets,
+        .left_ptr = left_ptr,
+        .right_ptr = right_ptr,
+    };
+
+    blitz.parallelFor(n_threads, *MergeCtx, &merge_ctx, struct {
+        fn merge(ctx: *MergeCtx, start_t: usize, end_t: usize) void {
+            for (start_t..end_t) |t| {
+                const result = &ctx.thread_results[t];
+                const off = ctx.thread_offsets[t];
+                ctx.left_ptr.copyAt(off, result.left.items);
+                ctx.right_ptr.copyAt(off, result.right.items);
+            }
+        }
+    }.merge);
 
     return InnerJoinResult{
         .left_indices = left_out,
         .right_indices = right_out,
-        .num_matches = total,
-        .owns_memory = true,
+        .allocator = allocator,
     };
 }
 
-/// Probe context for parallel left join
-const LeftProbeContext = struct {
-    left_keys: []const i64,
-    tables: *const PartitionedJoinTables,
-    left_out: []i32,
-    right_out: []i32, // -1 indicates null (no match)
-    start: usize,
-    end: usize,
-    count: usize = 0,
-};
-
-/// Worker for counting phase of parallel left join
-fn leftCountWorker(ctx: *LeftProbeContext) void {
-    var count: usize = 0;
-    for (ctx.start..ctx.end) |i| {
-        if (ctx.tables.probe(ctx.left_keys[i])) |indices| {
-            count += indices.len;
-        } else {
-            count += 1; // null match
-        }
-    }
-    ctx.count = count;
-}
-
-/// Worker for writing phase of parallel left join
-fn leftWriteWorker(ctx: *LeftProbeContext, offset: usize) void {
-    var idx = offset;
-    for (ctx.start..ctx.end) |i| {
-        const li: i32 = @intCast(i);
-        if (ctx.tables.probe(ctx.left_keys[i])) |indices| {
-            for (indices) |ri| {
-                ctx.left_out[idx] = li;
-                ctx.right_out[idx] = ri;
-                idx += 1;
-            }
-        } else {
-            ctx.left_out[idx] = li;
-            ctx.right_out[idx] = -1; // null indicator
-            idx += 1;
-        }
-    }
-}
-
-/// Parallel left join using partitioned Swiss Tables
-pub fn parallelLeftJoinSwiss(
-    allocator: std.mem.Allocator,
-    left_keys: []const i64,
-    right_keys: []const i64,
+fn probeLeftParallel(
+    comptime K: type,
+    probe_keys: []const K,
+    tables: []JoinHashTable(K),
+    n_partitions: usize,
+    allocator: Allocator,
 ) !LeftJoinResult {
-    if (left_keys.len == 0) {
-        return LeftJoinResult{
-            .left_indices = &[_]i32{},
-            .right_indices = &[_]i32{},
-            .num_rows = 0,
-            .owns_memory = false,
-        };
+    const n = probe_keys.len;
+    const n_threads = n_partitions;
+    const chunk_size = (n + n_threads - 1) / n_threads;
+
+    const thread_results = try allocator.alloc(ThreadResults, n_threads);
+    defer allocator.free(thread_results);
+
+    for (thread_results) |*r| {
+        r.* = ThreadResults.init();
     }
-
-    const num_threads = core.getMaxThreads();
-
-    // For small data, use single-threaded version
-    if (left_keys.len < MIN_PARALLEL_SIZE and right_keys.len < MIN_PARALLEL_SIZE) {
-        return leftJoinSwiss(allocator, left_keys, right_keys);
-    }
-
-    // Decide build strategy based on right side size
-    const use_partitioned = right_keys.len >= PARTITIONED_BUILD_THRESHOLD;
-    const num_partitions: usize = if (use_partitioned) DEFAULT_NUM_PARTITIONS else 1;
-
-    // Build phase
-    var tables: PartitionedJoinTables = undefined;
-    var single_table: ?JoinSwissTable = null;
-
-    if (use_partitioned) {
-        tables = try parallelBuildPartitionedTables(allocator, right_keys, num_partitions);
-    } else {
-        single_table = try JoinSwissTable.init(allocator, @max(right_keys.len, 16));
-        for (right_keys, 0..) |key, i| {
-            try single_table.?.insertOrAppend(key, @intCast(i));
+    defer {
+        for (thread_results) |*r| {
+            r.deinit(allocator);
         }
-        // Wrap single table in partitioned structure for uniform probing
-        tables = try PartitionedJoinTables.init(allocator, 1, 1);
-        tables.tables[0].deinit();
-        tables.tables[0] = single_table.?;
-        single_table = null;
-    }
-    defer tables.deinit();
-
-    // Parallel probe - count phase
-    const chunk_size = (left_keys.len + num_threads - 1) / num_threads;
-    var contexts: [core.MAX_THREADS]LeftProbeContext = undefined;
-    var threads: [core.MAX_THREADS]?std.Thread = [_]?std.Thread{null} ** core.MAX_THREADS;
-
-    const actual_threads = @min(num_threads, (left_keys.len + chunk_size - 1) / chunk_size);
-
-    // Count phase
-    for (0..actual_threads) |t| {
-        const start = t * chunk_size;
-        const end = @min(start + chunk_size, left_keys.len);
-        if (start >= end) break;
-
-        contexts[t] = LeftProbeContext{
-            .left_keys = left_keys,
-            .tables = &tables,
-            .left_out = &[_]i32{},
-            .right_out = &[_]i32{},
-            .start = start,
-            .end = end,
-        };
-
-        threads[t] = try std.Thread.spawn(.{}, leftCountWorker, .{&contexts[t]});
     }
 
-    // Wait for count phase
-    for (0..actual_threads) |t| {
-        if (threads[t]) |thread| thread.join();
-        threads[t] = null;
+    const ProbeCtx = struct {
+        probe_keys: []const K,
+        tables: []JoinHashTable(K),
+        thread_results: []ThreadResults,
+        chunk_size: usize,
+        n_partitions: usize,
+        n: usize,
+        allocator: Allocator,
+        had_error: bool = false,
+    };
+
+    var probe_ctx = ProbeCtx{
+        .probe_keys = probe_keys,
+        .tables = tables,
+        .thread_results = thread_results,
+        .chunk_size = chunk_size,
+        .n_partitions = n_partitions,
+        .n = n,
+        .allocator = allocator,
+    };
+
+    blitz.parallelFor(n_threads, *ProbeCtx, &probe_ctx, struct {
+        fn probe(ctx: *ProbeCtx, start_t: usize, end_t: usize) void {
+            for (start_t..end_t) |t| {
+                const key_start = t * ctx.chunk_size;
+                const key_end = @min(key_start + ctx.chunk_size, ctx.n);
+                const result = &ctx.thread_results[t];
+
+                result.left.ensureTotalCapacity(ctx.allocator, key_end - key_start) catch {
+                    ctx.had_error = true;
+                    return;
+                };
+                result.right.ensureTotalCapacity(ctx.allocator, key_end - key_start) catch {
+                    ctx.had_error = true;
+                    return;
+                };
+
+                for (key_start..key_end) |i| {
+                    const key = ctx.probe_keys[i];
+                    const hash = computeHash(K, key);
+                    const p = hashToPartition(hash, ctx.n_partitions);
+
+                    if (ctx.tables[p].getPtr(key)) |match_vec| {
+                        for (match_vec.slice()) |build_idx| {
+                            result.left.append(ctx.allocator, @intCast(i)) catch {
+                                ctx.had_error = true;
+                                return;
+                            };
+                            result.right.append(ctx.allocator, build_idx) catch {
+                                ctx.had_error = true;
+                                return;
+                            };
+                        }
+                    } else {
+                        result.left.append(ctx.allocator, @intCast(i)) catch {
+                            ctx.had_error = true;
+                            return;
+                        };
+                        result.right.append(ctx.allocator, NULL_IDX) catch {
+                            ctx.had_error = true;
+                            return;
+                        };
+                    }
+                }
+            }
+        }
+    }.probe);
+
+    if (probe_ctx.had_error) {
+        return error.OutOfMemory;
     }
 
-    // Calculate total and offsets
+    // Merge results
     var total: usize = 0;
-    var offsets: [core.MAX_THREADS]usize = undefined;
-    for (0..actual_threads) |t| {
-        offsets[t] = total;
-        total += contexts[t].count;
+    for (thread_results) |*r| {
+        total += r.left.items.len;
     }
 
-    // Allocate output
-    const left_out = try allocator.alloc(i32, total);
+    const left_out = try allocator.alloc(IdxSize, total);
     errdefer allocator.free(left_out);
-    const right_out = try allocator.alloc(i32, total);
+    const right_out = try allocator.alloc(IdxSize, total);
     errdefer allocator.free(right_out);
 
-    // Write phase
-    for (0..actual_threads) |t| {
-        if (contexts[t].start >= contexts[t].end) continue;
-        contexts[t].left_out = left_out;
-        contexts[t].right_out = right_out;
-        threads[t] = try std.Thread.spawn(.{}, leftWriteWorker, .{ &contexts[t], offsets[t] });
+    const thread_offsets = try allocator.alloc(usize, n_threads);
+    defer allocator.free(thread_offsets);
+
+    var offset: usize = 0;
+    for (0..n_threads) |t| {
+        thread_offsets[t] = offset;
+        offset += thread_results[t].left.items.len;
     }
 
-    // Wait for write phase
-    for (0..actual_threads) |t| {
-        if (threads[t]) |thread| thread.join();
-    }
+    const left_ptr = blitz.SyncPtr(IdxSize).init(left_out);
+    const right_ptr = blitz.SyncPtr(IdxSize).init(right_out);
+
+    const MergeCtx = struct {
+        thread_results: []ThreadResults,
+        thread_offsets: []usize,
+        left_ptr: blitz.SyncPtr(IdxSize),
+        right_ptr: blitz.SyncPtr(IdxSize),
+    };
+
+    var merge_ctx = MergeCtx{
+        .thread_results = thread_results,
+        .thread_offsets = thread_offsets,
+        .left_ptr = left_ptr,
+        .right_ptr = right_ptr,
+    };
+
+    blitz.parallelFor(n_threads, *MergeCtx, &merge_ctx, struct {
+        fn merge(ctx: *MergeCtx, start_t: usize, end_t: usize) void {
+            for (start_t..end_t) |t| {
+                const result = &ctx.thread_results[t];
+                const off = ctx.thread_offsets[t];
+                ctx.left_ptr.copyAt(off, result.left.items);
+                ctx.right_ptr.copyAt(off, result.right.items);
+            }
+        }
+    }.merge);
 
     return LeftJoinResult{
         .left_indices = left_out,
         .right_indices = right_out,
-        .num_rows = total,
-        .owns_memory = true,
+        .allocator = allocator,
     };
 }
 
 // ============================================================================
-// Legacy API Wrappers
+// Parallel Join Entry Points
 // ============================================================================
 
-/// Inner join - legacy API (delegates to Swiss Table implementation)
-pub fn innerJoinI64(
-    allocator: std.mem.Allocator,
-    left_keys: []const i64,
-    right_keys: []const i64,
+fn innerJoinParallel(
+    comptime K: type,
+    build_keys: []const K,
+    probe_keys: []const K,
+    allocator: Allocator,
 ) !InnerJoinResult {
-    return innerJoinSwiss(allocator, left_keys, right_keys);
+    const n_partitions = getNumThreads();
+
+    const build_result = try buildTablesParallel(K, build_keys, n_partitions, allocator);
+    defer freeTables(K, build_result.tables, allocator);
+    defer allocator.free(build_result.scatter_indices);
+    defer allocator.free(build_result.partition_offsets);
+
+    return probeInnerParallel(K, probe_keys, build_result.tables, n_partitions, allocator);
 }
 
-/// Left join - legacy API (delegates to Swiss Table implementation)
-pub fn leftJoinI64(
-    allocator: std.mem.Allocator,
-    left_keys: []const i64,
-    right_keys: []const i64,
+fn leftJoinParallel(
+    comptime K: type,
+    build_keys: []const K,
+    probe_keys: []const K,
+    allocator: Allocator,
 ) !LeftJoinResult {
-    return leftJoinSwiss(allocator, left_keys, right_keys);
+    const n_partitions = getNumThreads();
+
+    const build_result = try buildTablesParallel(K, build_keys, n_partitions, allocator);
+    defer freeTables(K, build_result.tables, allocator);
+    defer allocator.free(build_result.scatter_indices);
+    defer allocator.free(build_result.partition_offsets);
+
+    return probeLeftParallel(K, probe_keys, build_result.tables, n_partitions, allocator);
 }
 
-/// Parallel inner join - legacy API
-pub fn parallelInnerJoinI64(
-    allocator: std.mem.Allocator,
-    left_keys: []const i64,
-    right_keys: []const i64,
+// ============================================================================
+// Public API
+// ============================================================================
+
+pub fn innerJoin(
+    comptime K: type,
+    left_keys: []const K,
+    right_keys: []const K,
+    allocator: Allocator,
 ) !InnerJoinResult {
-    return parallelInnerJoinSwiss(allocator, left_keys, right_keys);
+    // Build on smaller relation
+    const swapped = right_keys.len > left_keys.len;
+    const build_keys = if (swapped) left_keys else right_keys;
+    const probe_keys = if (swapped) right_keys else left_keys;
+
+    var result = if (shouldParallelize(build_keys.len + probe_keys.len))
+        try innerJoinParallel(K, build_keys, probe_keys, allocator)
+    else
+        try innerJoinSequential(K, build_keys, probe_keys, allocator);
+
+    if (swapped) {
+        const tmp = result.left_indices;
+        result.left_indices = result.right_indices;
+        result.right_indices = tmp;
+    }
+
+    return result;
 }
 
-/// Parallel left join - legacy API
-pub fn parallelLeftJoinI64(
-    allocator: std.mem.Allocator,
-    left_keys: []const i64,
-    right_keys: []const i64,
+pub fn leftJoin(
+    comptime K: type,
+    left_keys: []const K,
+    right_keys: []const K,
+    allocator: Allocator,
 ) !LeftJoinResult {
-    return parallelLeftJoinSwiss(allocator, left_keys, right_keys);
+    // For left join, always build on right
+    if (shouldParallelize(right_keys.len + left_keys.len)) {
+        return leftJoinParallel(K, right_keys, left_keys, allocator);
+    }
+    return leftJoinSequential(K, right_keys, left_keys, allocator);
+}
+
+pub fn rightJoin(
+    comptime K: type,
+    left_keys: []const K,
+    right_keys: []const K,
+    allocator: Allocator,
+) !LeftJoinResult {
+    var result = try leftJoin(K, right_keys, left_keys, allocator);
+    const tmp = result.left_indices;
+    result.left_indices = result.right_indices;
+    result.right_indices = tmp;
+    return result;
+}
+
+pub fn initParallel() !void {
+    try blitz.init();
+}
+
+pub fn deinitParallel() void {
+    blitz.deinit();
+}
+
+pub fn isParallelInitialized() bool {
+    return blitz.isInitialized();
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-test "inner join - basic" {
+test "innerJoin - basic" {
     const allocator = std.testing.allocator;
 
     const left = [_]i64{ 1, 2, 3, 4, 5 };
-    const right = [_]i64{ 2, 4, 6 };
+    const right = [_]i64{ 3, 4, 5, 6, 7 };
 
-    var result = try innerJoinSwiss(allocator, &left, &right);
-    defer result.deinit(allocator);
+    var result = try innerJoin(i64, &left, &right, allocator);
+    defer result.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), result.num_matches);
-}
+    try std.testing.expectEqual(@as(usize, 3), result.len());
 
-test "inner join - empty" {
-    const allocator = std.testing.allocator;
-
-    const left = [_]i64{ 1, 2, 3 };
-    const right = [_]i64{};
-
-    var result = try innerJoinSwiss(allocator, &left, &right);
-    defer result.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 0), result.num_matches);
-}
-
-test "inner join - duplicates" {
-    const allocator = std.testing.allocator;
-
-    const left = [_]i64{ 1, 1, 2 };
-    const right = [_]i64{ 1, 1, 1 };
-
-    var result = try innerJoinSwiss(allocator, &left, &right);
-    defer result.deinit(allocator);
-
-    // Each left 1 matches 3 right 1s = 6 total
-    try std.testing.expectEqual(@as(usize, 6), result.num_matches);
-}
-
-test "left join - basic" {
-    const allocator = std.testing.allocator;
-
-    const left = [_]i64{ 1, 2, 3, 4, 5 };
-    const right = [_]i64{ 2, 4, 6 };
-
-    var result = try leftJoinSwiss(allocator, &left, &right);
-    defer result.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 5), result.num_rows);
-
-    // Check nulls (-1) for non-matching keys
-    var null_count: usize = 0;
-    for (result.right_indices[0..result.num_rows]) |ri| {
-        if (ri == -1) null_count += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 3), null_count);
-}
-
-test "left join - empty right" {
-    const allocator = std.testing.allocator;
-
-    const left = [_]i64{ 1, 2, 3 };
-    const right = [_]i64{};
-
-    var result = try leftJoinSwiss(allocator, &left, &right);
-    defer result.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 3), result.num_rows);
-
-    // All should be -1 (null indicator)
-    for (result.right_indices[0..result.num_rows]) |ri| {
-        try std.testing.expect(ri == -1);
+    for (0..result.len()) |i| {
+        const l_idx: usize = @intCast(result.left_indices[i]);
+        const r_idx: usize = @intCast(result.right_indices[i]);
+        try std.testing.expectEqual(left[l_idx], right[r_idx]);
     }
 }
 
-test "parallel inner join - basic" {
+test "innerJoin - with duplicates" {
+    const allocator = std.testing.allocator;
+
+    const left = [_]i64{ 1, 1, 2, 2 };
+    const right = [_]i64{ 1, 2, 2 };
+
+    var result = try innerJoin(i64, &left, &right, allocator);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 6), result.len());
+}
+
+test "innerJoin - no matches" {
+    const allocator = std.testing.allocator;
+
+    const left = [_]i64{ 1, 2, 3 };
+    const right = [_]i64{ 4, 5, 6 };
+
+    var result = try innerJoin(i64, &left, &right, allocator);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.len());
+}
+
+test "leftJoin - basic" {
     const allocator = std.testing.allocator;
 
     const left = [_]i64{ 1, 2, 3, 4, 5 };
-    const right = [_]i64{ 2, 4, 6 };
+    const right = [_]i64{ 3, 4, 5, 6, 7 };
 
-    var result = try parallelInnerJoinSwiss(allocator, &left, &right);
-    defer result.deinit(allocator);
+    var result = try leftJoin(i64, &left, &right, allocator);
+    defer result.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), result.num_matches);
-}
-
-test "parallel left join - basic" {
-    const allocator = std.testing.allocator;
-
-    const left = [_]i64{ 1, 2, 3, 4, 5 };
-    const right = [_]i64{ 2, 4, 6 };
-
-    var result = try parallelLeftJoinSwiss(allocator, &left, &right);
-    defer result.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 5), result.num_rows);
-}
-
-test "isSortedI64" {
-    try std.testing.expect(isSortedI64(&[_]i64{}));
-    try std.testing.expect(isSortedI64(&[_]i64{1}));
-    try std.testing.expect(isSortedI64(&[_]i64{ 1, 2, 3, 4, 5 }));
-    try std.testing.expect(isSortedI64(&[_]i64{ 1, 1, 2, 2, 3 }));
-    try std.testing.expect(!isSortedI64(&[_]i64{ 1, 3, 2 }));
-    try std.testing.expect(!isSortedI64(&[_]i64{ 5, 4, 3, 2, 1 }));
+    try std.testing.expectEqual(@as(usize, 5), result.len());
 }

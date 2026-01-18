@@ -19,7 +19,6 @@ pub const hashing = @import("hashing.zig");
 pub const gather = @import("gather.zig");
 pub const groupby_agg = @import("groupby_agg.zig");
 pub const sorting = @import("sorting.zig");
-pub const joins = @import("joins.zig");
 
 // Re-export commonly used constants
 pub const VECTOR_WIDTH = core.VECTOR_WIDTH;
@@ -211,30 +210,67 @@ pub const isSortedI64Keys = sorting.isSortedI64Keys;
 pub const gatherF64Parallel = sorting.gatherF64;
 pub const gatherI64Parallel = sorting.gatherI64;
 
-// Re-export join types and functions
-pub const InnerJoinResult = joins.InnerJoinResult;
-pub const LeftJoinResult = joins.LeftJoinResult;
-pub const JoinSwissTable = joins.JoinSwissTable;
-pub const IdxVec = joins.IdxVec;
+// Import joins module (contains join algorithms using Swiss Table)
+pub const joins = @import("joins.zig");
+pub const idx_vec = @import("idx_vec.zig");
 
-// Core join functions
-pub const innerJoinI64 = joins.innerJoinI64;
-pub const leftJoinI64 = joins.leftJoinI64;
-pub const parallelInnerJoinI64 = joins.parallelInnerJoinI64;
-pub const parallelLeftJoinI64 = joins.parallelLeftJoinI64;
+// Re-export Swiss Table from swisstable module (pure data structure)
+pub const swisstable = @import("../swisstable/lib.zig");
+pub const JoinSwissTable = swisstable.Table;
 
-// SwissTable-based joins (SIMD-accelerated)
-pub const innerJoinSwiss = joins.innerJoinSwiss;
-pub const leftJoinSwiss = joins.leftJoinSwiss;
-pub const parallelInnerJoinSwiss = joins.parallelInnerJoinSwiss;
-pub const parallelLeftJoinSwiss = joins.parallelLeftJoinSwiss;
+// Legacy-compatible join result types
+pub const InnerJoinResult = struct {
+    left_indices: []i32,
+    right_indices: []i32,
+    num_matches: usize,
+    owns_memory: bool,
 
-// Partitioned parallel build
-pub const PartitionedJoinTables = joins.PartitionedJoinTables;
-pub const parallelBuildPartitionedTables = joins.parallelBuildPartitionedTables;
+    pub fn deinit(self: *InnerJoinResult, allocator: std.mem.Allocator) void {
+        if (self.owns_memory) {
+            if (self.left_indices.len > 0) allocator.free(self.left_indices);
+            if (self.right_indices.len > 0) allocator.free(self.right_indices);
+        }
+    }
+};
 
-// Utility
-pub const isSortedI64 = joins.isSortedI64;
+pub const LeftJoinResult = struct {
+    left_indices: []i32,
+    right_indices: []i32,
+    num_rows: usize,
+    owns_memory: bool,
+
+    pub fn deinit(self: *LeftJoinResult, allocator: std.mem.Allocator) void {
+        if (self.owns_memory) {
+            if (self.left_indices.len > 0) allocator.free(self.left_indices);
+            if (self.right_indices.len > 0) allocator.free(self.right_indices);
+        }
+    }
+};
+
+// Join functions with legacy signature (allocator, left_keys, right_keys)
+pub fn innerJoinSwiss(allocator: std.mem.Allocator, left_keys: []const i64, right_keys: []const i64) !InnerJoinResult {
+    const result = try joins.innerJoin(i64, left_keys, right_keys, allocator);
+    return InnerJoinResult{
+        .left_indices = result.left_indices,
+        .right_indices = result.right_indices,
+        .num_matches = result.left_indices.len,
+        .owns_memory = true,
+    };
+}
+
+pub fn leftJoinSwiss(allocator: std.mem.Allocator, left_keys: []const i64, right_keys: []const i64) !LeftJoinResult {
+    const result = try joins.leftJoin(i64, left_keys, right_keys, allocator);
+    return LeftJoinResult{
+        .left_indices = result.left_indices,
+        .right_indices = result.right_indices,
+        .num_rows = result.left_indices.len,
+        .owns_memory = true,
+    };
+}
+
+// Parallel join functions (same implementation - they auto-parallelize based on size)
+pub const singlePassParallelInnerJoin = innerJoinSwiss;
+pub const singlePassParallelLeftJoin = leftJoinSwiss;
 
 // ============================================================================
 // Tests - run all submodule tests
@@ -256,4 +292,5 @@ test {
     _ = groupby_agg;
     _ = sorting;
     _ = joins;
+    _ = idx_vec;
 }
