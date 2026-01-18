@@ -60,6 +60,11 @@ pub const deinit = api.deinit;
 pub const isInitialized = api.isInitialized;
 pub const numWorkers = api.numWorkers;
 
+// Runtime configuration
+pub const getGrainSize = api.getGrainSize;
+pub const setGrainSize = api.setGrainSize;
+pub const defaultGrainSize = api.defaultGrainSize;
+
 pub const join = api.join;
 pub const joinVoid = api.joinVoid;
 
@@ -68,12 +73,84 @@ pub const parallelForWithGrain = api.parallelForWithGrain;
 
 pub const parallelReduce = api.parallelReduce;
 pub const parallelReduceWithGrain = api.parallelReduceWithGrain;
+pub const parallelReduceChunked = api.parallelReduceChunked;
+
+// New Polars-parity functions
+pub const parallelCollect = api.parallelCollect;
+pub const parallelCollectWithGrain = api.parallelCollectWithGrain;
+pub const parallelMapInPlace = api.parallelMapInPlace;
+pub const parallelMapInPlaceWithGrain = api.parallelMapInPlaceWithGrain;
+
+pub const parallelFlatten = api.parallelFlatten;
+pub const parallelFlattenWithGrain = api.parallelFlattenWithGrain;
+pub const parallelFlattenWithOffsets = api.parallelFlattenWithOffsets;
+
+pub const parallelScatter = api.parallelScatter;
+
+// Sync primitives for lock-free parallel writes
+pub const SyncPtr = api.SyncPtr;
+pub const computeOffsetsInto = api.computeOffsetsInto;
+pub const capAndOffsets = api.capAndOffsets;
+
+// Also export from sync module directly
+const sync = @import("sync.zig");
 
 // Threshold module for intelligent parallelism decisions
 pub const threshold = @import("threshold.zig");
 pub const OpType = threshold.OpType;
 pub const shouldParallelize = threshold.shouldParallelize;
 pub const isMemoryBound = threshold.isMemoryBound;
+
+// Worker count alias (for internal use)
+pub const getWorkerCount = numWorkers;
+
+// ============================================================================
+// New Rayon-Parity Features
+// ============================================================================
+
+// Parallel iterators (Rayon-style composable iterators)
+pub const iter_mod = @import("iter.zig");
+pub const iter = iter_mod.iter;
+pub const iterMut = iter_mod.iterMut;
+pub const range = iter_mod.range;
+pub const ParIter = iter_mod.ParIter;
+pub const ParIterMut = iter_mod.ParIterMut;
+pub const RangeIter = iter_mod.RangeIter;
+
+// Scope-based parallelism (spawn arbitrary tasks)
+pub const scope_mod = @import("scope.zig");
+pub const scope = scope_mod.scope;
+pub const scopeWithContext = scope_mod.scopeWithContext;
+pub const Scope = scope_mod.Scope;
+pub const join2 = scope_mod.join2;
+pub const join3 = scope_mod.join3;
+pub const joinN = scope_mod.joinN;
+pub const parallelForRange = scope_mod.parallelForRange;
+pub const parallelForRangeWithContext = scope_mod.parallelForRangeWithContext;
+
+// Parallel algorithms
+pub const algorithms = @import("algorithms.zig");
+pub const parallelSort = algorithms.parallelSort;
+pub const parallelSortBy = algorithms.parallelSortBy;
+pub const parallelScan = algorithms.parallelScan;
+pub const parallelScanExclusive = algorithms.parallelScanExclusive;
+pub const parallelFind = algorithms.parallelFind;
+pub const parallelFindValue = algorithms.parallelFindValue;
+pub const parallelPartition = algorithms.parallelPartition;
+
+// SIMD-optimized aggregations (parallel + vectorized)
+pub const simd_mod = @import("simd.zig");
+pub const simdSum = simd_mod.sum;
+pub const simdMin = simd_mod.min;
+pub const simdMax = simd_mod.max;
+pub const parallelSumSimd = simd_mod.parallelSum;
+pub const parallelMinSimd = simd_mod.parallelMin;
+pub const parallelMaxSimd = simd_mod.parallelMax;
+
+// SIMD parallel threshold (dynamic calculation based on worker count and operation cost)
+pub const calculateParallelThreshold = simd_mod.calculateParallelThreshold;
+pub const shouldParallelizeSimd = simd_mod.shouldParallelizeSimd;
+pub const getParallelThreshold = simd_mod.getParallelThreshold;
 
 // ============================================================================
 // Tests
@@ -86,6 +163,12 @@ test "blitz - all modules compile" {
     _ = @import("worker.zig");
     _ = @import("pool.zig");
     _ = @import("api.zig");
+    _ = @import("sync.zig");
+    _ = @import("threshold.zig");
+    _ = @import("iter.zig");
+    _ = @import("scope.zig");
+    _ = @import("algorithms.zig");
+    _ = @import("simd.zig");
 }
 
 test "blitz - basic parallel for" {
